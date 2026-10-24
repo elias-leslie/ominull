@@ -152,8 +152,6 @@ type ResponseAuthorityStatus struct {
 	AuthenticatorsCount int       `json:"authenticators_count"`
 	ActiveSessions      int       `json:"active_sessions"`
 	StartedAt           time.Time `json:"started_at"`
-	OwnerApprovers      int       `json:"owner_approvers"`
-	OwnerApproverNote   string    `json:"owner_approver_note,omitempty"`
 }
 
 // RecoveryToken represents a single-use root-issued token for emergency authenticator enrollment.

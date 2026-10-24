@@ -627,236 +627,6 @@
     return Array.isArray(v) ? v : [];
   }
 
-  /* ---------------------------------------------------- owner approval */
-
-  /* approval-core:start
-     Isolation, release, mesh quarantine, agent updates and terminal shells
-     wait for the owner. The hub answers the first POST with 202 and an
-     approval id, the owner approves on their phone with one passkey tap, and
-     the identical body is sent again with X-Approval-ID. The hub checks the
-     body against what was approved, so nothing here can widen it. This block
-     has no DOM in it: web_tests/approval-flow.test.cjs runs it in a VM. */
-  var APPROVAL_POLL_WAIT_S = 12;
-  var APPROVAL_TEXT = {
-    denied: "Denied on your phone. Nothing was changed.",
-    expired: "The approval request expired before it was approved. Nothing was changed.",
-    consumed: "That approval was already used. Request it again.",
-    cancelled: "Stopped waiting. The request on your phone expires on its own; approving it now does nothing.",
-    gone: "The hub no longer knows this approval request. Nothing was changed."
-  };
-
-  function approvalError(st, info) {
-    var e = new Error(APPROVAL_TEXT[st] || ("Approval " + st + ". Nothing was changed."));
-    e.approvalState = st;
-    e.approval = info;
-    e.handled = true;
-    return e;
-  }
-
-  /* deps.post(headers) -> Promise<{status, body}>; deps.poll(id) ->
-     Promise<{state, expires_at}>; deps.sleep(ms) -> Promise; deps.now();
-     deps.cancelled() -> bool; deps.onState(info). Resolves with the success
-     body, rejects with the hub's error or an approvalError. Never re-posts a
-     denied, expired or used approval. */
-  function approvalFlow(deps) {
-    return deps.post({}).then(function (first) {
-      var b = first && first.body;
-      if (!first || first.status !== 202 || !b || !b.approval_id) return b;
-      var info = { id: String(b.approval_id), state: "pending", summary: b.summary || "", expires_at: b.expires_at || "" };
-      deps.onState(info);
-      var failures = 0;
-      function setState(next) {
-        if (next !== info.state) { info.state = next; deps.onState(info); }
-      }
-      function step() {
-        if (deps.cancelled()) { setState("cancelled"); return Promise.reject(approvalError("cancelled", info)); }
-        var exp = Date.parse(info.expires_at);
-        if (exp && deps.now() > exp + 2000) { setState("expired"); return Promise.reject(approvalError("expired", info)); }
-        var started = deps.now();
-        return deps.poll(info.id).then(function (st) {
-          failures = 0;
-          if (deps.cancelled()) { setState("cancelled"); return Promise.reject(approvalError("cancelled", info)); }
-          if (st && st.expires_at) info.expires_at = st.expires_at;
-          var next = (st && st.state) || "pending";
-          if (next === "approved") {
-            setState("approved");
-            return deps.post({ "X-Approval-ID": info.id }).then(function (res) {
-              if (res && res.status === 202) { setState("consumed"); throw approvalError("consumed", info); }
-              setState("done");
-              return res && res.body;
-            });
-          }
-          if (next !== "pending") { setState(next); return Promise.reject(approvalError(next, info)); }
-          var spent = deps.now() - started;
-          return (spent < 1500 ? deps.sleep(1500 - spent) : Promise.resolve()).then(step);
-        }, function (err) {
-          if (err && (err.status === 404 || err.status === 410)) { setState("gone"); throw approvalError("gone", info); }
-          if (err && err.status === 403) throw err;
-          failures++;
-          return deps.sleep(Math.min(5000, 500 * Math.pow(2, failures))).then(step);
-        });
-      }
-      return step();
-    });
-  }
-
-  /* approval-core:end */
-
-  /* The approval request rides plain fetch rather than request(): a poll is
-     not fleet state, must not repaint the page, and must see the 202. */
-  function rawRequest(path, method, body, extraHeaders) {
-    var headers = { "Content-Type": "application/json" };
-    if (API_KEY) headers["X-API-Key"] = API_KEY;
-    Object.keys(extraHeaders || {}).forEach(function (k) { headers[k] = extraHeaders[k]; });
-    var controller = new AbortController();
-    var deadline = setTimeout(function () { controller.abort(); }, (APPROVAL_POLL_WAIT_S + 8) * 1000);
-    var opts = { method: method || "GET", headers: headers, credentials: "same-origin", signal: controller.signal };
-    if (body) opts.body = JSON.stringify(body);
-    return fetch(apiURL(path), opts).then(function (res) {
-      return res.text().then(function (t) {
-        var parsed = null;
-        try { parsed = t ? JSON.parse(t) : null; } catch (e) { parsed = null; }
-        if (!res.ok) {
-          var msg = (parsed && parsed.error) || (t || "").slice(0, 200) || "HTTP " + res.status;
-          var err = new Error(msg);
-          err.status = res.status;
-          err.body = parsed;
-          throw err;
-        }
-        return { status: res.status, body: parsed };
-      });
-    }, function (error) {
-      if (error && error.name === "AbortError") error = new Error("Request timed out");
-      throw error;
-    }).finally(function () { clearTimeout(deadline); });
-  }
-
-  /* Demo approvals: pending for DEMO_APPROVAL_MS, then approved, so the
-     waiting state can be seen and screenshotted without a phone. */
-  var DEMO_APPROVAL_MS = 4000;
-  var demoApprovals = {};
-  function demoApprovalPost(path, body, headers, method) {
-    var id = headers["X-Approval-ID"];
-    if (!id) {
-      id = "demo-" + Math.random().toString(16).slice(2, 10);
-      demoApprovals[id] = { created: Date.now(), state: "pending", expires_at: new Date(Date.now() + 5 * 60000).toISOString() };
-      return Promise.resolve({ status: 202, body: { approval_id: id, state: "pending", expires_at: demoApprovals[id].expires_at, summary: "Demo approval for " + path } });
-    }
-    var a = demoApprovals[id];
-    if (!a || a.state !== "approved") return Promise.reject(Object.assign(new Error("approval is not valid"), { status: 403 }));
-    a.state = "consumed";
-    return demoResponse(path, method || "POST", body).then(function (v) { return { status: 200, body: v }; });
-  }
-  function demoApprovalPoll(id) {
-    var a = demoApprovals[id];
-    if (!a) return Promise.reject(Object.assign(new Error("not found"), { status: 404 }));
-    if (a.state === "pending" && !state.demoApprovalHold && Date.now() - a.created > DEMO_APPROVAL_MS) a.state = "approved";
-    return new Promise(function (r) { setTimeout(function () { r({ id: id, state: a.state, expires_at: a.expires_at }); }, 300); });
-  }
-
-  /* Pending approvals wake together when the console comes back to the
-     foreground: the owner just tapped Approve on this same phone. */
-  var approvalWakers = [];
-  document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "visible") approvalWakers.slice().forEach(function (w) { w(); });
-  });
-
-  function approvalCountdown(expiresAt) {
-    var ms = Date.parse(expiresAt) - Date.now();
-    if (!(ms > 0)) return "expiring";
-    var s = Math.round(ms / 1000);
-    return "expires in " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  }
-
-  /* The one way the console sends a gated action. opts.label names the
-     action for the waiting panel; opts.onPending runs once when the hub says
-     the owner has to approve (callers close their confirmation sheet there).
-     opts.method is POST unless given: restoring the shipped tuning is a
-     DELETE. A detection-policy change that only tightens is answered at once,
-     with no panel. */
-  function ownerApproved(path, body, opts) {
-    opts = opts || {};
-    if (READ_ONLY) return Promise.reject(Object.assign(new Error("Read-only access"), { status: 403 }));
-    var cancelled = false;
-    var panel = null, stateEl = null, timeEl = null, ticker = null, wake = null;
-    var info0 = null;
-    function render(info) {
-      if (!panel) {
-        if (opts.onPending) { try { opts.onPending(info); } catch (e) {} }
-        stateEl = h("p", { cls: "approval-state" });
-        timeEl = h("span", { cls: "approval-time dim-2" });
-        var stopBtn = h("button", { cls: "btn mini", type: "button", text: "Stop waiting", on: { click: function () {
-          cancelled = true; if (wake) wake();
-        } } });
-        panel = h("div", { cls: "approval-wait", role: "status", "aria-live": "polite" },
-          h("div", { cls: "approval-head" }, icon("i-lock", true), h("b", { text: "Approve on your phone" }), h("span", { cls: "fill" }), timeEl),
-          h("p", { cls: "approval-label", text: opts.label || info.summary || path }),
-          stateEl,
-          h("div", { cls: "approval-actions" }, stopBtn));
-        panel._stop = stopBtn;
-        var host = $("approvals") || document.body.appendChild(h("div", { id: "approvals", cls: "approvals" }));
-        host.appendChild(panel);
-        ticker = setInterval(function () { if (info0 && info0.state === "pending") timeEl.textContent = approvalCountdown(info0.expires_at); }, 1000);
-      }
-      info0 = info;
-      panel.setAttribute("data-state", info.state);
-      if (info.state === "pending") {
-        stateEl.textContent = "Sent to your phone. Open the notification and confirm with your passkey.";
-        timeEl.textContent = approvalCountdown(info.expires_at);
-      } else if (info.state === "approved") {
-        stateEl.textContent = "Approved. Sending the request.";
-        timeEl.textContent = "";
-      } else if (info.state === "done") {
-        stateEl.textContent = "Approved and done.";
-      } else {
-        stateEl.textContent = APPROVAL_TEXT[info.state] || info.state;
-        timeEl.textContent = "";
-      }
-    }
-    function finish(delay) {
-      if (ticker) { clearInterval(ticker); ticker = null; }
-      approvalWakers = approvalWakers.filter(function (w) { return w !== wakeAll; });
-      if (!panel) return;
-      var p = panel;
-      if (p._stop) {
-        p._stop.textContent = "Dismiss";
-        p._stop.onclick = null;
-        p._stop.addEventListener("click", function () { if (p.parentNode) p.parentNode.removeChild(p); });
-      }
-      setTimeout(function () { if (p.parentNode) p.parentNode.removeChild(p); }, delay);
-    }
-    var sleeping = null;
-    function wakeAll() { if (sleeping) { var s = sleeping; sleeping = null; s(); } }
-    wake = wakeAll;
-    approvalWakers.push(wakeAll);
-    var deps = {
-      post: function (headers) {
-        var method = opts.method || "POST";
-        return state.demo ? demoApprovalPost(path, body, headers, method) : rawRequest(path, method, body, headers);
-      },
-      poll: function (id) {
-        return state.demo ? demoApprovalPoll(id) : rawRequest("/api/v1/approvals?id=" + encodeURIComponent(id) + "&wait=" + APPROVAL_POLL_WAIT_S).then(function (r) { return r.body; });
-      },
-      sleep: function (ms) { return new Promise(function (r) { var t = setTimeout(function () { sleeping = null; r(); }, ms); sleeping = function () { clearTimeout(t); r(); }; }); },
-      now: function () { return Date.now(); },
-      cancelled: function () { return cancelled; },
-      onState: render
-    };
-    return approvalFlow(deps).then(function (v) {
-      finish(1500);
-      Object.keys(resources).forEach(function (key) { resources[key].updated = 0; });
-      return v;
-    }, function (e) {
-      finish(e && e.approvalState === "cancelled" ? 2500 : 12000);
-      if (panel && e && !e.approvalState) {
-        panel.setAttribute("data-state", "failed");
-        stateEl.textContent = e.message || "The hub refused the request.";
-        e.handled = true;
-      }
-      throw e;
-    });
-  }
-
   /* ------------------------------------------------------- demo fixtures */
 
   /* Demo mode seeds a synthetic fleet so the console can be exercised and
@@ -1454,7 +1224,6 @@
     }
     return {
       window: demoWindowParam(),
-      approvals: { rows: { "maintenance.in": "auto", "maintenance.out": "session", "security.in": "auto", "security.out": "session", "reboot.in": "auto", "reboot.out": "session" }, session_open: false, stored: true },
       categories: [{ name: "maintenance", fleet_enabled: true, enabled: ep ? true : undefined }, { name: "security", fleet_enabled: true, enabled: ep ? true : undefined }],
       packages: defs.map(function (d) {
         var defaults = { __interval: d[4] };
@@ -2430,9 +2199,9 @@
       menu.appendChild(h("div", { cls: "sep" }));
       menu.appendChild(h("div", { cls: "lbl", text: "Agent Operations" }));
       menu.appendChild(menuItem("Upgrade agent to v" + targetVer, "i-refresh", null, function () {
-        ownerApproved("/api/v1/agents/update", { endpoint_ids: [asset.endpoint.id], version: targetVer }, { label: "Upgrade the agent on " + asset.name + " to v" + targetVer })
+        request("/api/v1/agents/update", "POST", { endpoint_ids: [asset.endpoint.id], version: targetVer })
           .then(function () { toast("Upgrade to v" + targetVer + " queued for " + asset.name, "ok"); refresh(); })
-          .catch(function (e) { if (e && e.handled) return; toast("Upgrade failed: " + e.message, "crit"); });
+          .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
       }, { disabled: !IS_ADMIN, why: isOutdated ? "Queue upgrade to v" + targetVer : "Already running latest v" + targetVer }));
 
       menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
@@ -2466,7 +2235,7 @@
       });
       menu.appendChild(menuItem("Open a terminal\u2026", "i-terminal", null, function () {
         launchTerminalShell(asset);
-      }, { disabled: liveShells.length >= TERM_ENDPOINT_CAP, why: liveShells.length >= TERM_ENDPOINT_CAP ? TERM_ENDPOINT_CAP + " terminals already open on this host" : "Asks for approval on your phone" }));
+      }, { disabled: liveShells.length >= TERM_ENDPOINT_CAP, why: liveShells.length >= TERM_ENDPOINT_CAP ? TERM_ENDPOINT_CAP + " terminals already open on this host" : "Opens a terminal on this machine" }));
       liveShells.forEach(function (liveShell) {
         menu.appendChild(menuItem("End terminal (" + String(liveShell.program || "shell").split(/[\\/]/).pop() + ", " + String(liveShell.session_id).slice(0, 6) + ")", "i-close", null, function () {
           terminateTerminalSession(liveShell, asset.name || asset.ip);
@@ -2475,7 +2244,7 @@
       if (screenCapable(asset.endpoint)) {
         menu.appendChild(menuItem("Remote screen\u2026", "i-external", null, function () {
           launchRemoteScreen(asset);
-        }, { why: "Asks for approval on your phone, then opens the OmniNull screen viewer" }));
+        }, { why: "Opens the OmniNull screen viewer" }));
       }
       menu.appendChild(menuItem("Collect Forensics\u2026", "i-search", null, function () {
         launchForensicsSheet(asset);
@@ -2534,25 +2303,21 @@
        is before the cut, not while standing in front of the machine. Releasing
        needs no such screen: it only ever gives access back. */
     if (on) { confirmIsolate(asset); return; }
-    ownerApproved("/api/v1/endpoints/unisolate", { endpoint_id: asset.endpoint.id }, { label: "Release " + asset.name + " from isolation" }).then(function () {
+    request("/api/v1/endpoints/unisolate", "POST", { endpoint_id: asset.endpoint.id }).then(function () {
       toast("Released " + asset.name, "ok");
       refresh();
-    }).catch(function (e) { if (e && e.handled) return; toast("Release failed: " + e.message, "crit"); });
+    }).catch(function (e) { toast("Release failed: " + e.message, "crit"); });
   }
 
   function doIsolate(asset, force) {
     var body = { endpoint_id: asset.endpoint.id, allow_ips: [] };
     if (force) body.force = true;
-    var sheetClosed = false;
-    ownerApproved("/api/v1/endpoints/isolate", body, {
-      label: "Isolate " + asset.name + (force ? " (readiness overridden)" : ""),
-      onPending: function () { sheetClosed = true; closeSheet(); }
-    }).then(function () {
-      if (!sheetClosed) closeSheet();
+    request("/api/v1/endpoints/isolate", "POST", body).then(function () {
+      closeSheet();
       toast("Isolated " + asset.name + (force ? " \u2014 readiness overridden" : ""), "crit");
       delete state.baselineByEndpoint[asset.endpoint.id];
       refresh();
-    }).catch(function (e) { if (e && e.handled) return; toast("Isolation failed: " + e.message, "crit"); });
+    }).catch(function (e) { toast("Isolation failed: " + e.message, "crit"); });
   }
 
   function confirmIsolate(asset) {
@@ -2729,10 +2494,10 @@
       body.subnet = asset.subnet || "";
       body.reason = "Operator action from the console";
     }
-    ownerApproved(path, body, { label: (on ? "Quarantine " : "Release ") + asset.ip + (on ? " at the mesh" : " from mesh quarantine") }).then(function () {
+    request(path, "POST", body).then(function () {
       toast((on ? "Mesh-quarantined " : "Released from mesh: ") + asset.ip, on ? "crit" : "ok");
       refresh();
-    }).catch(function (e) { if (e && e.handled) return; toast("Mesh action failed: " + e.message, "crit"); });
+    }).catch(function (e) { toast("Mesh action failed: " + e.message, "crit"); });
   }
 
   function rescan(asset) {
@@ -2813,12 +2578,8 @@
       var body = { scope: "ids", ids: ids };
       if (on) { body.allow_ips = []; }
       if (force) body.force = true;
-      var sheetClosed = false;
-      return ownerApproved(path, body, {
-        label: (on ? "Isolate " : "Release ") + ids.length + " host" + (ids.length === 1 ? "" : "s"),
-        onPending: function () { sheetClosed = true; closeSheet(); }
-      }).then(function () {
-        if (!sheetClosed) closeSheet();
+      return request(path, "POST", body).then(function () {
+        closeSheet();
         toast((on ? "Isolated " : "Released ") + ids.length + " host" + (ids.length === 1 ? "" : "s"), on ? "crit" : "ok");
         state.baselineByEndpoint = {};
         refresh();
@@ -2828,7 +2589,6 @@
       /* The gate refuses the whole batch on one unready host, and says which.
          A toast would leave the operator guessing which of forty it was. */
       if (e.status === 409 && e.body) { openBulkBlockedSheet(ids, e.body, send); return; }
-      if (e && e.handled) return;
       toast("Bulk action failed: " + e.message, "crit");
     });
   }
@@ -2851,7 +2611,7 @@
         cls: "btn btn-crit", type: "button", text: "Isolate anyway",
         on: {
           click: function () {
-            send(true).catch(function (e2) { if (e2 && e2.handled) return; toast("Bulk action failed: " + e2.message, "crit"); });
+            send(true).catch(function (e2) { toast("Bulk action failed: " + e2.message, "crit"); });
           }
         }
       })
@@ -2872,13 +2632,13 @@
   }
 
   function sendAgentUpdates() {
-    ownerApproved("/api/v1/agents/update", { all: true }, { label: "Update every agent in the fleet" }).then(function (res) {
+    request("/api/v1/agents/update", "POST", { all: true }).then(function (res) {
       var n = arrayOf(res && res.scheduled).length;
       var u = arrayOf(res && res.unsupported).length;
       toast("Queued " + n + " self-update" + (n === 1 ? "" : "s") +
         (u ? "; " + u + " need native package enrollment" : ""), n ? "ok" : "warn");
       refresh();
-    }).catch(function (e) { if (e && e.handled) return; toast("Update push failed: " + e.message, "crit"); });
+    }).catch(function (e) { toast("Update push failed: " + e.message, "crit"); });
   }
 
   /* ---------------------------------------------------------- assets view */
@@ -3077,7 +2837,7 @@
     var live = liveTerminalsFor(ep);
     var launch = live.length < TERM_ENDPOINT_CAP ? h("button", {
       cls: "mini", type: "button", text: live.length ? "Open another terminal" : "Open a terminal",
-      title: "Asks for approval on your phone",
+      title: "Opens a terminal on this machine",
       on: { click: function (e) { e.stopPropagation(); launchTerminalShell(asset); } }
     }) : null;
 
@@ -3515,9 +3275,9 @@
           on: {
             click: function () {
               var epIds = agentedSelected.map(function (a) { return a.endpoint.id; });
-              ownerApproved("/api/v1/agents/update", { endpoint_ids: epIds, version: targetVer }, { label: "Upgrade " + epIds.length + " agent(s) to v" + targetVer })
+              request("/api/v1/agents/update", "POST", { endpoint_ids: epIds, version: targetVer })
                 .then(function () { toast("Queued v" + targetVer + " upgrade for " + epIds.length + " agent(s)", "ok"); refresh(); })
-                .catch(function (e) { if (e && e.handled) return; toast("Upgrade failed: " + e.message, "crit"); });
+                .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
             }
           }
         }));
@@ -3998,9 +3758,8 @@
   }
 
   /* Remote shell limits (GET/PUT /api/v1/terminal/limits): how long a
-     terminal may run, when an idle one ends, how many may be open. Lowering
-     saves at once; raising waits for the owner's tap, which the hub enforces
-     whatever this sheet decides. */
+     terminal may run, when an idle one ends, how many may be open. A change
+     applies at once and the hub records it in the audit. */
   function spanWords(seconds) {
     var h_ = Math.floor(seconds / 3600), m = Math.round((seconds % 3600) / 60);
     if (m === 60) { h_ += 1; m = 0; }
@@ -4034,10 +3793,6 @@
         max_per_tenant: parseInt(inputs.tenant.value, 10)
       };
     }
-    function raises(w) {
-      var l = cur.limits;
-      return ["max_duration_seconds", "idle_timeout_seconds", "max_per_endpoint", "max_per_tenant"].some(function (k) { return w[k] > l[k]; });
-    }
     function changed(w) {
       var l = cur.limits;
       return ["max_duration_seconds", "idle_timeout_seconds", "max_per_endpoint", "max_per_tenant"].some(function (k) { return w[k] !== l[k]; });
@@ -4047,23 +3802,17 @@
       var w = wanted();
       var bad = Object.keys(w).some(function (k) { return !(w[k] > 0); });
       saveBtn.disabled = bad || !changed(w);
-      saveBtn.textContent = !bad && raises(w) ? "Save — approve on phone" : "Save";
-      note.textContent = !bad && raises(w)
-        ? "This raises a limit, so the hub asks you to approve it on your phone first. Lowering a limit saves straight away."
-        : "Lowering a limit saves straight away. Raising one asks you to approve it on your phone.";
+      saveBtn.textContent = "Save";
+      note.textContent = "A change applies at once and the hub records it in the audit.";
     }
-    function send(body, isRaise) {
+    function send(body) {
       saveBtn.disabled = true;
       var done = function (d) {
         if (d && d.limits) { cur = d; draw(); }
         toast(d && d.changed === false ? "Nothing changed" : "Remote shell limits saved", "ok");
       };
-      var fail = function (e) { refreshNote(); if (e && e.handled) return; toast("Not saved: " + ((e && e.message) || "request failed"), "crit"); };
-      if (isRaise) {
-        ownerApproved("/api/v1/terminal/limits", body, { method: "PUT", label: "Raise remote shell limits" }).then(done, fail);
-      } else {
-        request("/api/v1/terminal/limits", "PUT", body).then(done, fail);
-      }
+      var fail = function (e) { refreshNote(); toast("Not saved: " + ((e && e.message) || "request failed"), "crit"); };
+      request("/api/v1/terminal/limits", "PUT", body).then(done, fail);
     }
     function draw() {
       clear(holder);
@@ -4086,7 +3835,7 @@
         holder.appendChild(note);
         if (cur.saved) {
           holder.appendChild(h("div", { cls: "form-row" }, h("button", { cls: "btn", type: "button", text: "Go back to the startup defaults",
-            on: { click: function () { send({ reset: true }, raises(d)); } } })));
+            on: { click: function () { send({ reset: true }); } } })));
         }
       } else {
         holder.appendChild(h("p", { cls: "pending", text: "Only an admin can change these." }));
@@ -4095,7 +3844,7 @@
     }
     saveBtn.addEventListener("click", function () {
       var w = wanted();
-      send(w, raises(w));
+      send(w);
     });
     openSheet("Remote shell limits", holder, editable ? [saveBtn, closeBtn] : [closeBtn], null, { guardDirty: false });
     request("/api/v1/terminal/limits").then(function (d) {
@@ -4563,7 +4312,7 @@
             on: {
               click: function (e) {
                 e.stopPropagation();
-                ownerApproved("/api/v1/detection/tuning/suppress", { id: a.id }, { label: "Mark this alert's program and network as expected" })
+                request("/api/v1/detection/tuning/suppress", "POST", { id: a.id })
                   .then(function (res) {
                     var pair = (res && res.pair) || "this conversation";
                     toast(res && res.added
@@ -4571,7 +4320,7 @@
                       : pair + " was already expected", "ok");
                     refresh();
                   })
-                  .catch(function (err) { if (err && err.handled) return; toast(err.message, "crit"); });
+                  .catch(function (err) { toast(err.message, "crit"); });
               }
             }
           }));
@@ -4661,7 +4410,7 @@
     var alertsCard = card("Alerts \u00b7 " + totalAlerts,
       h("div", { cls: "stack" }, h("div", {cls:"alert-split"}, alertsTable, selectedAlertDetail), pager),
       null, false,
-      "Click a finding for its evidence. Acknowledge marks it read. Expected tells detection that this program talking to this counterparty is normal here, so it stops being reported (asks your phone first). A verdict records what the finding turned out to be.");
+      "Click a finding for its evidence. Acknowledge marks it read. Expected tells detection that this program talking to this counterparty is normal here, so it stops being reported. A verdict records what the finding turned out to be.");
 
     view.appendChild(h("div", { cls: "pad stack alerts-workspace" },
       chartCard,
@@ -6250,7 +5999,7 @@
     var open = function () {
       var nets = cidrs.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
       if (!nets.length) { toast("Name at least one network", "warn"); return; }
-      ownerApproved("/api/v1/enrolment/windows", {
+      request("/api/v1/enrolment/windows", "POST", {
         label: label.value.trim(),
         cidrs: nets,
         tenant_id: tenant.value,
@@ -6259,7 +6008,7 @@
         hours: parseFloat(hours.value) || 8,
         max_uses: parseInt(maxUses.value, 10) || 0,
         passcode: passcode.value.trim()
-      }, { label: "Allow agent installs from " + nets.join(", ") }).then(function (res) {
+      }).then(function (res) {
         toast("LAN install access is active", "ok");
         label.value = ""; maxUses.value = ""; passcode.value = "";
         load();
@@ -6628,7 +6377,7 @@
     var pairs = listField(t.quiet_pairs, "/opt/backup/backup-agent@AS64500, /usr/bin/curl@AS36459");
 
     var body = h("div", { cls: "stack" },
-      h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored. A change that tightens detection applies at once; one that loosens it waits for your approval on your phone." }),
+      h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored. Every change applies at once and the hub records it in the audit." }),
 
       tuningRow("Container networks", "Explicit private CIDRs excluded from lateral fan-out detection. Leave empty when unknown; private addresses alone do not prove container traffic.", containers),
       h("h4", { cls: "tune-head", text: "Periodic beaconing" }),
@@ -6693,12 +6442,12 @@
         quiet_pairs: parseList(pairs.value),
         container_cidrs: parseList(containers.value)
       };
-      ownerApproved("/api/v1/detection/tuning", payload, { label: "Save detection tuning", onPending: closeSheet }).then(function (res) {
+      request("/api/v1/detection/tuning", "POST", payload).then(function (res) {
         state.tuning = res;
         toast("Detection tuning saved", "ok");
         closeSheet();
         renderBody();
-      }).catch(function (e) { if (e && e.handled) return; toast("Could not save: " + e.message, "crit"); });
+      }).catch(function (e) { toast("Could not save: " + e.message, "crit"); });
     };
 
     var restore = function () {
@@ -6712,12 +6461,12 @@
     };
 
     var sendRestoreTuning = function () {
-      ownerApproved("/api/v1/detection/tuning", null, { method: "DELETE", label: "Restore the shipped detection tuning", onPending: closeSheet }).then(function (res) {
+      request("/api/v1/detection/tuning", "DELETE", null).then(function (res) {
         state.tuning = res;
         toast("Restored the shipped thresholds", "ok");
         closeSheet();
         renderBody();
-      }).catch(function (e) { if (e && e.handled) return; toast("Could not restore: " + e.message, "crit"); });
+      }).catch(function (e) { toast("Could not restore: " + e.message, "crit"); });
     };
 
     openSheet("Detection tuning", body, [
@@ -6865,16 +6614,16 @@
           click: function () {
             var n = Number(days.value) || 7;
             var which = target.value ? (target.options[target.selectedIndex] || {}).text || target.value : "every endpoint in every tenant";
-            ownerApproved("/api/v1/learning/windows", {
+            request("/api/v1/learning/windows", "POST", {
               scope_type: scope.value,
               scope_id: target.value,
               days: n,
               note: note.value
-            }, { label: "Open a learning window over " + which + " for " + n + (n === 1 ? " day" : " days"), onPending: closeSheet }).then(function () {
+            }).then(function () {
               toast("Learning window open. Its held findings are under HELD.", "ok");
               closeSheet();
               refresh();
-            }).catch(function (e) { if (e && e.handled) return; toast("Could not open the window: " + e.message, "crit"); });
+            }).catch(function (e) { toast("Could not open the window: " + e.message, "crit"); });
           }
         }
       })
@@ -6914,14 +6663,14 @@
               click: function () {
                 var ids = Object.keys(chosen).filter(function (k) { return chosen[k]; });
                 if (!ids.length) { toast("Nothing selected", "warn"); return; }
-                ownerApproved("/api/v1/learning/proposals/apply", { window: w.id, ids: ids }, { label: "Apply " + ids.length + " learning proposal(s)", onPending: closeSheet })
+                request("/api/v1/learning/proposals/apply", "POST", { window: w.id, ids: ids })
                   .then(function (res) {
                     var n = arrayOf(res && res.applied).length;
                     toast("Applied " + n + " proposal(s) \u2014 see Detection tuning", "ok");
                     closeSheet();
                     refresh();
                   })
-                  .catch(function (e) { if (e && e.handled) return; toast("Apply failed: " + e.message, "crit"); });
+                  .catch(function (e) { toast("Apply failed: " + e.message, "crit"); });
               }
             }
           })
@@ -6987,9 +6736,9 @@
             cls: "mini", type: "button", text: "Release",
             on: {
               click: function () {
-                ownerApproved("/api/v1/mesh/unquarantine", { target_ip: p.target_ip }, { label: "Release " + p.target_ip + " from mesh quarantine" })
+                request("/api/v1/mesh/unquarantine", "POST", { target_ip: p.target_ip })
                   .then(function () { toast("Released " + p.target_ip + " from the mesh", "ok"); refresh(); })
-                  .catch(function (e) { if (e && e.handled) return; toast("Release failed: " + e.message, "crit"); });
+                  .catch(function (e) { toast("Release failed: " + e.message, "crit"); });
               }
             }
           })
@@ -7020,7 +6769,7 @@
         })
       ]),
       card("Peer-mesh quarantine \u00b7 " + state.meshPeers.length, mesh, null, false,
-        "Addresses every agent blocks as a peer, separate from isolating a host. Agents apply the list on their next check-in. Release asks your phone first.")
+        "Addresses every agent blocks as a peer, separate from isolating a host. Agents apply the list on their next check-in.")
     ];
 
     var policyTabs = h("div", { cls: "uf uf-wrap uf-g2", role: "group", "aria-label": "Policy views" },
@@ -7433,12 +7182,12 @@
   function confirmToggleExclusion(x) {
     var name = x.name || x.id;
     var apply = function () {
-      ownerApproved("/api/v1/exclusions/toggle", { id: x.id, active: !x.active }, { label: "Turn exclusion " + name + " on", onPending: closeSheet })
+      request("/api/v1/exclusions/toggle", "POST", { id: x.id, active: !x.active })
         .then(function () {
           toast((x.active ? "Disabled" : "Enabled") + " exclusion " + name, "ok");
           refresh();
         })
-        .catch(function (e) { if (e && e.handled) return; toast("Could not change the exclusion: " + e.message, "crit"); });
+        .catch(function (e) { toast("Could not change the exclusion: " + e.message, "crit"); });
     };
     if (x.active) { apply(); return; }
     confirmSheet({
@@ -7713,7 +7462,7 @@
   }
 
   /* The terminal is its own page (/console/terminal, server-rendered with
-     web/terminal.js). Opening one asks the owner's phone there; reattaching
+     web/terminal.js). Reattaching
      is a link to the session. */
   function terminalPage(query) {
     location.assign("/console/terminal" + (query ? "?" + query : ""));
@@ -7751,7 +7500,7 @@
   }
 
   /* Remote screen (docs/REMOTE_SCREEN.md §9.2). The console has no viewer:
-     it gets the owner's approval, asks the hub for a one-use launch code (60 s,
+     it asks the hub for a one-use launch code (60 s,
      bound to this session and operator) and hands it to the native viewer
      through the ominull-screen:// scheme. The operator token never reaches the
      page. A browser cannot tell whether the scheme is registered, so the
@@ -7769,7 +7518,7 @@
   function launchRemoteScreen(asset) {
     var ep = asset.endpoint;
     var host = asset.name || asset.ip || ep.id;
-    ownerApproved("/api/v1/screen/sessions", { endpoint_id: ep.id, mode: "control" }, { label: "See and control the screen on " + host })
+    request("/api/v1/screen/sessions", "POST", { endpoint_id: ep.id, mode: "control" })
       .then(function (sess) {
         if (!sess || !sess.session_id) throw new Error("The hub did not return a session.");
         return request("/api/v1/screen/sessions/launch", "POST", { session_id: sess.session_id }).then(function (launch) {
@@ -7778,7 +7527,7 @@
         });
       })
       .catch(function (e) {
-        if (!e || !e.handled) toast("Could not start the remote screen: " + ((e && e.message) || e), "crit");
+        toast("Could not start the remote screen: " + ((e && e.message) || e), "crit");
       });
   }
 
@@ -7788,8 +7537,8 @@
     var cmd = "ominullctl screen open " + ep.id;
     var link = h("a", { href: url, cls: "btn btn-primary", text: "Open the viewer" });
     openSheet("Remote screen on " + host, h("div", { cls: "stack" },
-      h("p", { text: "Approved. Open the OmniNull screen viewer on this computer. The link works once, within the next minute." }),
-      h("p", { cls: "dim-2", text: "If nothing opens, the viewer isn't installed here. End this session and run this on a computer that has it (it asks for a new approval):" }),
+      h("p", { text: "Open the OmniNull screen viewer on this computer. The link works once, within the next minute." }),
+      h("p", { cls: "dim-2", text: "If nothing opens, the viewer isn't installed here. End this session and run this on a computer that has it (it opens a new session):" }),
       h("div", { cls: "form-row" },
         h("code", { text: cmd }),
         h("button", { cls: "btn mini", type: "button", "aria-label": "Copy command", on: { click: function () { copyText(cmd, "Command"); } } }, icon("i-copy")))),
@@ -7847,8 +7596,8 @@
         h("a", { cls: "btn", href: "/console/jobs?view=history", text: "Job history" }),
         authActions),
       { key: "Response access", text: isUnlocked
-        ? "Unlocked: you can collect evidence and run scripts. Each one is signed with a key this browser holds in memory until you lock it." + (auth.signer_key_id ? " Signing key " + auth.signer_key_id.slice(0, 16) + "\u2026." : "") + " Terminals don't use this unlock; your phone approves each one."
-        : "Collecting evidence and running scripts need an unlocked session. Unlock with your authenticator code or passkey. Terminals don't use this unlock; your phone approves each one." });
+        ? "Unlocked: you can collect evidence and run scripts. Each one is signed with a key this browser holds in memory until you lock it." + (auth.signer_key_id ? " Signing key " + auth.signer_key_id.slice(0, 16) + "\u2026." : "") + " Terminals don't use this unlock."
+        : "Collecting evidence and running scripts need an unlocked session. Unlock with your authenticator code or passkey. Terminals don't use this unlock." });
 
     var scriptRows = (state.scripts || []).map(function (sc) {
       return [
@@ -9807,26 +9556,11 @@
       acceptedRisksLine(asset, settings && settings.accepted_risks),
       pkgs.length ? stackOnPhone(simpleTable(["Package", "Last result", "When", "Reboot needed", "Schedule here", ""], rows, { sortable: false }))
         : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet.")), null, true,
-      "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. A default audit runs without asking. " + maintAskText(sw && sw.data) + " Packages never reboot the machine; Restart is its own package.");
+      "Audit only reports what would change; enforce makes the changes; revert restores what a package changed first. " + MAINT_RUN_NOTE + " Packages never reboot the machine; Restart is its own package.");
   }
 
-  /* Whether enforce runs ask the owner: the owner's Approvals rows on
-     Nightshift decide (approvals in the settings answer). Automatic runs
-     without asking at any time; a work-session row only while a session is
-     open. Careful packages always ask. */
-  function maintAskText(d) {
-    var a = d && d.approvals;
-    if (!a || !a.rows) return "Enforce runs ask you on your phone unless your Approvals page on Nightshift lets them run on their own. Careful packages always ask.";
-    var say = function (c) {
-      if (c === "auto") return "run without asking";
-      if (c === "session") return a.session_open ? "run without asking while your work session is open" : "ask you unless a work session is open";
-      return "ask you on your phone";
-    };
-    var inW = say(a.rows["maintenance.in"]), outW = say(a.rows["maintenance.out"]);
-    var text = inW === outW ? "Enforce runs " + inW + ", inside the machine's window or not."
-      : "Enforce runs inside the machine's window " + inW + "; outside it they " + outW + ".";
-    return text + " Your Approvals page on Nightshift sets this. Careful packages always ask.";
-  }
+  /* The hub authorizes every run itself on the first request. */
+  var MAINT_RUN_NOTE = "The hub authorizes each run itself and records it in the audit.";
 
   /* Maintenance mode: keeps the machine awake while maintenance runs (sleep
      and idle actions off) until an end time, when the machine lets go by
@@ -9863,9 +9597,9 @@
   function maintModeRun(mode, asset, how) {
     var on = how === "enforce";
     var label = (on ? "Turn on maintenance mode for " + spanWords((mode.hours || 6) * 3600) : "Turn off maintenance mode") + " on " + asset.name;
-    ownerApproved("/api/v1/maintenance/run", { endpoint_ids: [asset.endpoint.id], packages: [mode.package], mode: how }, { label: label })
+    request("/api/v1/maintenance/run", "POST", { endpoint_ids: [asset.endpoint.id], packages: [mode.package], mode: how })
       .then(function () { toast((on ? "Turning on" : "Turning off") + " maintenance mode on " + asset.name, "ok"); loadMaintenance(asset.endpoint.id); })
-      .catch(function (e) { if (e && e.handled) return; toast("Maintenance mode not changed: " + e.message, "crit"); });
+      .catch(function (e) { toast("Maintenance mode not changed: " + e.message, "crit"); });
   }
 
   /* ------------------------------------------------- maintenance settings
@@ -9873,8 +9607,8 @@
      default per package (on/off, mode, how often, settings) that a machine
      can override with a reason and an optional expiry, plus a per-category
      switch. Saving never runs anything by itself: the schedule runs the
-     effective settings, and a run that needs the owner (enforce, a careful
-     package or step, changed settings) asks on the phone first. */
+     effective settings, and a run starts at once and the hub records
+     it in the audit. */
   var MAINT_CATEGORIES = [
     { id: "maintenance", label: "Maintenance" },
     { id: "security", label: "Security" }
@@ -10072,7 +9806,7 @@
       });
       holder.appendChild(stackOnPhone(simpleTable(["Setting", "Value", "Comes from", ""], rows, { sortable: false })));
       if (!scheduled) holder.appendChild(h("p", { cls: "pending", text: (pkg.role === "reboot" ? "Takes effect the next time a playbook restarts a machine." : "Takes effect the next time maintenance mode is turned on.") + " Saving runs nothing by itself." }));
-      else holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. " + maintAskText(epID ? (state.maintSettingsByEndpoint[epID] || {}).data : state.maintSettings) + " Turning a package off or back to audit never asks." }));
+      else holder.appendChild(h("p", { cls: "pending", text: "Saving runs nothing by itself. " + MAINT_RUN_NOTE }));
       if (epID && editable && (pkg.endpoint && (pkg.endpoint.enabled !== undefined || pkg.endpoint.mode || pkg.endpoint.interval || pkg.endpoint.params))) {
         holder.appendChild(h("div", { cls: "form-row" }, h("button", { cls: "btn", type: "button", text: "Use the fleet defaults for this machine",
           on: { click: function () { save({ reset: true }); } } })));
@@ -10106,8 +9840,7 @@
     reason.focus();
   }
 
-  /* Run one package now on one machine with its effective settings, behind
-     the owner's tap (a baseline audit goes straight through). */
+  /* Run one package now on one machine with its effective settings. */
   function openMaintRunSheet(pkg, asset) {
     var mode = h("select", { "aria-label": "Mode" },
       h("option", { value: "audit", text: "Audit — report what would change" }),
@@ -10116,14 +9849,13 @@
     var go = h("button", { cls: "btn btn-primary", type: "button", text: "Run", disabled: READ_ONLY, on: { click: function () {
       var m = mode.value;
       go.disabled = true;
-      ownerApproved("/api/v1/maintenance/run", { endpoint_ids: [asset.endpoint.id], packages: [pkg.name], mode: m },
-        { label: "Run " + pkg.title + " (" + m + ") on " + asset.name, onPending: function () { requestCloseSheet(); } })
+      request("/api/v1/maintenance/run", "POST", { endpoint_ids: [asset.endpoint.id], packages: [pkg.name], mode: m })
         .then(function () { requestCloseSheet(); toast(pkg.title + " sent to " + asset.name, "ok"); loadMaintenance(asset.endpoint.id); })
-        .catch(function (e) { go.disabled = false; if (e && e.handled) return; toast("Not run: " + e.message, "crit"); });
+        .catch(function (e) { go.disabled = false; toast("Not run: " + e.message, "crit"); });
     } } });
     openSheet("Run " + pkg.title + " on " + asset.name, h("div", { cls: "stack" },
       h("label", { cls: "field" }, h("span", { text: "Mode" }), mode),
-      h("p", { cls: "pending", text: "Runs with this machine's settings. An audit with default settings goes straight through. " + maintAskText((state.maintSettingsByEndpoint[asset.endpoint.id] || {}).data) })),
+      h("p", { cls: "pending", text: "Runs with this machine's settings. " + MAINT_RUN_NOTE })),
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 
@@ -10429,16 +10161,15 @@
       var ids = picked.map(function (b) { return b.a.endpoint.id; });
       var where = picked.length === 1 ? picked[0].a.name : picked.length + " machines";
       go.disabled = true;
-      ownerApproved("/api/v1/maintenance/run", { endpoint_ids: ids, packages: [p.name], mode: m },
-        { label: "Run " + p.title + " (" + m + ") on " + where, onPending: function () { requestCloseSheet(); } })
+      request("/api/v1/maintenance/run", "POST", { endpoint_ids: ids, packages: [p.name], mode: m })
         .then(function () { requestCloseSheet(); toast(p.title + " sent to " + where, "ok"); })
-        .catch(function (e) { go.disabled = false; if (e && e.handled) return; toast("Not run: " + e.message, "crit"); });
+        .catch(function (e) { go.disabled = false; toast("Not run: " + e.message, "crit"); });
     } } });
     openSheet("Run a package", h("div", { cls: "stack" },
       h("label", { cls: "field" }, h("span", { text: "Package" }), pick),
       h("label", { cls: "field" }, h("span", { text: "Mode" }), mode),
       hostBox,
-      h("p", { cls: "dim-2 u-t2", text: "Runs with each machine's settings; machines whose settings differ need separate runs. An audit with default settings goes straight through. " + maintAskText(state.maintSettings) })),
+      h("p", { cls: "dim-2 u-t2", text: "Runs with each machine's settings; machines whose settings differ need separate runs. " + MAINT_RUN_NOTE })),
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 
@@ -10476,7 +10207,7 @@
         h("label", { cls: "uf uf-g1" }, catBox, h("span", { text: "Run scheduled " + (tab === "security" ? "security" : "maintenance") + " packages across the fleet" })),
         maintWindowRow()),
       null, true,
-      "Schedules and settings below are fleet defaults for every machine a package fits. A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself; a run that needs your approval asks on your phone first. " + maintWindowHelp(wd));
+      "Schedules and settings below are fleet defaults for every machine a package fits. A machine can override any of them from its asset page, with a reason. Saving runs nothing by itself. " + MAINT_RUN_NOTE + " " + maintWindowHelp(wd));
 
     var rows = pkgs.map(function (p) {
       var eff = p.fleet_effective || {};
@@ -10509,8 +10240,8 @@
       usesCatalog ? maintCatalogCard() : null));
   }
 
-  /* Playbooks: named package runs in order. A run asks the owner once for
-     every step on every machine; the hub then starts each machine's steps
+  /* Playbooks: named package runs in order. A run covers every step on every
+     machine; the hub then starts each machine's steps
      one after another, inside maintenance mode when the playbook says so. */
   function maintPkgTitle(name) {
     var p = arrayOf(state.maintSettings && state.maintSettings.packages).filter(function (x) { return x.name === name; })[0];
@@ -10626,9 +10357,9 @@
           IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Edit…", "aria-label": "Edit " + b.name, on: { click: function () { openPlaybookSheet(b); } } }) : null,
           IS_ADMIN ? h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove " + b.name, on: { click: function () { playbookRemove(b); } } }) : null)
       ];
-    }), { sortable: false })) : emptyBox("No playbooks yet." + (IS_ADMIN ? " Add one to run several packages in order with one approval." : "")));
+    }), { sortable: false })) : emptyBox("No playbooks yet." + (IS_ADMIN ? " Add one to run several packages in order." : "")));
     return card("Playbooks \u00b7 " + books.length, body, actions, true,
-      "A playbook runs packages in order on the machines you pick. Each run asks you once on your phone for every step on every machine; the steps then run one after another on each machine. With maintenance mode on, the machines stay awake for the run and may sleep again when it ends.");
+      "A playbook runs packages in order on the machines you pick. Each run covers every step on every machine you pick; the steps then run one after another on each machine. With maintenance mode on, the machines stay awake for the run and may sleep again when it ends.");
   }
 
   /* Playbook runs, newest first: which step each machine is on, or how
@@ -10733,7 +10464,7 @@
       h("div", { cls: "field" }, h("span", { text: "Steps, in order (up to " + max + ")" }), list, h("div", {}, addBtn)),
       h("label", { cls: "uf uf-g1" }, mm, h("span", { text: "Maintenance mode: keep the machines awake for the run, and let them sleep again at the end" })),
       h("label", { cls: "field" }, h("span", { text: "Note (optional)" }), note),
-      h("p", { cls: "pending", text: "Each step runs with the machine's own settings for that package. Saving runs nothing; every run asks you on your phone first." })),
+      h("p", { cls: "pending", text: "Each step runs with the machine's own settings for that package. Saving runs nothing." })),
       [save, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
     name.focus();
   }
@@ -10753,13 +10484,12 @@
       var ids = boxes.filter(function (b) { return b.box.checked; }).map(function (b) { return b.a.endpoint.id; });
       if (!ids.length) { toast("Pick at least one machine.", "warn"); return; }
       go.disabled = true;
-      ownerApproved("/api/v1/maintenance/playbooks/run", { playbook_id: book.id, endpoint_ids: ids, dont_wait: dontWait.checked },
-        { label: "Run " + book.name + " on " + ids.length + (ids.length === 1 ? " machine" : " machines"), onPending: function () { closeSheet(); } })
+      request("/api/v1/maintenance/playbooks/run", "POST", { playbook_id: book.id, endpoint_ids: ids, dont_wait: dontWait.checked })
         .then(function () {
           closeSheet(); toast(book.name + " started", "ok");
           request("/api/v1/maintenance/playbooks").then(maintPlaybooksRedraw, function () {});
         })
-        .catch(function (e) { go.disabled = false; if (e && e.handled) return; toast("Not run: " + e.message, "crit"); });
+        .catch(function (e) { go.disabled = false; toast("Not run: " + e.message, "crit"); });
     } } });
     openSheet("Run " + book.name, h("div", { cls: "stack" },
       h("ol", { cls: "pb-steps" }, (book.maintenance_mode ? [h("li", { text: "Maintenance mode on" })] : [])
@@ -10770,13 +10500,13 @@
         : emptyBox("No " + (linux ? "Linux" : "Windows") + " machines with an agent."),
       h("label", { cls: "uf uf-g1" }, dontWait, h("span", { text: "Don't wait for open apps" })),
       h("p", { cls: "pending", text: "By default a step that changes something waits while someone is using the machine or a game is open, for up to half its time limit. Ticked, it goes ahead anyway; a restart still warns on screen first." }),
-      h("p", { cls: "pending", text: "One approval on your phone covers every step on every machine you pick. Machines with different settings for a package need separate runs." })),
+      h("p", { cls: "pending", text: "One run covers every step on every machine you pick. Machines with different settings for a package need separate runs." })),
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 
   /* The software removal catalog: what Software removal may uninstall and
-     how. Adding an entry or changing what one removes asks the owner on
-     their phone; a name or note change and removing an entry do not. */
+     how. Adding an entry or changing what one removes applies at once and is
+     recorded in the audit. */
   function maintCatalogCard() {
     var c = state.maintCatalog;
     var actions = IS_ADMIN && c && !c.error ? [h("button", { cls: "btn mini", type: "button", text: "Add…",
@@ -10807,7 +10537,7 @@
       : emptyBox("The catalog is empty, so Software removal finds nothing to remove."));
     if (folded.toggle) body.appendChild(folded.toggle);
     return card("Software removal catalog \u00b7 " + entries.length + (c.saved ? "" : " \u00b7 as shipped"), body, actions, true,
-      "Software removal uninstalls only what matches an entry here, in the categories a machine's settings pick, using the entry's own uninstall method. Adding an entry or changing what one removes asks you on your phone." + (c.saved ? "" : " This is the list shipped with the hub; nothing has been changed yet."));
+      "Software removal uninstalls only what matches an entry here, in the categories a machine's settings pick, using the entry's own uninstall method. Adding an entry or changing what one removes applies at once and is recorded in the audit." + (c.saved ? "" : " This is the list shipped with the hub; nothing has been changed yet."));
   }
 
   /* The page skips a rebuild while focus is inside it; a catalog change is
@@ -10883,10 +10613,9 @@
       if (note.value.trim()) out.note = note.value.trim();
       if (!out.name || !out.match) { toast("Give it a name and what it matches.", "warn"); (out.name ? match : name).focus(); return; }
       save.disabled = true;
-      ownerApproved("/api/v1/maintenance/catalog", { entry: out }, { method: "PUT", label: (entry ? "Change " : "Add ") + out.name + " in the software removal catalog",
-        onPending: function () { closeSheet(); } })
+      request("/api/v1/maintenance/catalog", "PUT", { entry: out })
         .then(function (d) { closeSheet(); if (d && d.entries) state.maintCatalog = d; maintCatalogRedraw(); toast(d && d.changed === false ? "Nothing changed" : "Saved", "ok"); })
-        .catch(function (err) { save.disabled = false; if (err && err.handled) return; toast("Not saved: " + err.message, "crit"); });
+        .catch(function (err) { save.disabled = false; toast("Not saved: " + err.message, "crit"); });
     } } });
     openSheet(entry ? "Edit " + entry.name : "Add to the software removal catalog", h("div", { cls: "stack" },
       field("Name", name),
@@ -10897,9 +10626,9 @@
       field("How it is removed", method),
       flagRow,
       h("div", { cls: "form-row" }, field("Time limit, seconds (optional)", timeout),
-        h("label", { cls: "uf uf-g1" }, careful, h("span", { text: "Careful: removing it can break something (an anti-cheat driver, a game\u2019s services); flagged here and in the approval" }))),
+        h("label", { cls: "uf uf-g1" }, careful, h("span", { text: "Careful: removing it can break something (an anti-cheat driver, a game\u2019s services); flagged here and in the audit" }))),
       field("Note (optional)", note),
-      h("p", { cls: "pending", text: "Adding an entry or changing what it matches or how it is removed asks you to approve on your phone first. Every run of Software removal asks you first. Whatever the catalog says, it never removes Microsoft programs, drivers, runtimes, Defender or OmniNull." })),
+      h("p", { cls: "pending", text: "Adding an entry or changing what it matches or how it is removed applies at once and is recorded in the audit. Whatever the catalog says, it never removes Microsoft programs, drivers, runtimes, Defender or OmniNull." })),
       [save, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
     name.focus();
   }
@@ -10967,7 +10696,7 @@
     if (off) {
       confirmSheet({
         title: "Switch off remote access on " + asset.name,
-        consequence: "Nobody can open a terminal or screen on it, you included, and any session open now ends. It takes effect at once. Switching it back on needs a tap on your phone.",
+        consequence: "Nobody can open a terminal or screen on it, you included, and any session open now ends. It takes effect at once. You can switch it back on any time.",
         confirmLabel: "Switch off",
         onConfirm: function () {
           request("/api/v1/remote-access/settings", "PUT", body).then(done).catch(function (e) { toast("Not saved: " + ((e && e.message) || "request failed"), "crit"); });
@@ -10977,11 +10706,11 @@
     }
     confirmSheet({
       title: "Switch remote access back on for " + asset.name,
-      consequence: "This loosens a safety setting, so it waits for a tap on your phone. Nothing opens by itself afterwards; terminal and screen still ask each time.",
-      confirmLabel: "Ask on my phone",
+      consequence: "This applies at once. Nothing opens by itself afterwards; you still start each terminal and screen session.",
+      confirmLabel: "Switch back on",
       onConfirm: function () {
-        ownerApproved("/api/v1/remote-access/settings", body, { method: "PUT", label: "Switch remote terminal and screen back on for " + asset.name })
-          .then(done).catch(function (e) { if (e && e.handled) return; toast("Not switched on: " + ((e && e.message) || "request failed"), "crit"); });
+        request("/api/v1/remote-access/settings", "PUT", body)
+          .then(done).catch(function (e) { toast("Not switched on: " + ((e && e.message) || "request failed"), "crit"); });
       }
     });
   }
@@ -11010,7 +10739,7 @@
           ? h("div", {}, h("b", { text: lockLabel(t.ceiling) }), h("div", { cls: "dim-2", text: lv ? lv[1] : "A level this console does not know." }))
           : "None set on the machine. The hub's permissions for it apply as they are."),
         fact("Scripts", h("span", {}, t.host_authority ? chip("info", "Host-locked") : null, t.host_authority ? " " : "", lockScriptsText(t))),
-        allow.length ? fact("Standing approvals", allow.length + (allow.length === 1 ? " package runs" : " packages run") + " without asking: " + allow.map(function (a) { return a.name; }).join(", ") + ".") : [],
+        allow.length ? fact("Always allowed", allow.length + (allow.length === 1 ? " package is" : " packages are") + " allowed to run on this machine: " + allow.map(function (a) { return a.name; }).join(", ") + ".") : [],
         fact("Last refusal", t.refused ? h("span", {}, t.refused, refusedAt ? h("span", { cls: "dim-2", text: " · " + ago(refusedAt) + " ago" }) : null) : "Nothing refused that it remembers."),
         fact("Isolation", t.disagrees
           ? h("span", {}, chip("crit", "Hub and agent disagree"), " The hub says " + (t.hub_isolated ? "isolated" : "not isolated") + "; the agent says " + (t.agent_isolated ? "isolated" : "not isolated") + (t.isolation_source ? " (" + t.isolation_source + ")" : "") + ".")
@@ -11024,7 +10753,7 @@
       remote = h("div", { cls: "card-body uf uf-wrap uf-g1 access-remote" },
         h("b", { text: "Remote terminal and screen" }),
         off ? chip("info", "Off") : h("span", { text: "On" }),
-        h("span", { cls: "dim-2", text: off ? "Nobody can open one on this machine. Switching it back on needs a tap on your phone." : "Switching it off applies at once and ends open sessions." }),
+        h("span", { cls: "dim-2", text: off ? "Nobody can open one on this machine. Switching it back on applies at once." : "Switching it off applies at once and ends open sessions." }),
         h("span", { cls: "u-grow" }),
         h("button", { cls: "btn mini", type: "button", text: off ? "Switch back on…" : "Switch off…", disabled: READ_ONLY || !IS_ADMIN,
           "aria-label": (off ? "Switch remote access back on for " : "Switch remote access off for ") + asset.name,
@@ -11060,7 +10789,7 @@
     var live = liveTerminalsFor(ep);
     var term = live.length
       ? h("button", { cls: "btn", type: "button", text: "Reattach terminal", on: { click: function () { reattachTerminal(live[0]); } } })
-      : h("button", { cls: "btn", type: "button", text: "Terminal", title: "Asks for approval on your phone", disabled: READ_ONLY,
+      : h("button", { cls: "btn", type: "button", text: "Terminal", title: "Opens a terminal on this machine", disabled: READ_ONLY,
         on: { click: function () { launchTerminalShell(asset); } } });
     var m = state.maintenanceByEndpoint[ep.id];
     var mode = m && m.mode;
@@ -11071,7 +10800,7 @@
       : null;
     return h("div", { cls: "route-actions" },
       term,
-      screenCapable(ep) ? h("button", { cls: "btn", type: "button", text: "Screen", title: "Asks for approval on your phone, then opens the screen viewer",
+      screenCapable(ep) ? h("button", { cls: "btn", type: "button", text: "Screen", title: "Opens the screen viewer",
         on: { click: function () { launchRemoteScreen(asset); } } }) : null,
       m && arrayOf(m.packages).some(notMaintMode) ? h("button", { cls: "btn", type: "button", text: "Run package\u2026",
         on: { click: function () { state.routeTab = "maintenance"; renderRoute(); } } }) : null,

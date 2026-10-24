@@ -50,7 +50,7 @@ func setupTestServerWithResponse(t *testing.T) (*Server, *storage.Store, *respon
 
 	// Use in-process client for testing
 	srv.SetResponseAuth(responseauth.NewInProcessClient(auth))
-	pinTestOwner(t, srv, auth, authDir)
+	useTestAuthority(srv, auth)
 
 	cleanup := func() {
 		store.Close()

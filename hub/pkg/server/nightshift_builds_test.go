@@ -25,7 +25,7 @@ func TestNightshiftAgentBuilds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	issue := adminPost(srv, "/api/v1/integrations/nightshift/approval-key", ``, "")
+	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}

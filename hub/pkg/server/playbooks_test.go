@@ -32,6 +32,29 @@ func playbookTestServer(t *testing.T) *Server {
 	return srv
 }
 
+// startPlaybook runs a saved playbook: authorized and started in the one
+// request. It returns the run's id and the audit text of its authorization.
+func startPlaybook(t *testing.T, srv *Server, run string) (string, string) {
+	t.Helper()
+	authorityOf(t, srv)
+	w := postAdmin(srv, "/api/v1/maintenance/playbooks/run", run)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("run: %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	authz := auditRowsOf(t, srv.store, "ACTION_AUTHORIZED")
+	words := authorityWords(t, srv)
+	if out.Run.ID == "" || len(authz) != 1 || !strings.Contains(authz[0].Details, out.Run.ID) || len(words) != 1 {
+		t.Fatalf("the run should carry its authorization id: %s %+v %v", w.Body.String(), authz, words)
+	}
+	return out.Run.ID, words[0]
+}
+
 const testPlaybook = `{"playbook":{"id":"weekly-tidy","name":"Weekly tidy","maintenance_mode":true,
 	"steps":[{"package":"windows-cleanup","mode":"enforce"},{"package":"windows-audit","mode":"audit"}]}}`
 
@@ -70,8 +93,8 @@ func TestPlaybookSettings(t *testing.T) {
 	}
 }
 
-// A playbook run asks once for every step, then runs the steps one after
-// another inside maintenance mode, with grants that live for the window.
+// A playbook run is authorized once for every step, then runs the steps one
+// after another inside maintenance mode, with grants that live for the window.
 func TestPlaybookRunInOrder(t *testing.T) {
 	t.Parallel()
 	srv := playbookTestServer(t)
@@ -79,28 +102,15 @@ func TestPlaybookRunInOrder(t *testing.T) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	run := `{"playbook_id":"weekly-tidy","endpoint_ids":["ep-lap"]}`
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/playbooks/run", run, ""))
-	owner := ownerOf(t, srv)
-	v, err := owner.auth.GetApproval(id, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	id, summary := startPlaybook(t, srv, run)
 	// cleanup 60 min + audit 5 min + 10 min slack per step and for each
 	// maintenance mode run: 1 h 45 min, so a 2-hour window.
 	// Steps that change something wait for people by default.
 	for _, want := range []string{`Playbook "Weekly tidy"`, "in order within 2 hours",
 		"keep awake on, settings hours=2; cleanup; audit (audit); keep awake off", "Steps that change something: waits while someone is using the machine"} {
-		if !strings.Contains(v.Summary, want) {
-			t.Fatalf("summary lacks %q: %s", want, v.Summary)
+		if !strings.Contains(summary, want) {
+			t.Fatalf("authorization lacks %q: %s", want, summary)
 		}
-	}
-	if v.Offer != "" {
-		t.Fatalf("a playbook run must not offer an approve-all rule: %q", v.Offer)
-	}
-	owner.approve(t, id)
-	w := adminPost(srv, "/api/v1/maintenance/playbooks/run", run, id)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
 	}
 
 	want := []string{"windows-maintenance-mode", "windows-cleanup", "windows-audit", "windows-maintenance-mode"}
@@ -167,11 +177,7 @@ func TestPlaybookRunWindowEnds(t *testing.T) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	run := `{"playbook_id":"weekly-tidy","endpoint_ids":["ep-lap"]}`
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/playbooks/run", run, ""))
-	ownerOf(t, srv).approve(t, id)
-	if w := adminPost(srv, "/api/v1/maintenance/playbooks/run", run, id); w.Code != http.StatusCreated {
-		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
-	}
+	id, _ := startPlaybook(t, srv, run)
 	if n := finishJobs(t, srv, "ep-lap"); n != 1 {
 		t.Fatalf("first step: %d jobs", n)
 	}
@@ -190,7 +196,7 @@ func TestPlaybookRunWindowEnds(t *testing.T) {
 }
 
 // "Don't wait for open apps" runs the changing steps even with someone at
-// the machine, and the owner sees that in the ask.
+// the machine, and the authorization says so.
 func TestPlaybookRunDontWait(t *testing.T) {
 	t.Parallel()
 	srv := playbookTestServer(t)
@@ -198,15 +204,9 @@ func TestPlaybookRunDontWait(t *testing.T) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	run := `{"playbook_id":"weekly-tidy","endpoint_ids":["ep-lap"],"dont_wait":true}`
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/playbooks/run", run, ""))
-	owner := ownerOf(t, srv)
-	v, err := owner.auth.GetApproval(id, "")
-	if err != nil || !strings.Contains(v.Summary, "does not wait for open apps or games") {
-		t.Fatalf("summary: %v %+v", err, v)
-	}
-	owner.approve(t, id)
-	if w := adminPost(srv, "/api/v1/maintenance/playbooks/run", run, id); w.Code != http.StatusCreated {
-		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
+	_, summary := startPlaybook(t, srv, run)
+	if !strings.Contains(summary, "does not wait for open apps or games") {
+		t.Fatalf("summary: %s", summary)
 	}
 	finishJobs(t, srv, "ep-lap") // maintenance mode on
 	srv.advancePlaybookRuns(time.Now().UTC())
@@ -232,16 +232,10 @@ func TestPlaybookWaitsForTheRestart(t *testing.T) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	run := `{"playbook_id":"patch","endpoint_ids":["ep-lap"]}`
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/playbooks/run", run, ""))
-	owner := ownerOf(t, srv)
-	v, _ := owner.auth.GetApproval(id, "")
+	_, summary := startPlaybook(t, srv, run)
 	// The names shorten to fit once the window sentence is in.
-	if !strings.Contains(v.Summary, "reboot") || !strings.Contains(v.Summary, "careful") {
-		t.Fatalf("the restart must show as careful: %s", v.Summary)
-	}
-	owner.approve(t, id)
-	if w := adminPost(srv, "/api/v1/maintenance/playbooks/run", run, id); w.Code != http.StatusCreated {
-		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
+	if !strings.Contains(summary, "reboot") || !strings.Contains(summary, "careful") {
+		t.Fatalf("the restart must show as careful: %s", summary)
 	}
 	offers, _ := srv.responseStore.OfferPendingJobs("default", "ep-lap", 10, time.Minute)
 	if len(offers) != 1 {

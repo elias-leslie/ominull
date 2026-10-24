@@ -71,7 +71,7 @@ The hub's run states: `waiting`, `running`, `stalled`, `needs_hands`, `no_result
 attention.
 
 `GET /api/v1/maintenance/wait?ids=ID[,ID...]&wait=25[&all=1]` takes job ids, run ids (a maintenance run's or one-off
-script's owner approval) and playbook run ids. It is a long-poll woken by job events (ack, heartbeat change, result,
+script's authorization id) and playbook run ids. It is a long-poll woken by job events (ack, heartbeat change, result,
 cancel) and answers once any run ends or one needs attention (`all=1`: once all have ended, or one needs attention).
 
 `ominullctl maint wait ID... [--all] [--timeout D]` prints one line per run and exits 0 (ok), 3 (a run failed), 4 (a

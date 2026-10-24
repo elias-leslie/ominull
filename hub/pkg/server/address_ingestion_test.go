@@ -67,7 +67,7 @@ func TestOperatorWritesPreserveIPv6AuditPeer(t *testing.T) {
 			r.RemoteAddr = "[2001:db8::2]:45678"
 			r.Header.Set("X-API-Key", "mock_admin_token")
 			// An exclusion waits for the owner; the test owner approves it.
-			w := serveApproved(t, srv, srv.Handler(), r, tc.body)
+			w := serveAuthorized(t, srv.Handler(), r)
 			if w.Code < 200 || w.Code >= 300 {
 				t.Fatalf("write: %d %s", w.Code, w.Body.String())
 			}

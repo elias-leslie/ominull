@@ -138,13 +138,13 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyTuning saves a judged tuning change: at once when it only tightens,
-// after the owner's approval when it loosens. The caller holds policyMu.
+// after the authorization when it loosens. The caller holds policyMu.
 func (s *Server) applyTuning(w http.ResponseWriter, r *http.Request, c policyChange, action string) {
 	c, ok := s.tightenFirst(w, r, c)
 	if !ok {
 		return
 	}
-	approvalID, ok := s.policyApproved(w, r, c)
+	approvalID, ok := s.policyAuthorized(w, r, c)
 	if !ok {
 		return
 	}
@@ -410,7 +410,7 @@ func (s *Server) handleSuppressPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := tuningChange("suppress_pair", before, after)
-	approvalID, ok := s.policyApproved(w, r, c)
+	approvalID, ok := s.policyAuthorized(w, r, c)
 	if !ok {
 		return
 	}

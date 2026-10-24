@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -69,25 +71,25 @@ func finishJobs(t *testing.T, srv *Server, ep string) int {
 	return len(offers)
 }
 
-// Package runs: a baseline audit needs no tap, enforce asks once and the
-// "approve all like this" answer covers it (and auditing with the same
-// settings) from then on.
-func TestPackageRunsUnderOwnerApproval(t *testing.T) {
+// Package runs: an audit and an enforce run are both authorized and
+// dispatched in the one request, each under its own authorization (the
+// header the handler sees), and the job's grant binds its own payload.
+func TestPackageRunsAreAuthorized(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.responseEnabled = true
-	owner := ownerOf(t, srv)
+	authorityOf(t, srv)
 	now := time.Now().UTC()
 	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	syncRealPackage(t, srv, "audit.ps1")
+	sc, _ := syncRealPackage(t, srv, "audit.ps1")
 
 	audit := `{"endpoint_ids":["ep-lap"],"packages":["windows-audit"],"mode":"audit"}`
-	w := adminPost(srv, "/api/v1/maintenance/run", audit, "")
+	w := postAdmin(srv, "/api/v1/maintenance/run", audit)
 	if w.Code != http.StatusCreated {
-		t.Fatalf("a baseline audit should run without a tap: %d %s", w.Code, w.Body.String())
+		t.Fatalf("audit: %d %s", w.Code, w.Body.String())
 	}
 	var out struct {
 		Jobs []packageRunJob `json:"jobs"`
@@ -109,32 +111,44 @@ func TestPackageRunsUnderOwnerApproval(t *testing.T) {
 	}
 
 	enforce := strings.Replace(audit, `"audit"}`, `"enforce"}`, 1)
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/run", enforce, ""))
-	v, err := owner.auth.GetApproval(id, "")
-	if err != nil || v.Kind != string(response.ActionKindScriptExec) || !strings.Contains(v.Summary, "windows-audit (enforce)") {
-		t.Fatalf("approval: %v %+v", err, v)
+	if w := postAdmin(srv, "/api/v1/maintenance/run", enforce); w.Code != http.StatusCreated {
+		t.Fatalf("enforce should be signed and dispatched on the first request: %d %s", w.Code, w.Body.String())
 	}
-	if _, err := owner.auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: id, Decision: "rule", Assertion: owner.approver.Assert(v.Challenge, "rule")}); err != nil {
-		t.Fatal(err)
+	authz := auditRowsOf(t, store, "ACTION_AUTHORIZED")
+	enforced := 0
+	for _, a := range authz {
+		if strings.Contains(a.Details, "windows-audit (enforce)") {
+			enforced++
+		}
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/run", enforce, id); w.Code != http.StatusCreated {
-		t.Fatalf("approved run: %d %s", w.Code, w.Body.String())
+	if len(authz) != 2 || enforced != 1 {
+		t.Fatalf("each run is authorized once: %+v", authz)
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/run", enforce, ""); w.Code != http.StatusCreated {
-		t.Fatalf("a covered run should not ask: %d %s", w.Code, w.Body.String())
+	if n := len(auditRowsOf(t, store, "ACTION_REFUSED")); n != 0 {
+		t.Fatalf("%d refusals", n)
+	}
+	if jobs, _ := srv.responseStore.ScriptJobs("default", "ep-lap", sc.ID, 10); len(jobs) != 2 {
+		t.Fatalf("want 2 jobs, got %d", len(jobs))
 	}
 }
 
-// The schedule runs effective settings: enabling a safe package in audit
-// mode needs no tap; changed settings ask once and run after the tap; a
-// category switch turns a package off without asking.
+// refusingAuthority answers every authorization with a refusal.
+type refusingAuthority struct{ responseauth.Client }
+
+func (refusingAuthority) Authorize(context.Context, *responseauth.AuthorizeInput) (*responseauth.Authorization, error) {
+	return nil, errors.New("not today")
+}
+
+// The schedule runs effective settings: enabling a package runs it at once;
+// changed settings run signed with the new setting; a run the authority
+// cannot sign shows as a block with its reason and is tried again; a category
+// switch turns a package off.
 func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
-	ownerOf(t, srv).auth.UseApprovalRows(false) // the ask flow as before Approvals rows (approval_rows_test.go covers rows)
 	defer store.Close()
 	srv.responseEnabled = true
-	owner := ownerOf(t, srv)
+	owner := authorityOf(t, srv)
 	now := time.Now().UTC()
 	online := func(at time.Time) {
 		if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: at}); err != nil {
@@ -175,8 +189,8 @@ func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
 	if n := countJobs(); n != 1 {
 		t.Fatalf("an enabled baseline audit should run at once: %d jobs", n)
 	}
-	if p := owner.auth.PendingApprovals(); len(p) != 0 {
-		t.Fatalf("a baseline audit asked the owner: %+v", p)
+	if n := len(auditRowsOf(t, store, "SCRIPT_RUN_DISPATCHED")); n != 1 {
+		t.Fatalf("a dispatched run is audited: %d", n)
 	}
 	srv.runMaintenanceSchedules(now.Add(time.Minute))
 	if n := countJobs(); n != 1 {
@@ -188,7 +202,7 @@ func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
 		t.Fatalf("a package that just succeeded is not due: %d", n)
 	}
 
-	// A host override that changes a setting asks the owner once.
+	// A host override that changes a setting runs with the new setting.
 	var p *scripts.PackageParam
 	for i := range h.Params {
 		if h.Params[i].Type == "int" {
@@ -214,30 +228,32 @@ func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
 	}
 	later := now.Add(25 * time.Hour)
 	online(later)
+	// The authority refuses the run for a pass: it is blocked with the
+	// reason, shows on the board, and nothing is dispatched.
+	srv.SetResponseAuth(refusingAuthority{Client: responseauth.NewInProcessClient(owner.auth)})
 	srv.runMaintenanceSchedules(later)
-	pending := owner.auth.PendingApprovals()
-	if countJobs() != 1 || len(pending) != 1 || !strings.Contains(pending[0].Summary, p.Name) {
-		t.Fatalf("changed settings should ask once, showing the change: %d jobs %+v", countJobs(), pending)
-	}
-	// The laptop drops off and comes back: the same ask is still the one.
-	online(later.Add(-time.Hour))
-	srv.runMaintenanceSchedules(later.Add(time.Minute))
-	online(later.Add(2 * time.Minute))
-	srv.runMaintenanceSchedules(later.Add(2 * time.Minute))
-	if p := owner.auth.PendingApprovals(); len(p) != 1 {
-		t.Fatalf("the schedule asked twice: %d", len(p))
+	blocks := srv.maintBlocks.list()
+	if countJobs() != 1 || len(blocks) != 1 || !strings.Contains(blocks[0].Reason, "the authority did not sign this run: not today") {
+		t.Fatalf("a run the authority cannot sign should block with its reason: %d jobs %+v", countJobs(), blocks)
 	}
 	findings, err := srv.maintenanceFindings(later)
 	if err != nil || len(findings) != 2 || findings[1].SeverityID != ocsfSevMedium {
-		t.Fatalf("a waiting run should show on the board: %v %+v", err, findings)
+		t.Fatalf("a blocked run should show on the board: %v %+v", err, findings)
 	}
-	ask := pending[0]
-	if _, err := owner.auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: ask.ID, Decision: "approve", Assertion: owner.approver.Assert(ask.Challenge, "approve")}); err != nil {
-		t.Fatal(err)
-	}
-	srv.runMaintenanceSchedules(later.Add(2*time.Minute + 10*time.Second))
+	// The authority is back: the next pass signs and dispatches at once, with
+	// the changed setting, and the block is gone.
+	srv.SetResponseAuth(responseauth.NewInProcessClient(owner.auth))
+	online(later.Add(2 * time.Minute))
+	srv.runMaintenanceSchedules(later.Add(2 * time.Minute))
 	if n := countJobs(); n != 2 {
-		t.Fatalf("the approved run was not dispatched: %d", n)
+		t.Fatalf("the changed-settings run was not dispatched: %d", n)
+	}
+	if blocks := srv.maintBlocks.list(); len(blocks) != 0 {
+		t.Fatalf("the block should clear once the run is signed: %+v", blocks)
+	}
+	jobs, _ := srv.responseStore.ScriptJobs("default", "ep-lap", sc.ID, 50)
+	if !strings.Contains(jobs[0].RequestJSON, p.Name) {
+		t.Fatalf("the run does not carry the changed setting %s: %s", p.Name, jobs[0].RequestJSON)
 	}
 	finishJobs(t, srv, "ep-lap")
 
@@ -248,8 +264,8 @@ func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
 	muchLater := later.Add(50 * time.Hour)
 	online(muchLater)
 	srv.runMaintenanceSchedules(muchLater)
-	if n := countJobs(); n != 2 || len(owner.auth.PendingApprovals()) != 0 {
-		t.Fatalf("a switched-off category ran or asked: %d", n)
+	if n := countJobs(); n != 2 {
+		t.Fatalf("a switched-off category ran: %d", n)
 	}
 	var view struct {
 		Categories []struct {
@@ -294,8 +310,8 @@ func TestPackageRunDue(t *testing.T) {
 }
 
 // Every package in the repository, synced into the library as the release
-// does, is offered to the owner under its own name as a released package,
-// never as an unknown script (1.8.83: a stale library copy of windows-reboot
+// does, runs under its own name as a released package, never as an unknown
+// script (1.8.83: a stale library copy of windows-reboot
 // read "not a released package").
 func TestEveryReleasedPackageRunsAsReleased(t *testing.T) {
 	t.Parallel()
@@ -311,7 +327,7 @@ func TestEveryReleasedPackageRunsAsReleased(t *testing.T) {
 			srv, store := setupTestServer(t)
 			defer store.Close()
 			srv.responseEnabled = true
-			ownerOf(t, srv)
+			authorityOf(t, srv)
 			for _, ep := range []storage.Endpoint{
 				{ID: "ep-win", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: time.Now().UTC()},
 				{ID: "ep-lin", TenantID: "default", Hostname: "server-1", OS: "Ubuntu 24.04", Status: "online", LastSeenAt: time.Now().UTC()},
@@ -326,8 +342,8 @@ func TestEveryReleasedPackageRunsAsReleased(t *testing.T) {
 				ep = "ep-lin"
 			}
 			body := `{"endpoint_ids":["` + ep + `"],"packages":["` + h.Name + `"],"mode":"enforce"}`
-			w := adminPost(srv, "/api/v1/maintenance/run", body, "")
-			if w.Code != http.StatusAccepted && w.Code != http.StatusCreated {
+			w := postAdmin(srv, "/api/v1/maintenance/run", body)
+			if w.Code != http.StatusCreated {
 				t.Fatalf("%s: %d %s", h.Name, w.Code, w.Body.String())
 			}
 			short := strings.TrimPrefix(strings.TrimPrefix(h.Name, "windows-"), "linux-")

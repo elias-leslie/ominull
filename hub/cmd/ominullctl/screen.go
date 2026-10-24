@@ -2,9 +2,8 @@ package main
 
 // ominullctl screen: remote screen sessions (docs/REMOTE_SCREEN.md section 8).
 //
-// screen open asks for a session on an enrolled endpoint (one passkey tap on
-// the owner's phone; POST /api/v1/screen/sessions answers 202 until then),
-// then starts the native viewer and hands it the session. screen hold asks
+// screen open asks for a session on an enrolled endpoint (POST
+// /api/v1/screen/sessions; the hub authorizes it itself), then starts the native viewer and hands it the session. screen hold asks
 // once and keeps the session for an agent's info/shot/click/... commands,
 // each of which rotates the one-use operator token (/attach) and runs
 // `ominull-screen ctl <action>` for one attach-act-detach. screen watch
@@ -62,7 +61,7 @@ const maxScreenTypeText = 64 * 1024
 var screenStdin io.Reader = os.Stdin
 
 // screenAgentLabel is --agent, else $OMINULL_AGENT: a short name for the
-// agent asking, which the hub shows in the owner's approval and the audit
+// agent asking, which the hub records in the audit
 // (X-Ominull-Agent). Empty means none.
 func screenAgentLabel(flagVal string) (string, error) {
 	v := strings.TrimSpace(flagVal)
@@ -144,13 +143,13 @@ const screenHelp = `Remote screen (Windows endpoints that report the screen capa
 
 Owner viewing:
   ominullctl screen open [--view] [--ttl 90m] [--viewer PATH] [--agent LABEL] ENDPOINT
-      One owner tap, then the screen viewer (ominull-screen) shows ENDPOINT's
+      Opens a session, then the screen viewer (ominull-screen) shows ENDPOINT's
       screen. --view: watch only. The session ends when the viewer closes.
 
 Agent control (a held session):
   ominullctl screen hold [--view] [--ttl 90m] [--agent LABEL] ENDPOINT
-      One owner tap; the owner's phone says an agent with the admin key asks.
-      --agent (default $OMINULL_AGENT) names the agent in that ask and in the
+      Opens a session an agent then drives.
+      --agent (default $OMINULL_AGENT) names the agent in the
       audit: up to 64 printable ASCII characters.
       Every command below then reuses that session until it ends - no more
       taps. Prints the screen info (monitors and sizes).
@@ -185,7 +184,7 @@ Settings:
       Shows or changes whether a screen session first asks the person at the
       keyboard to allow it: for ENDPOINT, or the fleet default for machines
       without their own setting (off unless set). on applies at once; off
-      (and fleet, when it means off) waits for the owner's tap. fleet drops
+      (and fleet, when it means off) is recorded in the audit. fleet drops
       ENDPOINT's own setting, or with no ENDPOINT forgets the fleet default.
 
 Coordinates: X and Y are pixels in the last screenshot taken with the same
@@ -193,8 +192,7 @@ Coordinates: X and Y are pixels in the last screenshot taken with the same
 the position off it, act with the same flags. --max-edge defaults to 1280
 (or $OMINULL_SCREEN_MAX_EDGE).
 
-One tap per held session: hold asks the owner once; the other commands never
-ask. When the session ends (its time limit, the hub ending an idle session,
+One session per hold; the other commands reuse it. When the session ends (its time limit, the hub ending an idle session,
 the person at the keyboard declining or ending it, screen end), the next
 command fails with "open a new one with ominullctl screen hold ENDPOINT"
 instead of asking the owner again; run screen hold for a new tap.
@@ -266,7 +264,7 @@ func (c *APIClient) screenOpen(args []string, out io.Writer) error {
 	if *ttl > 0 {
 		body["max_duration_seconds"] = int64((*ttl + time.Second - 1) / time.Second)
 	}
-	raw, err := c.ownerApproved(http.MethodPost, "/api/v1/screen/sessions", body)
+	raw, err := c.doRequest(http.MethodPost, "/api/v1/screen/sessions", body)
 	if err != nil {
 		return err
 	}
@@ -386,7 +384,7 @@ func loadHeldScreen(endpoint string) (*heldScreen, error) {
 		if why, rerr := os.ReadFile(heldScreenEnded(endpoint)); rerr == nil {
 			return nil, screenEndedError(endpoint, strings.TrimSpace(string(why)))
 		}
-		return nil, fmt.Errorf("no screen session to %s is held here; run ominullctl screen hold %s (one owner tap)", endpoint, endpoint)
+		return nil, fmt.Errorf("no screen session to %s is held here; run ominullctl screen hold %s ", endpoint, endpoint)
 	}
 	var h heldScreen
 	if err := json.Unmarshal(raw, &h); err != nil || h.SessionID == "" {
@@ -508,7 +506,7 @@ func (c *APIClient) screenCtl(h *heldScreen, tool string, args []string, text st
 	return out, nil
 }
 
-// screenHold: one owner tap for a session an agent then drives with the
+// screenHold: opens a session an agent then drives with the
 // other screen commands.
 func (c *APIClient) screenHold(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("screen hold", flag.ContinueOnError)
@@ -557,7 +555,7 @@ func (c *APIClient) screenHold(args []string, out io.Writer) error {
 	if *ttl > 0 {
 		body["max_duration_seconds"] = int64((*ttl + time.Second - 1) / time.Second)
 	}
-	raw, err := c.ownerApproved(http.MethodPost, "/api/v1/screen/sessions", body)
+	raw, err := c.doRequest(http.MethodPost, "/api/v1/screen/sessions", body)
 	if err != nil {
 		return err
 	}
@@ -825,7 +823,7 @@ func (c *APIClient) screenEnd(args []string, out io.Writer) error {
 }
 
 // screenSettings shows or changes screen.ask_first (GET/PUT
-// /api/v1/screen/settings). Turning it off waits for the owner's tap.
+// /api/v1/screen/settings).
 func (c *APIClient) screenSettings(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("screen settings", flag.ContinueOnError)
 	ask := fs.String("ask-first", "", "on, off, or fleet (follow the fleet default / forget it)")
@@ -854,9 +852,9 @@ func (c *APIClient) screenSettings(args []string, out io.Writer) error {
 	case "":
 		raw, err = c.doRequest(http.MethodGet, path, nil)
 	case "on", "off":
-		raw, err = c.ownerApproved(http.MethodPut, path, map[string]bool{"ask_first": *ask == "on"})
+		raw, err = c.doRequest(http.MethodPut, path, map[string]bool{"ask_first": *ask == "on"})
 	case "fleet":
-		raw, err = c.ownerApproved(http.MethodPut, path, map[string]bool{"reset": true})
+		raw, err = c.doRequest(http.MethodPut, path, map[string]bool{"reset": true})
 	default:
 		return errors.New("--ask-first is on, off or fleet")
 	}

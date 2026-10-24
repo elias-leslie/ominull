@@ -58,7 +58,7 @@ func TestAnOrdinaryPeerIsStillQuarantined(t *testing.T) {
 	body := strings.NewReader(`{"target_ip":"10.0.0.77","reason":"test"}`)
 	req := httptest.NewRequest("POST", "/api/v1/mesh/quarantine", body)
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	w := serveApproved(t, srv, srv.Handler(), req, `{"target_ip":"10.0.0.77","reason":"test"}`)
+	w := serveAuthorized(t, srv.Handler(), req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("quarantining an ordinary peer returned %d: %s", w.Code, w.Body.String())

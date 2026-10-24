@@ -116,14 +116,9 @@
       <select name="program" id="term-program"></select>
     </label>
     <p class="dim-2" id="term-runs-as"></p>
-    <p class="page-note">Your phone gets an approval request. Confirm it with your passkey and the shell opens here. Everything typed and shown is recorded and sealed into evidence when the session ends. Up to {{.HostCap}} terminals per host and {{.TenantCap}} in all.</p>
+    <p class="page-note">The shell opens here at once. Everything typed and shown is recorded and sealed into evidence when the session ends. Up to {{.HostCap}} terminals per host and {{.TenantCap}} in all.</p>
     <p class="page-problem" id="term-open-problem" role="alert" hidden></p>
-    <button class="btn btn-primary" type="submit" id="term-open-btn">Ask for approval</button>
-    <div class="approval-wait" id="term-approval" role="status" aria-live="polite" hidden>
-      <div class="approval-head"><b>Approve on your phone</b><span class="fill"></span><span class="approval-time dim-2" id="term-approval-time"></span></div>
-      <p class="approval-state" id="term-approval-state"></p>
-      <div class="approval-actions"><button class="btn mini" type="button" id="term-approval-stop">Stop waiting</button></div>
-    </div>
+    <button class="btn btn-primary" type="submit" id="term-open-btn">Open terminal</button>
     {{else}}<p class="dim-2">No host has an enrolled agent.</p>{{end}}
   </form>
 </section>

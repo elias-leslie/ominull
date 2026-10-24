@@ -6,7 +6,7 @@ package scripts
 // name), a category, the official way to uninstall it and a risk. The hub
 // keeps the catalog as data (one settings row, seeded from
 // software_catalog_seed.json) and hands it to the package as a "catalog"
-// parameter, so a run's digest, and the owner's approval of it, covers the
+// parameter, so a run's digest, and the authorization of it, covers the
 // exact catalog the run uses. The script never takes a command from the
 // catalog: msi runs msiexec /x with the product code the machine itself
 // lists, registry runs the machine's own (quiet) uninstall string, plus at
@@ -39,7 +39,7 @@ type CatalogEntry struct {
 }
 
 // CatalogCategories are the categories an entry may name, with the words
-// the console and the owner's approval use.
+// the console and the authorization use.
 var CatalogCategories = map[string]string{
 	"games":       "Games",
 	"game_addons": "Game add-ons and launchers",

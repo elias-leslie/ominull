@@ -60,14 +60,18 @@ func TestMonitorOnlyRefusesHostIsolation(t *testing.T) {
 	if ep, _ := store.GetEndpoint("ep-pve"); !ep.MonitorOnly || ep.MonitorOnlyReason() == "" || ep.ResponseProfileRev != 1 {
 		t.Fatalf("ep-pve: %+v", ep)
 	}
-	// Self-labelled endpoints still go to the owner.
+	// Self-labelled endpoints are not monitor-only: the authority signs the
+	// isolation on the first request.
 	for _, id := range []string{"ep-role", "ep-cant", "ep-old"} {
-		if w := adminPost(srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"`+id+`","force":true}`, ""); w.Code != http.StatusAccepted {
-			t.Fatalf("%s: want 202 approval, got %d %s", id, w.Code, w.Body.String())
+		if w := adminPost(srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"`+id+`","force":true}`, ""); w.Code != http.StatusOK {
+			t.Fatalf("%s: want 200 isolated at once, got %d %s", id, w.Code, w.Body.String())
 		}
-		if ep, _ := store.GetEndpoint(id); ep.MonitorOnly {
-			t.Fatalf("%s reported monitor-only", id)
+		if ep, _ := store.GetEndpoint(id); ep.MonitorOnly || !ep.IsIsolated {
+			t.Fatalf("%s monitor-only or not isolated: %+v", id, ep)
 		}
+	}
+	if !authorizedAuditHas(t, store, "ep-role") {
+		t.Fatalf("no ACTION_AUTHORIZED row for ep-role: %+v", authorizedAudit(t, store))
 	}
 	logs, _ := store.ListAuditLogs("", 100)
 	found := false
@@ -79,7 +83,7 @@ func TestMonitorOnlyRefusesHostIsolation(t *testing.T) {
 	}
 }
 
-// Bulk isolation leaves monitor-only endpoints out of the approval and the
+// Bulk isolation leaves monitor-only endpoints out of the authorization and the
 // change, and says so; a bulk of only monitor-only hosts is refused.
 func TestBulkIsolationLeavesMonitorOnlyOut(t *testing.T) {
 	t.Parallel()
@@ -89,7 +93,7 @@ func TestBulkIsolationLeavesMonitorOnlyOut(t *testing.T) {
 	monitorOnly(t, srv, "ep-pve")
 
 	body := `{"scope":"all","force":true}`
-	w := serveApproved(t, srv, srv.Handler(), adminRequest("POST", "/api/v1/endpoints/isolate-bulk", body), body)
+	w := serveAuthorized(t, srv.Handler(), adminRequest("POST", "/api/v1/endpoints/isolate-bulk", body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("bulk isolate: %d %s", w.Code, w.Body.String())
 	}
@@ -112,7 +116,7 @@ func TestBulkIsolationLeavesMonitorOnlyOut(t *testing.T) {
 
 // The store refuses whoever asks (the detector's automatic isolation calls it
 // directly) and a bulk SQL update skips monitor-only rows. An isolated
-// endpoint cannot be made monitor-only: that would release it without the owner.
+// endpoint cannot be made monitor-only: that would release it without an authorization.
 func TestStoreNeverIsolatesMonitorOnly(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
@@ -147,9 +151,10 @@ func TestStoreNeverIsolatesMonitorOnly(t *testing.T) {
 	}
 }
 
-// Lifting monitor-only is a capability raise: it takes the owner's approval,
-// for the revision of the setting the owner was shown.
-func TestAllowIsolationNeedsTheOwner(t *testing.T) {
+// Lifting monitor-only is a capability raise: the authority signs it on the
+// first request, for the revision of the setting the caller names, and only
+// for the endpoint it names.
+func TestAllowIsolationIsAuthorizedForTheNamedRevision(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -160,34 +165,38 @@ func TestAllowIsolationNeedsTheOwner(t *testing.T) {
 	if w := adminPost(srv, "/api/v1/endpoints/allow-isolation", `{"endpoint_id":"ep-pve","reason":"x"}`, ""); w.Code != http.StatusConflict {
 		t.Fatalf("lift without a revision: %d %s", w.Code, w.Body.String())
 	}
-	body := `{"endpoint_id":"ep-pve","reason":"no longer a hypervisor","revision":1}`
-	id := pendingID(t, adminPost(srv, "/api/v1/endpoints/allow-isolation", body, ""))
 	if ep, _ := store.GetEndpoint("ep-pve"); !ep.MonitorOnly {
-		t.Fatal("lifted before the owner approved")
+		t.Fatal("lifted without a revision")
 	}
-	ownerOf(t, srv).approve(t, id)
-	if w := adminPost(srv, "/api/v1/endpoints/allow-isolation", `{"endpoint_id":"ep-other","reason":"x","revision":1}`, id); w.Code != http.StatusForbidden {
-		t.Fatalf("approval for ep-pve used on ep-other: %d %s", w.Code, w.Body.String())
-	}
-	if w := adminPost(srv, "/api/v1/endpoints/allow-isolation", body, id); w.Code != http.StatusOK {
-		t.Fatalf("approved lift: %d %s", w.Code, w.Body.String())
+	body := `{"endpoint_id":"ep-pve","reason":"no longer a hypervisor","revision":1}`
+	if w := adminPost(srv, "/api/v1/endpoints/allow-isolation", body, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body.String())
 	}
 	if ep, _ := store.GetEndpoint("ep-pve"); ep.MonitorOnly || ep.ResponseProfile != "" || ep.ResponseProfileRev != 2 {
 		t.Fatalf("still monitor-only after the lift: %+v", ep)
 	}
-	if w := adminPost(srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"ep-pve","force":true}`, ""); w.Code != http.StatusAccepted {
-		t.Fatalf("isolation after lift: %d", w.Code)
+	if ep, _ := store.GetEndpoint("ep-other"); !ep.MonitorOnly {
+		t.Fatal("the lift reached another endpoint")
+	}
+	if !authorizedAuditHas(t, store, "ep-pve") {
+		t.Fatalf("no ACTION_AUTHORIZED row for the lift: %+v", authorizedAudit(t, store))
+	}
+	if w := adminPost(srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"ep-pve","force":true}`, ""); w.Code != http.StatusOK || !isolated(t, store, "ep-pve") {
+		t.Fatalf("isolation after lift: %d %s", w.Code, w.Body.String())
+	}
+	if err := store.SetEndpointIsolation("ep-pve", false, nil); err != nil {
+		t.Fatal(err)
 	}
 
-	// An older approved lift cannot erase a newer monitor-only decision.
+	// An older lift cannot erase a newer monitor-only decision.
 	monitorOnly(t, srv, "ep-pve") // revision 3
 	if _, err := store.LiftMonitorOnly("ep-pve", 1); !errors.Is(err, storage.ErrProfileChanged) {
 		t.Fatalf("stale revision lifted the setting: %v", err)
 	}
 	stale := `{"endpoint_id":"ep-pve","reason":"again","revision":1}`
-	w := serveApproved(t, srv, srv.Handler(), adminRequest("POST", "/api/v1/endpoints/allow-isolation", stale), stale)
+	w := serveAuthorized(t, srv.Handler(), adminRequest("POST", "/api/v1/endpoints/allow-isolation", stale))
 	if w.Code != http.StatusConflict {
-		t.Fatalf("approval for revision 1 at revision 3: %d %s", w.Code, w.Body.String())
+		t.Fatalf("lift for revision 1 at revision 3: %d %s", w.Code, w.Body.String())
 	}
 	if ep, _ := store.GetEndpoint("ep-pve"); !ep.MonitorOnly || ep.ResponseProfileRev != 3 {
 		t.Fatalf("newer setting erased: %+v", ep)

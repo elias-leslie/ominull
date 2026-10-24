@@ -12,7 +12,7 @@ import (
 // Retiring an agent release (Nightshift's one-tap undo for a release signed
 // in the owner's session): POST /api/v1/agents/rollback halts any staged
 // rollout of the version, drops its queued updates, and refuses to roll it
-// again. It only stops a release spreading, so it needs no owner tap.
+// again. It only stops a release spreading, so it needs no authorization.
 // Machines already running it stay on it until a newer release reaches them
 // (agents install strictly newer versions only).
 const retiredAgentVersionsSetting = "retired_agent_versions"

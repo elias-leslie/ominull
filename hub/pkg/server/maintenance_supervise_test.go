@@ -56,14 +56,9 @@ func waitFor(t *testing.T, srv *Server, query string) waitView {
 func TestSupervisedRun(t *testing.T) {
 	t.Parallel()
 	srv := playbookTestServer(t)
-	ownerOf(t, srv)
+	authorityOf(t, srv)
 	audit := `{"endpoint_ids":["ep-lap"],"packages":["windows-audit"],"mode":"audit"}`
-	w := adminPost(srv, "/api/v1/maintenance/run", audit, "")
-	if w.Code == http.StatusAccepted {
-		id := pendingID(t, w)
-		ownerOf(t, srv).approve(t, id)
-		w = adminPost(srv, "/api/v1/maintenance/run", audit, id)
-	}
+	w := postAdmin(srv, "/api/v1/maintenance/run", audit)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("run: %d %s", w.Code, w.Body.String())
 	}
@@ -139,7 +134,7 @@ func TestSupervisedRun(t *testing.T) {
 	}
 
 	// Cancel rides the next heartbeat's reply.
-	if w := adminPost(srv, "/api/v1/response/jobs/cancel", `{"job_id":"`+jobID+`"}`, ""); w.Code != http.StatusOK {
+	if w := postAdmin(srv, "/api/v1/response/jobs/cancel", `{"job_id":"`+jobID+`"}`); w.Code != http.StatusOK {
 		t.Fatalf("cancel: %d %s", w.Code, w.Body.String())
 	}
 	if _, out := heartbeat(t, srv, "ep-lap", `{"job_id":"`+jobID+`","lease_id":"`+lease+`","phase":"running"}`); out["cancel"] != true {
@@ -172,13 +167,13 @@ func TestSupervisedRun(t *testing.T) {
 	}
 }
 
-// One-off scripts: one owner tap per run, an approval that says what the
-// script is and why, never a baseline or a rule, the run record keeps the
-// script, and promoting it needs a package header and a new name.
+// One-off scripts: each run is authorized on its own (the audit says what the
+// script is and why), the run record keeps the script, and promoting it needs
+// a package header and a new name.
 func TestOneOffScript(t *testing.T) {
 	t.Parallel()
 	srv := playbookTestServer(t)
-	ownerOf(t, srv)
+	authorityOf(t, srv)
 	if err := srv.store.UpsertEndpoint(storage.Endpoint{ID: "ep-lin", TenantID: "default", Hostname: "box-1", OS: "Ubuntu 24.04", Status: "online", LastSeenAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -197,24 +192,11 @@ func TestOneOffScript(t *testing.T) {
 		`{"endpoint_ids":["ep-lin"],"name":"x","shell":"powershell","source":"x","reason":"y"}`,                     // platform
 		`{"endpoint_ids":["ep-lap"],"name":"x","shell":"powershell","source":"x","reason":"y","timeout_seconds":5}`, // timeout
 	} {
-		if w := adminPost(srv, "/api/v1/maintenance/script", bad, ""); w.Code != http.StatusBadRequest {
+		if w := postAdmin(srv, "/api/v1/maintenance/script", bad); w.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s", bad, w.Code, w.Body.String())
 		}
 	}
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/script", body(""), ""))
-	v, err := ownerOf(t, srv).auth.GetApproval(id, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.Action != "Run a one-off script" || !strings.Contains(v.Summary, `One-off script "list processes"`) ||
-		!strings.Contains(v.Summary, "2 lines of PowerShell") || !strings.Contains(v.Summary, "Why: find what holds the uninstaller") {
-		t.Fatalf("approval: %q %q", v.Action, v.Summary)
-	}
-	if v.Offer != "" {
-		t.Fatalf("a one-off script was offered as a rule: %q", v.Offer)
-	}
-	ownerOf(t, srv).approve(t, id)
-	w := adminPost(srv, "/api/v1/maintenance/script", body(""), id)
+	w := postAdmin(srv, "/api/v1/maintenance/script", body(""))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("run: %d %s", w.Code, w.Body.String())
 	}
@@ -223,12 +205,18 @@ func TestOneOffScript(t *testing.T) {
 		Jobs  []packageRunJob `json:"jobs"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &run)
-	if run.RunID != id || len(run.Jobs) != 1 {
+	if run.RunID == "" || len(run.Jobs) != 1 {
 		t.Fatalf("run: %s", w.Body.String())
 	}
-	// The approval is spent: the same request asks again.
-	if w := adminPost(srv, "/api/v1/maintenance/script", body(""), ""); w.Code != http.StatusAccepted {
-		t.Fatalf("a second run did not ask again: %d", w.Code)
+	// The authorization says what the script is and why.
+	authz := auditRowsOf(t, srv.store, "ACTION_AUTHORIZED")
+	words := authorityWords(t, srv)
+	if len(authz) != 1 || !strings.Contains(authz[0].Details, run.RunID) || len(words) != 1 {
+		t.Fatalf("authorization audit: %+v %v", authz, words)
+	}
+	if !strings.Contains(words[0], "Run a one-off script") || !strings.Contains(words[0], `One-off script "list processes"`) ||
+		!strings.Contains(words[0], "2 lines of PowerShell") || !strings.Contains(words[0], "Why: find what holds the uninstaller") {
+		t.Fatalf("the authority's words: %s", words[0])
 	}
 	job, _ := srv.responseStore.GetJob("default", run.Jobs[0].JobID)
 	p, ok := scriptJobPayload(job)
@@ -249,16 +237,21 @@ func TestOneOffScript(t *testing.T) {
 	}
 
 	// Promote: needs a package header, then a new name.
-	if w := adminPost(srv, "/api/v1/maintenance/script/promote", `{"job_id":"`+job.ID+`"}`, ""); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "package header") {
+	if w := postAdmin(srv, "/api/v1/maintenance/script/promote", `{"job_id":"`+job.ID+`"}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "package header") {
 		t.Fatalf("promote without header: %d %s", w.Code, w.Body.String())
 	}
 	header := `# ominull-package: {"name":"windows-list-procs","title":"List processes","description":"Lists the top processes.","category":"maintenance","risk":"safe","reboot":false,"timeout":300,"interval":"weekly","params":[]}`
 	pb, _ := json.Marshal(map[string]string{"source": header + "\n" + src})
-	w = adminPost(srv, "/api/v1/maintenance/script/promote", string(pb), "")
+	w = postAdmin(srv, "/api/v1/maintenance/script/promote", string(pb))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("promote: %d %s", w.Code, w.Body.String())
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/script/promote", string(pb), ""); w.Code != http.StatusConflict {
+	if w := postAdmin(srv, "/api/v1/maintenance/script/promote", string(pb)); w.Code != http.StatusConflict {
 		t.Fatalf("promoting the same name twice: %d %s", w.Code, w.Body.String())
+	}
+
+	// Every run is signed on its own: the same request runs again under a new id.
+	if w2 := postAdmin(srv, "/api/v1/maintenance/script", body("")); w2.Code != http.StatusCreated || strings.Contains(w2.Body.String(), run.RunID) {
+		t.Fatalf("a second run: %d %s", w2.Code, w2.Body.String())
 	}
 }

@@ -118,7 +118,7 @@ func (p *policy) Operator(msgType int, data []byte) terminal.FrameDecision {
 		return terminal.FrameDecision{Data: f.encode()}
 	case opInput:
 		if !p.control {
-			// The owner approved watching only. The helper ignores input in
+			// The authority signed watching only. The helper ignores input in
 			// a view session too; this is the hub's half.
 			return terminal.FrameDecision{Action: terminal.FrameDrop}
 		}

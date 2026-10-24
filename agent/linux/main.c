@@ -2527,7 +2527,7 @@ static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJ
         attempts = 3;
         return;
     }
-    /* The owner approved this version for this host: the response authority's
+    /* The authority signed this version for this host: the response authority's
      * grant, verified here against the pinned key. */
     const char* why = Trust_UpdateAuthorized(&g_Trust, respJson, strlen(respJson), version, (int64_t)time(NULL));
     if (why) {

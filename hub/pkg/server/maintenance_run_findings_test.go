@@ -15,15 +15,10 @@ import (
 func TestRunFindings(t *testing.T) {
 	t.Parallel()
 	srv := playbookTestServer(t)
-	ownerOf(t, srv)
+	authorityOf(t, srv)
 	start := func() (string, string) {
 		audit := `{"endpoint_ids":["ep-lap"],"packages":["windows-audit"],"mode":"audit"}`
-		w := adminPost(srv, "/api/v1/maintenance/run", audit, "")
-		if w.Code == http.StatusAccepted {
-			id := pendingID(t, w)
-			ownerOf(t, srv).approve(t, id)
-			w = adminPost(srv, "/api/v1/maintenance/run", audit, id)
-		}
+		w := postAdmin(srv, "/api/v1/maintenance/run", audit)
 		var run struct {
 			Jobs []packageRunJob `json:"jobs"`
 		}

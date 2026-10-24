@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -15,38 +16,54 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// policyPost sends one detection-policy write with the admin key, once, with
-// no owner standing by: what an agent holding the key gets.
-func policyPost(srv *Server, method, path, body, approval string) *httptest.ResponseRecorder {
+// policyPost sends one detection-policy write with the admin key, once: what
+// an agent holding the key gets. The approval argument is unused (the hub signs
+// a loosening itself); callers pass "".
+func policyPost(srv *Server, method, path, body, _ string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	if approval != "" {
-		r.Header.Set(approvalHeader, approval)
-	}
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 	return w
 }
 
-type pendingApproval struct {
-	ApprovalID string   `json:"approval_id"`
-	Action     string   `json:"action"`
-	Summary    string   `json:"summary"`
-	Loosens    []string `json:"loosens"`
-	Targets    []string `json:"targets"`
+// signedChange is the newest ACTION_AUTHORIZED row of a detection-policy
+// change: what the authority signed, in its own words.
+type signedChange struct {
+	ID      string
+	Target  string
+	Loosens []string
+	Summary string
 }
 
-func mustPend(t *testing.T, w *httptest.ResponseRecorder) pendingApproval {
+var signedChangeRow = regexp.MustCompile(`^detection policy change loosening (.*) \(authorization (\S+)\): (.*)$`)
+
+// mustSign asserts the request finished at once with status code (no round
+// trip) and returns the authorization it left in the audit.
+func mustSign(t *testing.T, store *storage.Store, w *httptest.ResponseRecorder, code int) signedChange {
 	t.Helper()
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("want 202 (waits for the owner), got %d %s", w.Code, w.Body.String())
+	if w.Code != code {
+		t.Fatalf("want %d on the first request, got %d %s", code, w.Code, w.Body.String())
 	}
-	var p pendingApproval
-	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil || p.ApprovalID == "" {
-		t.Fatalf("202 without an approval: %s", w.Body.String())
+	rows := authorizedAudit(t, store)
+	if len(rows) == 0 {
+		t.Fatalf("no ACTION_AUTHORIZED row after %d %s", w.Code, w.Body.String())
 	}
-	return p
+	m := signedChangeRow.FindStringSubmatch(rows[0].Details)
+	if m == nil {
+		t.Fatalf("newest ACTION_AUTHORIZED row is not a policy change: %+v", rows[0])
+	}
+	return signedChange{ID: m[2], Target: rows[0].Resource, Loosens: strings.Split(m[1], ", "), Summary: m[3]}
+}
+
+// noteKinds is the first half (before the colon) of each policy note.
+func noteKinds(notes []storage.AuditEntry) []string {
+	var kinds []string
+	for _, n := range notes {
+		kinds = append(kinds, strings.SplitN(n.Details, ":", 2)[0])
+	}
+	return kinds
 }
 
 func policyNotes(t *testing.T, store *storage.Store) []storage.AuditEntry {
@@ -172,84 +189,40 @@ func TestAResetLoosensWhenItBringsQuietEntriesBack(t *testing.T) {
 	}
 }
 
-// The admin key, which every agent can read, cannot loosen detection: the
-// save waits for the owner and nothing changes until they approve.
-func TestALooseningSaveWaitsForTheOwner(t *testing.T) {
+// The admin key, which every agent can read, can loosen detection, but the
+// authority signs each loosening first and the audit says what was signed:
+// the first request applies it, with no round trip.
+func TestALooseningSaveIsSignedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	body := `{"beacon_enabled":false,"quiet_orgs":["as714","as8075","as15169","as13335","as16509","as20940","as54113","as64500"]}`
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, ""))
-	if p.Action != "Loosen detection tuning" || !strings.Contains(p.Summary, "beacon_enabled true -> false") || !strings.Contains(p.Summary, "quiet_orgs +as64500") {
-		t.Fatalf("the owner would not see the change: %+v", p)
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, ""), http.StatusOK)
+	if !strings.Contains(a.Summary, "beacon_enabled true -> false") || !strings.Contains(a.Summary, "quiet_orgs +as64500") {
+		t.Fatalf("the audit does not show the change: %+v", a)
 	}
-	if strings.Join(p.Loosens, ",") != "beacon_enabled,quiet_orgs" || len(p.Targets) != 1 || p.Targets[0] != "detection:tuning" {
-		t.Fatalf("pending approval = %+v", p)
-	}
-	if got := store.GetDetectionTuning(); !got.BeaconOn || len(got.QuietOrgs) != 7 {
-		t.Fatal("a loosening save applied before the owner approved it")
-	}
-	// Repeating it with an approval nobody granted changes nothing.
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, p.ApprovalID); w.Code != http.StatusForbidden {
-		t.Fatalf("unapproved retry = %d %s", w.Code, w.Body.String())
-	}
-	// PUT and case-variant keys go through the same gate.
-	mustPend(t, policyPost(srv, http.MethodPut, "/api/v1/detection/tuning", `{"Beacon_Enabled":false}`, ""))
-	if !store.GetDetectionTuning().BeaconOn {
-		t.Fatal("a case-variant key slipped past the gate")
-	}
-
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, p.ApprovalID); w.Code != http.StatusOK {
-		t.Fatalf("approved save = %d %s", w.Code, w.Body.String())
+	if strings.Join(a.Loosens, ",") != "beacon_enabled,quiet_orgs" || a.Target != "detection:tuning" {
+		t.Fatalf("authorization = %+v", a)
 	}
 	if got := store.GetDetectionTuning(); got.BeaconOn || len(got.QuietOrgs) != 8 {
-		t.Fatal("the approved save did not apply")
+		t.Fatal("the signed save did not apply")
 	}
 	notes := policyNotes(t, store)
-	if len(notes) != 1 || !strings.Contains(notes[0].Details, "loosened (beacon_enabled, quiet_orgs) with owner approval "+p.ApprovalID) ||
+	if len(notes) != 1 || !strings.Contains(notes[0].Details, "loosened (beacon_enabled, quiet_orgs) with authorization "+a.ID) ||
 		!strings.Contains(notes[0].Details, "credential api-key (unverified)") {
 		t.Fatalf("notes = %+v", notes)
 	}
-	// An approval is spent once.
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"beacon_enabled":false,"warmup_hours":72}`, p.ApprovalID); w.Code != http.StatusForbidden {
-		t.Fatalf("spent approval reused = %d", w.Code)
-	}
 }
 
-// An approval covers the change the owner saw and nothing else.
-func TestAnApprovalCannotCarryADifferentChange(t *testing.T) {
+// PUT and case-variant keys go through the same gate: the loosening is
+// recognised, signed and audited like any other.
+func TestACaseVariantKeyIsStillJudgedALoosening(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"warmup_hours":48}`, ""))
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"beacon_enabled":false}`, p.ApprovalID); w.Code != http.StatusForbidden {
-		t.Fatalf("another change under the approval = %d %s", w.Code, w.Body.String())
-	}
-	if !store.GetDetectionTuning().BeaconOn {
-		t.Fatal("beacon detection was switched off under an approval for something else")
-	}
-}
-
-// The digest binds the policy as it was when the owner was asked: once that
-// policy has moved, the approval is refused rather than applied over it.
-func TestAStaleApprovalIsRefused(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"warmup_hours":48}`, ""))
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	// Meanwhile a tightening save lands, which needs nobody.
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"beacon_score_threshold":0.7}`, ""); w.Code != http.StatusOK {
-		t.Fatalf("tightening save = %d %s", w.Code, w.Body.String())
-	}
-	w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"warmup_hours":48}`, p.ApprovalID)
-	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "ask again") {
-		t.Fatalf("stale approval = %d %s", w.Code, w.Body.String())
-	}
-	if store.GetDetectionTuning().WarmupHours != 24 {
-		t.Fatal("a stale approval applied")
+	a := mustSign(t, store, policyPost(srv, http.MethodPut, "/api/v1/detection/tuning", `{"Beacon_Enabled":false}`, ""), http.StatusOK)
+	if strings.Join(a.Loosens, ",") != "beacon_enabled" || store.GetDetectionTuning().BeaconOn {
+		t.Fatalf("case-variant key: %+v beacon on=%v", a, store.GetDetectionTuning().BeaconOn)
 	}
 }
 
@@ -316,8 +289,8 @@ func TestConcurrentSavesAreNotLost(t *testing.T) {
 	}
 }
 
-// Restoring the shipped values waits for the owner when it brings back quiet
-// entries someone removed, and applies at once when it only tightens.
+// Restoring the shipped values is signed when it brings back quiet entries
+// someone removed, and applies plainly when it only tightens.
 func TestResetIsJudgedLikeAnySave(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
@@ -327,15 +300,12 @@ func TestResetIsJudgedLikeAnySave(t *testing.T) {
 	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
 		t.Fatal(err)
 	}
-	p := mustPend(t, policyPost(srv, http.MethodDelete, "/api/v1/detection/tuning", "", ""))
-	if p.Action != "Restore shipped detection tuning" || !strings.Contains(p.Summary, "quiet_clients +") {
-		t.Fatalf("reset approval = %+v", p)
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodDelete, "/api/v1/detection/tuning", "", p.ApprovalID); w.Code != http.StatusOK {
-		t.Fatalf("approved reset = %d %s", w.Code, w.Body.String())
+	a := mustSign(t, store, policyPost(srv, http.MethodDelete, "/api/v1/detection/tuning", "", ""), http.StatusOK)
+	if !strings.Contains(a.Summary, "quiet_clients +") || len(store.GetDetectionTuning().QuietClients) != len(storage.DefaultDetectionTuning().QuietClients) {
+		t.Fatalf("reset authorization = %+v", a)
 	}
 
+	n := len(authorizedAudit(t, store))
 	tu = storage.DefaultDetectionTuning()
 	tu.BeaconOn = false
 	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
@@ -347,34 +317,29 @@ func TestResetIsJudgedLikeAnySave(t *testing.T) {
 	if !store.GetDetectionTuning().BeaconOn {
 		t.Fatal("the tightening reset did not apply")
 	}
+	if got := len(authorizedAudit(t, store)); got != n {
+		t.Fatalf("a tightening reset was sent to the authority (%d -> %d rows)", n, got)
+	}
 }
 
-// "Expected" on a finding writes a quiet pair, which loosens: the finding is
-// acknowledged only once the owner has approved.
-func TestMarkingExpectedWaitsForTheOwner(t *testing.T) {
+// "Expected" on a finding writes a quiet pair, which loosens: the pair and the
+// acknowledgement land on the first request, with the pair in the audit.
+func TestMarkingExpectedIsSignedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	seedFinding(t, store, "f-wait", "/opt/acme/backup-agent", `{"destination_asn":"AS64500","destination_tenancy":"isp"}`)
-	body := `{"id":"f-wait"}`
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning/suppress", body, ""))
-	if p.Action != "Mark a conversation expected" || !strings.Contains(p.Summary, "quiet_pairs +/opt/acme/backup-agent@as64500") {
-		t.Fatalf("expected approval = %+v", p)
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning/suppress", `{"id":"f-wait"}`, ""), http.StatusOK)
+	if !strings.Contains(a.Summary, "quiet_pairs +/opt/acme/backup-agent@as64500") {
+		t.Fatalf("authorization = %+v", a)
 	}
-	if a, _ := store.GetAnomalyAlert("f-wait"); a.Acknowledged || len(store.GetDetectionTuning().QuietPairs) != 0 {
-		t.Fatal("the pair or the acknowledgement landed before the owner approved")
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning/suppress", body, p.ApprovalID); w.Code != http.StatusOK {
-		t.Fatalf("approved = %d %s", w.Code, w.Body.String())
-	}
-	if a, _ := store.GetAnomalyAlert("f-wait"); !a.Acknowledged || len(store.GetDetectionTuning().QuietPairs) != 1 {
-		t.Fatal("the approved pair did not land")
+	if al, _ := store.GetAnomalyAlert("f-wait"); !al.Acknowledged || len(store.GetDetectionTuning().QuietPairs) != 1 {
+		t.Fatal("the pair did not land")
 	}
 }
 
-// Learning proposals loosen through the same gate.
-func TestApplyingLearningProposalsWaitsForTheOwner(t *testing.T) {
+// Learning proposals loosen through the same gate and apply on the first request.
+func TestApplyingLearningProposalsIsSignedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -400,77 +365,59 @@ func TestApplyingLearningProposalsWaitsForTheOwner(t *testing.T) {
 		t.Fatalf("proposals: %v %v", proposals, err)
 	}
 	body := `{"window":"` + win.ID + `","ids":["` + proposals[0].ID + `"]}`
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/learning/proposals/apply", body, ""))
-	if p.Action != "Apply learning proposals" || !strings.Contains(p.Summary, "quiet_pairs +/opt/acme/backup-agent@as64500") {
-		t.Fatalf("learning approval = %+v", p)
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/learning/proposals/apply", body, ""), http.StatusOK)
+	if !strings.Contains(a.Summary, "quiet_pairs +/opt/acme/backup-agent@as64500") {
+		t.Fatalf("authorization = %+v", a)
 	}
-	if len(store.GetDetectionTuning().QuietPairs) != 0 {
-		t.Fatal("a proposal applied before the owner approved it")
+	if len(store.GetDetectionTuning().QuietPairs) == 0 {
+		t.Fatal("the proposal did not apply")
 	}
 }
 
-// Exclusions: a create and turning one on loosen and wait; turning one off
-// and deleting one tighten, apply at once and are noted.
+// Exclusions: a create and turning one on loosen and are signed; turning one
+// off and deleting one tighten, apply at once and are noted.
 func TestExclusionWritesAreJudged(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	expires := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
 	body := `{"name":"bridge","process_path":"/usr/bin/docker-proxy","dst_ip_range":"172.18.0.0/16","port":7070,"protocol":"tcp","reason":"bridge","expires_at":"` + expires + `"}`
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, ""))
-	if p.Action != "Add a detection exclusion" || !strings.Contains(p.Summary, "process_path /usr/bin/docker-proxy") || p.Targets[0] != "exclusion:new" {
-		t.Fatalf("exclusion approval = %+v", p)
-	}
-	if list, _ := store.ListExclusions(""); len(list) != 0 {
-		t.Fatal("the exclusion was created before the owner approved")
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	w := policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, p.ApprovalID)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("approved create = %d %s", w.Code, w.Body.String())
+	w := policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, "")
+	a := mustSign(t, store, w, http.StatusCreated)
+	if !strings.Contains(a.Summary, "process_path /usr/bin/docker-proxy") || a.Target != "exclusion:new" {
+		t.Fatalf("exclusion authorization = %+v", a)
 	}
 	var ex storage.Exclusion
 	_ = json.Unmarshal(w.Body.Bytes(), &ex)
+	if got, err := store.GetExclusion(ex.ID); err != nil || !got.Active {
+		t.Fatalf("the exclusion was not created: %v %+v", err, got)
+	}
 
 	if w := policyPost(srv, http.MethodPost, "/api/v1/exclusions/toggle", `{"id":"`+ex.ID+`","active":false}`, ""); w.Code != http.StatusOK {
 		t.Fatalf("toggle off = %d %s", w.Code, w.Body.String())
 	}
-	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/exclusions/toggle", `{"id":"`+ex.ID+`","active":true}`, ""))
-	if p.Action != "Turn a detection exclusion on" || p.Targets[0] != "exclusion:"+ex.ID {
-		t.Fatalf("toggle approval = %+v", p)
+	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/exclusions/toggle", `{"id":"`+ex.ID+`","active":true}`, ""), http.StatusOK)
+	if a.Target != "exclusion:"+ex.ID {
+		t.Fatalf("toggle authorization = %+v", a)
 	}
-	if got, _ := store.GetExclusion(ex.ID); got.Active {
-		t.Fatal("the exclusion came back on before the owner approved")
+	if got, _ := store.GetExclusion(ex.ID); !got.Active {
+		t.Fatal("the exclusion did not come back on")
 	}
 	// Saving over the id (a renewal) loosens too.
-	mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/exclusions", strings.Replace(body, `{"name"`, `{"id":"`+ex.ID+`","name"`, 1), ""))
+	mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/exclusions", strings.Replace(body, `{"name"`, `{"id":"`+ex.ID+`","name"`, 1), ""), http.StatusCreated)
 
 	if w := policyPost(srv, http.MethodDelete, "/api/v1/exclusions?id="+ex.ID, "", ""); w.Code != http.StatusOK {
 		t.Fatalf("delete = %d %s", w.Code, w.Body.String())
 	}
-	notes := policyNotes(t, store)
-	var kinds []string
-	for _, n := range notes {
-		kinds = append(kinds, strings.SplitN(n.Details, ":", 2)[0])
-	}
-	want := "tightened exclusion delete,tightened exclusion disable,loosened (exclusion) with owner approval " + mustApprovalOf(t, notes) + " exclusion create"
-	if strings.Join(kinds, ",") != want {
-		t.Fatalf("notes = %v, want %s", kinds, want)
+	kinds := noteKinds(policyNotes(t, store))
+	if len(kinds) != 5 || kinds[0] != "tightened exclusion delete" || !strings.HasPrefix(kinds[1], "loosened (exclusion) with authorization ") ||
+		!strings.HasPrefix(kinds[2], "loosened (exclusion) with authorization ") || kinds[3] != "tightened exclusion disable" ||
+		!strings.HasPrefix(kinds[4], "loosened (exclusion) with authorization ") {
+		t.Fatalf("notes = %v", kinds)
 	}
 }
 
-func mustApprovalOf(t *testing.T, notes []storage.AuditEntry) string {
-	t.Helper()
-	for _, n := range notes {
-		if i := strings.Index(n.Details, "owner approval "); i >= 0 {
-			return strings.Fields(n.Details[i+len("owner approval "):])[0]
-		}
-	}
-	t.Fatal("no approved change in the notes")
-	return ""
-}
-
-// Without the response authority there is nobody to ask: loosening is
+// Without the response authority nothing can sign a loosening: it is
 // refused, tightening still applies.
 func TestWithoutTheAuthorityLooseningIsRefused(t *testing.T) {
 	t.Parallel()
@@ -536,9 +483,9 @@ func TestTheFeedReportsPolicyChangesAndAnUnsoundRow(t *testing.T) {
 }
 
 // A save that pads a loosening with tightening edits cannot hide it: the
-// tightening half is saved at once, and the owner is asked about the
-// loosening alone, which the summary shows in full.
-func TestAMixedSaveIsAskedAboutOnlyItsLoosening(t *testing.T) {
+// authority signs the loosening alone, and the audit shows it in full. Both
+// halves apply on the first request.
+func TestAMixedSaveIsSignedOnlyForItsLoosening(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -551,76 +498,43 @@ func TestAMixedSaveIsAskedAboutOnlyItsLoosening(t *testing.T) {
 	}
 	body["quiet_processes"] = append(append([]any(nil), shipped["quiet_processes"].([]any)...), "/usr/bin/curl")
 	raw, _ := json.Marshal(body)
-	w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), "")
-	p := mustPend(t, w)
-	if strings.Join(p.Loosens, ",") != "quiet_processes" || !strings.Contains(p.Summary, "quiet_processes +/usr/bin/curl") ||
-		strings.Contains(p.Summary, "admin_fanout_max_hosts") || strings.Contains(p.Summary, " more") {
-		t.Fatalf("the owner would not see the loosening on its own: %+v", p)
-	}
-	if !strings.Contains(w.Body.String(), `"tightened_now"`) {
-		t.Fatalf("the 202 does not say what was already saved: %s", w.Body.String())
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""), http.StatusOK)
+	if strings.Join(a.Loosens, ",") != "quiet_processes" || !strings.Contains(a.Summary, "quiet_processes +/usr/bin/curl") ||
+		strings.Contains(a.Summary, "admin_fanout_max_hosts") || strings.Contains(a.Summary, " more") {
+		t.Fatalf("the loosening is not shown on its own: %+v", a)
 	}
 	got := store.GetDetectionTuning()
 	if float64(got.WarmupHours) != shipped["warmup_hours"].(float64)-1 {
 		t.Fatal("the tightening half was not saved")
 	}
-	for _, q := range got.QuietProcesses {
-		if q == "/usr/bin/curl" {
-			t.Fatal("the loosening applied before the owner approved it")
-		}
-	}
-	// The caller repeats the same request under the approval, as the console does.
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), p.ApprovalID); w.Code != http.StatusOK {
-		t.Fatalf("approved retry = %d %s", w.Code, w.Body.String())
-	}
-	got = store.GetDetectionTuning()
 	if !strings.Contains(strings.Join(got.QuietProcesses, "\n")+"\n", "/usr/bin/curl\n") {
-		t.Fatalf("the approved loosening did not apply: %v", got.QuietProcesses)
+		t.Fatalf("the loosening did not apply: %v", got.QuietProcesses)
 	}
 	notes := policyNotes(t, store)
 	if len(notes) != 2 {
 		t.Fatalf("want a tightened note and a loosened note, got %+v", notes)
 	}
 
-	// A list that loses entries and gains one loses them now; the owner is
-	// asked only about the one it gains.
+	// A list that loses entries and gains one loses them now; the authority
+	// signs only the one it gains.
 	orgs := got.QuietOrgs
 	if len(orgs) < 2 {
 		t.Fatalf("need shipped quiet orgs: %v", orgs)
 	}
 	swap, _ := json.Marshal(map[string]any{"quiet_orgs": []string{orgs[0], "as64500"}})
-	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(swap), ""))
-	if p.Summary != "floor drill: blinds no floor case (the 10 MB burst yields to exclusions and quiet processes); quiet_orgs +as64500" {
-		t.Fatalf("swap summary %q", p.Summary)
+	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(swap), ""), http.StatusOK)
+	if a.Summary != "floor drill: blinds no floor case (the 10 MB burst yields to exclusions and quiet processes); quiet_orgs +as64500" {
+		t.Fatalf("swap summary %q", a.Summary)
 	}
-	if len(store.GetDetectionTuning().QuietOrgs) != 1 {
-		t.Fatal("the dropped quiet networks were not dropped at once")
-	}
-}
-
-// A loosening too large to show the owner in full is refused, not cut short.
-func TestALooseningTooLargeToShowIsRefused(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	orgs := append([]string(nil), store.GetDetectionTuning().QuietOrgs...)
-	for i := 0; i < 60; i++ {
-		orgs = append(orgs, "as"+strings.Repeat("6", 4)+string(rune('0'+i%10))+string(rune('0'+i/10)))
-	}
-	raw, _ := json.Marshal(map[string]any{"quiet_orgs": orgs})
-	w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), "")
-	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "smaller changes") {
-		t.Fatalf("oversized loosening = %d %s", w.Code, w.Body.String())
-	}
-	if len(store.GetDetectionTuning().QuietOrgs) == len(orgs) {
-		t.Fatal("the oversized loosening applied")
+	if got := store.GetDetectionTuning().QuietOrgs; len(got) != 2 || got[0] != orgs[0] || got[1] != "as64500" {
+		t.Fatalf("quiet networks after the swap: %v", got)
 	}
 }
 
-// Presence and retirement decide whether the silence floor reports a host,
-// so watching one less closely waits for the owner like any loosening.
-func TestParkingOrRetiringAHostWaitsForTheOwner(t *testing.T) {
+// Presence and retirement decide whether the silence floor reports a host, so
+// watching one less closely is a loosening the authority signs, on the first
+// request.
+func TestParkingOrRetiringAHostIsSignedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -641,61 +555,46 @@ func TestParkingOrRetiringAHostWaitsForTheOwner(t *testing.T) {
 	}
 
 	park := `{"endpoint_id":"srv-1","presence":"parked","reason":"off between tests"}`
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, ""))
-	if p.Action != "Expect a host to go quiet" || p.Targets[0] != "endpoint:srv-1" ||
-		p.Summary != "host srv-1 (web); presence always_on -> parked; reason off between tests" {
-		t.Fatalf("park approval = %+v", p)
-	}
 	if !watched() {
-		t.Fatal("the host stopped being watched before the owner approved")
+		t.Fatal("the host starts unwatched")
 	}
-	// Another reason, or an approval nobody granted, changes nothing.
-	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, p.ApprovalID); w.Code != http.StatusForbidden || !watched() {
-		t.Fatalf("unapproved park = %d %s", w.Code, w.Body.String())
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, ""), http.StatusOK)
+	if a.Target != "endpoint:srv-1" || a.Summary != "host srv-1 (web); presence always_on -> parked; reason off between tests" || watched() {
+		t.Fatalf("park authorization = %+v watched=%v", a, watched())
 	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", strings.Replace(park, "between tests", "for good", 1), p.ApprovalID); w.Code != http.StatusForbidden || !watched() {
-		t.Fatalf("park under another reason = %d %s", w.Code, w.Body.String())
-	}
-	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, p.ApprovalID); w.Code != http.StatusOK || watched() {
-		t.Fatalf("approved park = %d %s", w.Code, w.Body.String())
-	}
-	// Watching it closely again needs nobody, and is noted.
+	// Watching it closely again needs no signature, and is noted.
+	n := len(authorizedAudit(t, store))
 	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", `{"endpoint_id":"srv-1","presence":"always_on"}`, ""); w.Code != http.StatusOK || !watched() {
 		t.Fatalf("always on = %d %s", w.Code, w.Body.String())
 	}
+	if got := len(authorizedAudit(t, store)); got != n {
+		t.Fatalf("watching a host closely was sent to the authority (%d -> %d rows)", n, got)
+	}
 
 	retire := `{"endpoint_id":"srv-1","reason":"decommissioned"}`
-	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""))
-	if p.Action != "Retire a host" || p.Summary != "host srv-1 (web); isolated true -> false; status active -> retired; reason decommissioned" {
-		t.Fatalf("retire approval = %+v", p)
+	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""), http.StatusOK)
+	if a.Summary != "host srv-1 (web); isolated true -> false; status active -> retired; reason decommissioned" || watched() {
+		t.Fatalf("retire authorization = %+v watched=%v", a, watched())
 	}
-	if ep, _ := store.GetEndpoint("srv-1"); ep.Status == "retired" || !ep.IsIsolated {
-		t.Fatal("the host was retired, or its isolation lifted, before the owner approved")
+	if ep, _ := store.GetEndpoint("srv-1"); ep.Status != "retired" || ep.IsIsolated {
+		t.Fatalf("the host was not retired and released: %+v", ep)
 	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, p.ApprovalID); w.Code != http.StatusOK || watched() {
-		t.Fatalf("approved retire = %d %s", w.Code, w.Body.String())
-	}
-	// Retiring a host already retired changes nothing and needs nobody.
-	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""); w.Code != http.StatusOK {
+	// Retiring a host already retired changes nothing and signs nothing.
+	n = len(authorizedAudit(t, store))
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""); w.Code != http.StatusOK || len(authorizedAudit(t, store)) != n {
 		t.Fatalf("retire again = %d %s", w.Code, w.Body.String())
 	}
-	var kinds []string
-	for _, n := range policyNotes(t, store) {
-		kinds = append(kinds, strings.SplitN(n.Details, ":", 2)[0])
-	}
-	if len(kinds) != 3 || !strings.HasPrefix(kinds[0], "loosened (retire) with owner approval") || kinds[1] != "tightened endpoint watch presence" ||
-		!strings.HasPrefix(kinds[2], "loosened (presence) with owner approval") {
+	kinds := noteKinds(policyNotes(t, store))
+	if len(kinds) != 3 || !strings.HasPrefix(kinds[0], "loosened (retire) with authorization") || kinds[1] != "tightened endpoint watch presence" ||
+		!strings.HasPrefix(kinds[2], "loosened (presence) with authorization") {
 		t.Fatalf("notes = %v", kinds)
 	}
 }
 
 // Opening a learning window holds the behavioural findings of every host it
-// covers, so with the admin key alone it only asks. An estate-wide window
-// says so in words, the approval binds its scope and length, and closing it
-// needs nobody.
-func TestOpeningALearningWindowWaitsForTheOwner(t *testing.T) {
+// covers, so the authority signs it, and an estate-wide window says so in
+// words. Closing it needs no signature.
+func TestOpeningALearningWindowIsSignedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -706,56 +605,50 @@ func TestOpeningALearningWindowWaitsForTheOwner(t *testing.T) {
 		_, on := store.LearningWindowFor(storage.Endpoint{ID: "ep-1", TenantID: "default"})
 		return on
 	}
-
-	estate := `{"scope_type":"tenant","days":90}`
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/learning/windows", estate, ""))
-	if p.Action != "Open a learning window" || len(p.Targets) != 1 || p.Targets[0] != "learning:tenant:" ||
-		p.Summary != "every host in every tenant for 90 days; holds beacon, volume and agent egress findings" {
-		t.Fatalf("estate window approval = %+v", p)
-	}
-	if learning() {
-		t.Fatal("the window opened before the owner approved")
-	}
-	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", estate, p.ApprovalID); w.Code != http.StatusForbidden || learning() {
-		t.Fatalf("ungranted approval = %d %s", w.Code, w.Body.String())
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	// The approval is for this window: not a longer one, not another scope.
-	for _, other := range []string{`{"scope_type":"tenant","days":89}`, `{"scope_type":"tenant","scope_id":"t-02","days":90}`} {
-		if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", other, p.ApprovalID); w.Code != http.StatusForbidden || learning() {
-			t.Fatalf("approval spent on %s = %d %s", other, w.Code, w.Body.String())
+	open := func(body string) (signedChange, storage.LearningWindow) {
+		t.Helper()
+		w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", body, "")
+		a := mustSign(t, store, w, http.StatusOK)
+		var opened struct {
+			Window storage.LearningWindow `json:"window"`
 		}
+		_ = json.Unmarshal(w.Body.Bytes(), &opened)
+		return a, opened.Window
 	}
-	w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", estate, p.ApprovalID)
-	if w.Code != http.StatusOK || !learning() {
-		t.Fatalf("approved window = %d %s", w.Code, w.Body.String())
+
+	a, estate := open(`{"scope_type":"tenant","days":90}`)
+	if a.Target != "learning:tenant:" ||
+		a.Summary != "every host in every tenant for 90 days; holds beacon, volume and agent egress findings" {
+		t.Fatalf("estate window authorization = %+v", a)
 	}
-	var opened struct {
-		Window storage.LearningWindow `json:"window"`
+	if !learning() {
+		t.Fatal("the window did not open")
 	}
-	_ = json.Unmarshal(w.Body.Bytes(), &opened)
-	if d := time.Until(opened.Window.EndsAt); d < 89*24*time.Hour || d > 90*24*time.Hour {
+	if d := time.Until(estate.EndsAt); d < 89*24*time.Hour || d > 90*24*time.Hour {
 		t.Fatalf("window ends in %v, want 90 days", d)
 	}
 
 	// One host for two hours names the host; a note is a label.
-	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/learning/windows", `{"scope_type":"endpoint","scope_id":"ep-1","hours":2,"note":"new host"}`, ""))
-	if p.Targets[0] != "learning:endpoint:ep-1" || p.Summary != "endpoint ep-1 (web) for 2 hours; holds beacon, volume and agent egress findings; note new host" {
-		t.Fatalf("host window approval = %+v", p)
+	a, host := open(`{"scope_type":"endpoint","scope_id":"ep-1","hours":2,"note":"new host"}`)
+	if a.Target != "learning:endpoint:ep-1" || a.Summary != "endpoint ep-1 (web) for 2 hours; holds beacon, volume and agent egress findings; note new host" {
+		t.Fatalf("host window authorization = %+v", a)
 	}
-	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", `{"scope_type":"location","days":7}`, ""); w.Code != http.StatusBadRequest {
+	n := len(authorizedAudit(t, store))
+	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", `{"scope_type":"location","days":7}`, ""); w.Code != http.StatusBadRequest || len(authorizedAudit(t, store)) != n {
 		t.Fatalf("a location window naming no location = %d %s", w.Code, w.Body.String())
 	}
 
-	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows/close", `{"id":"`+opened.Window.ID+`"}`, ""); w.Code != http.StatusOK || learning() {
-		t.Fatalf("close = %d %s", w.Code, w.Body.String())
+	for _, id := range []string{estate.ID, host.ID} {
+		if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows/close", `{"id":"`+id+`"}`, ""); w.Code != http.StatusOK {
+			t.Fatalf("close = %d %s", w.Code, w.Body.String())
+		}
 	}
-	var kinds []string
-	for _, n := range policyNotes(t, store) {
-		kinds = append(kinds, strings.SplitN(n.Details, ":", 2)[0])
+	if learning() {
+		t.Fatal("a window is still open after both were closed")
 	}
-	if len(kinds) != 2 || kinds[0] != "tightened learning window close" ||
-		!strings.HasPrefix(kinds[1], "loosened (learning_window) with owner approval") {
+	kinds := noteKinds(policyNotes(t, store))
+	if len(kinds) != 4 || kinds[0] != "tightened learning window close" || kinds[1] != "tightened learning window close" ||
+		!strings.HasPrefix(kinds[2], "loosened (learning_window) with authorization") || !strings.HasPrefix(kinds[3], "loosened (learning_window) with authorization") {
 		t.Fatalf("notes = %v", kinds)
 	}
 }
@@ -944,37 +837,33 @@ func TestAFailedAcknowledgementIsNotNoted(t *testing.T) {
 	}
 }
 
-// A vendor range is approved by the owner, refused when it is not one
+// A vendor range is signed by the authority, refused when it is not one
 // maker's own address space, and a save that drops a range and adds another
-// drops it at once and asks only about the one it adds.
+// drops it and signs only the one it adds.
 func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
-	post := func(vendors []storage.AgentRuntimeVendor, approval string) *httptest.ResponseRecorder {
+	post := func(vendors []storage.AgentRuntimeVendor) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(map[string]any{"agent_runtime_vendors": vendors})
-		return policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), approval)
+		return policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), "")
 	}
 	shipped := storage.DefaultDetectionTuning().AgentRuntimeVendors
 	for name, prefix := range map[string]string{"cloudflare": "104.16.0.0/16", "malformed": "160.79.104/23", "over-broad": "160.0.0.0/8"} {
 		v := append([]storage.AgentRuntimeVendor(nil), shipped...)
 		v[0].Prefixes = []string{prefix}
-		if w := post(v, ""); w.Code != http.StatusBadRequest {
+		if w := post(v); w.Code != http.StatusBadRequest {
 			t.Fatalf("%s prefix %s = %d %s, want 400", name, prefix, w.Code, w.Body.String())
 		}
 	}
+	if n := len(authorizedAudit(t, store)); n != 0 {
+		t.Fatalf("a refused range reached the authority: %d rows", n)
+	}
 	v := append([]storage.AgentRuntimeVendor(nil), shipped...)
 	v[0].Prefixes = []string{"160.79.104.0/23", "198.51.100.0/24"}
-	p := mustPend(t, post(v, ""))
-	if strings.Join(p.Loosens, ",") != "agent_runtime_vendors" {
-		t.Fatalf("loosens %v", p.Loosens)
-	}
-	if !reflect.DeepEqual(store.GetDetectionTuning().AgentRuntimeVendors[0].Prefixes, []string{"160.79.104.0/23"}) {
-		t.Fatalf("the tightening half was not saved first: %+v", store.GetDetectionTuning().AgentRuntimeVendors[0])
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := post(v, p.ApprovalID); w.Code != http.StatusOK {
-		t.Fatalf("approved save = %d %s", w.Code, w.Body.String())
+	a := mustSign(t, store, post(v), http.StatusOK)
+	if strings.Join(a.Loosens, ",") != "agent_runtime_vendors" {
+		t.Fatalf("loosens %v", a.Loosens)
 	}
 	got := store.GetDetectionTuning()
 	if !got.InRuntimeVendorRange("claude", netip.MustParseAddr("198.51.100.9")) || got.InRuntimeVendorRange("claude", netip.MustParseAddr("2607:6bc0::1")) {
@@ -983,7 +872,7 @@ func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
 }
 
 // A known workload needs an expiry in the future when it is added, moving one
-// later waits for the owner while moving another earlier applies at once, and
+// later is signed while moving another earlier applies plainly, and
 // the feed note names expired entries and a saved row weaker than the floor.
 func TestKnownWorkloadExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
 	t.Parallel()
@@ -1009,13 +898,13 @@ func TestKnownWorkloadExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
 	}
 	body := fmt.Sprintf(`{"known_workloads":[{"workload":"/usr/bin/gh","owner":"as36459","reason":"cli","expires_at":%q},{"workload":"/usr/bin/ssh","owner":"as36459","reason":"git","expires_at":%q}]}`,
 		until.Add(-time.Hour).Format(time.RFC3339), until.Add(time.Hour).Format(time.RFC3339))
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, ""))
-	if strings.Join(p.Loosens, ",") != "known_workloads" {
-		t.Fatalf("an extended expiry should wait for the owner: %+v", p)
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", body, ""), http.StatusOK)
+	if strings.Join(a.Loosens, ",") != "known_workloads" {
+		t.Fatalf("an extended expiry should be signed: %+v", a)
 	}
 	got := store.GetDetectionTuning().KnownWorkloads
-	if len(got) != 2 || !got[0].ExpiresAt.Equal(until.Add(-time.Hour)) || !got[1].ExpiresAt.Equal(until) {
-		t.Fatalf("the shortened expiry should apply at once and the extended one wait: %+v", got)
+	if len(got) != 2 || !got[0].ExpiresAt.Equal(until.Add(-time.Hour)) || !got[1].ExpiresAt.Equal(until.Add(time.Hour)) {
+		t.Fatalf("both expiries should apply on the first request: %+v", got)
 	}
 
 	// A row saved weaker than the floor, holding an expired workload.
@@ -1045,36 +934,30 @@ func TestKnownWorkloadExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
 	t.Fatal("no detection policy note")
 }
 
-// A loosening change waiting for the owner carries the floor drill run against
-// the policy it would save, so the owner sees what it blinds before tapping:
-// an exclusion over an internet range blinds the 10 MB burst, a container
+// A loosening change carries the floor drill run against the policy it would
+// save into what the authority signs, so the audit shows what it blinds: an
+// exclusion over an internet range blinds the 10 MB burst, a container
 // network over the LAN blinds the lateral sweeps; a case already blinded is
-// not counted again. The approved retry runs the same drill and applies;
-// nothing changes before the tap.
-func TestTheOwnerSeesWhatALooseningChangeWouldBlind(t *testing.T) {
+// not counted again.
+func TestTheAuthorizationRecordsWhatALooseningChangeWouldBlind(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	expires := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
 	body := `{"name":"uploads","dst_ip_range":"203.0.113.0/24","reason":"backup target","expires_at":"` + expires + `"}`
-	w := policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, "")
-	p := mustPend(t, w)
-	if !strings.HasPrefix(p.Summary, "BLINDS 1 FLOOR CASE: bandwidth burst; ") || !strings.Contains(w.Body.String(), `"drill_blinds":["bandwidth burst"]`) {
-		t.Fatalf("exclusion approval = %q %s", p.Summary, w.Body.String())
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, p.ApprovalID); w.Code != http.StatusCreated {
-		t.Fatalf("approved create = %d %s", w.Code, w.Body.String())
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, ""), http.StatusCreated)
+	if !strings.HasPrefix(a.Summary, "BLINDS 1 FLOOR CASE: bandwidth burst; ") {
+		t.Fatalf("exclusion authorization = %q", a.Summary)
 	}
 
-	p = mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"container_cidrs":["192.168.250.0/24"]}`, ""))
+	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"container_cidrs":["192.168.250.0/24"]}`, ""), http.StatusOK)
 	// The burst the live exclusion already blinds is not this change's; the
 	// quiet processes' lateral sweeps are.
-	if !strings.HasPrefix(p.Summary, "BLINDS 12 FLOOR CASES: lateral sweep, agent ssh fan-out reaching a floor port and 10 more; container_cidrs +192.168.250.0/24") {
-		t.Fatalf("tuning approval = %q", p.Summary)
+	if !strings.HasPrefix(a.Summary, "BLINDS 12 FLOOR CASES: lateral sweep, agent ssh fan-out reaching a floor port and 10 more; container_cidrs +192.168.250.0/24") {
+		t.Fatalf("tuning authorization = %q", a.Summary)
 	}
-	if len(store.GetDetectionTuning().ContainerCIDRs) != 0 {
-		t.Fatal("the container network applied before the owner approved it")
+	if len(store.GetDetectionTuning().ContainerCIDRs) != 1 {
+		t.Fatal("the container network did not apply")
 	}
 }
 
@@ -1101,8 +984,8 @@ func TestADrillCaseTheChangeDropsCountsAsBlinded(t *testing.T) {
 		t.Fatal("need agy among the shipped agent runtimes")
 	}
 	raw, _ := json.Marshal(map[string]any{"agent_runtimes": kept})
-	p := mustPend(t, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""))
-	if !strings.HasPrefix(p.Summary, "BLINDS 1 FLOOR CASE: resolver bypass under exclusion ex-agy") {
-		t.Fatalf("summary %q", p.Summary)
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""), http.StatusOK)
+	if !strings.HasPrefix(a.Summary, "BLINDS 1 FLOOR CASE: resolver bypass under exclusion ex-agy") {
+		t.Fatalf("summary %q", a.Summary)
 	}
 }

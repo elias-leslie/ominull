@@ -51,7 +51,7 @@ the remaining agents after native provenance and heartbeat convergence.
 ### Session signing (routine release keys)
 
 Inside the owner's work session, Nightshift's signer can sign with a routine
-release key instead of the tap key: run the release with
+release key instead of the main release key (Nightshift's signer signs either one without asking anyone): run the release with
 `OMINULL_SIGNING_ROUTINE=1`. The signing backend asks the signer for
 `pubkey routine` and refuses a key that is not on the hub's list signed by the
 pinned release key (`GET /api/v1/trust/routine-keys`). It verifies every

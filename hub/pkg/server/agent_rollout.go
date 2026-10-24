@@ -12,8 +12,8 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// One owner approval per agent release. A request to /api/v1/agents/update
-// that names canary endpoints is approved once for every endpoint it covers;
+// One authorization per agent release. A request to /api/v1/agents/update
+// that names canary endpoints is authorized once for every endpoint it covers;
 // the hub queues the canaries only and holds the rest (storage
 // agent_rollouts). When every canary runs the version, is online and passes
 // the native provenance check, the held endpoints are queued; a canary with a
@@ -59,7 +59,7 @@ func (s *Server) planAgentUpdates(version string, want func(storage.Endpoint) bo
 	}
 	for _, ep := range endpoints {
 		if granted != nil && !contains(granted, ep.ID) {
-			continue // only what the owner approved, even for "all"
+			continue // only what the authority signed, even for "all"
 		}
 		if !want(ep) || ep.Status == "retired" {
 			continue

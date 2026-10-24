@@ -15,7 +15,7 @@ func exclusionRequest(t *testing.T, srv *Server, method, path, key, body string)
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("X-API-Key", key)
-	return serveApproved(t, srv, srv.Handler(), r, body)
+	return serveAuthorized(t, srv.Handler(), r)
 }
 
 func auditCount(t *testing.T, store *storage.Store, action string) int {

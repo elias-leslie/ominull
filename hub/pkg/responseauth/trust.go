@@ -38,18 +38,18 @@ const (
 	autoIsolatePerEndpoint  = 10 * time.Minute // one per endpoint in this window
 	autoIsolateMaxReasonLen = 200
 
-	// How long an owner-approved enforcement grant may wait for an endpoint
-	// that is offline when it is approved.
+	// How long an enforcement grant may wait for an endpoint that is offline
+	// when it is signed.
 	enforcementGrantTTL = 24 * time.Hour
 	updateGrantTTL      = 7 * 24 * time.Hour
 )
 
 // ErrAutoIsolateRateLimit is returned when the detector asks too often.
-var ErrAutoIsolateRateLimit = errors.New("automatic isolation rate limit reached; an owner must isolate further hosts")
+var ErrAutoIsolateRateLimit = errors.New("automatic isolation rate limit reached; isolate further hosts through the isolate route")
 
-// ErrManifestNeedsApproval is returned when a manifest request would raise or
-// replace an endpoint's pinned capabilities without an owner approval.
-var ErrManifestNeedsApproval = errors.New("this capability change needs an owner approval")
+// ErrManifestNeedsRoute is returned when a manifest request would raise or
+// replace an endpoint's pinned capabilities outside the capabilities route.
+var ErrManifestNeedsRoute = errors.New("this capability change goes through the capabilities route (POST /api/v1/endpoints/capabilities)")
 
 // enforcementClock hands out issue times for enforcement grants (isolation,
 // detector isolation, mesh). Agents keep one watermark per slot and skip any
@@ -87,7 +87,7 @@ func newEnforcementClock(stateDir string) *enforcementClock {
 }
 
 // maxClockLead bounds how far a tenant's clock may run ahead of real time.
-// Grants are rationed (owner taps, the detector's 6 per hour), so a lead this
+// Grants are rationed (the detector's 6 per hour), so a lead this
 // large means something is wrong; agents would refuse such grants anyway.
 const maxClockLead = 5 * time.Minute
 
@@ -349,13 +349,13 @@ func (a *Authority) SignAutoIsolation(req *AutoIsolateRequest) (*response.Enforc
 	key := req.TenantID + "\x00" + ep
 	if last, ok := b.byEndpoint[key]; ok && now.Sub(last) < autoIsolatePerEndpoint {
 		b.mu.Unlock()
-		a.auditApproval(req.TenantID, "detector", "auto_isolate_refused", string(response.ActionKindAutoIsolate), ep, "", "denied", "one automatic isolation per endpoint per 10 minutes")
+		a.auditAction(req.TenantID, "detector", "auto_isolate_refused", string(response.ActionKindAutoIsolate), ep, "", "denied", "one automatic isolation per endpoint per 10 minutes")
 		return nil, ErrAutoIsolateRateLimit
 	}
 	if len(recent) >= autoIsolatePerHour {
 		b.byTenant[req.TenantID] = recent
 		b.mu.Unlock()
-		a.auditApproval(req.TenantID, "detector", "auto_isolate_refused", string(response.ActionKindAutoIsolate), ep, "", "denied", ErrAutoIsolateRateLimit.Error())
+		a.auditAction(req.TenantID, "detector", "auto_isolate_refused", string(response.ActionKindAutoIsolate), ep, "", "denied", ErrAutoIsolateRateLimit.Error())
 		return nil, ErrAutoIsolateRateLimit
 	}
 	b.byTenant[req.TenantID] = append(recent, now)
@@ -404,7 +404,7 @@ func (a *Authority) SignAutoIsolation(req *AutoIsolateRequest) (*response.Enforc
 		SignerKeyID:       keyID,
 	}
 	g.Signature = hex.EncodeToString(ed25519.Sign(priv, g.CanonicalBytes()))
-	a.auditApproval(req.TenantID, "detector", "auto_isolate_signed", string(response.ActionKindAutoIsolate), ep, g.GrantID, "success", cleanText(req.Reason, autoIsolateMaxReasonLen))
+	a.auditAction(req.TenantID, "detector", "auto_isolate_signed", string(response.ActionKindAutoIsolate), ep, g.GrantID, "success", cleanText(req.Reason, autoIsolateMaxReasonLen))
 	return &response.EnforcementGrant{Grant: g, PayloadB64: b64(payload)}, nil
 }
 
@@ -465,8 +465,8 @@ type ManifestRequest struct {
 // EndpointManifest returns the endpoint's current manifest. When it has none,
 // the first one is signed now, at most "respond": the initial manifest
 // pins what the endpoint already does, and engagement (hub-pushed scripts)
-// is always an owner's decision. Any later change goes through an owner
-// approval (capability_change).
+// is set through the capabilities route. Any later change goes through that
+// route too (capability_change).
 func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.CapabilityManifest, error) {
 	if req == nil || !validTenant(req.TenantID) {
 		return nil, errors.New("invalid tenant ID")
@@ -487,30 +487,29 @@ func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.Capability
 			if err != nil {
 				return nil, err
 			}
-			a.auditApproval(req.TenantID, "authority", "manifest_resigned", string(response.ActionKindCapability), ep, "", "success",
+			a.auditAction(req.TenantID, "authority", "manifest_resigned", string(response.ActionKindCapability), ep, "", "success",
 				fmt.Sprintf("profile %s under the current policy key, seq %d", n.Profile, n.Seq))
 			m = n
 		}
 		// A release that changes what a profile holds (e.g. screen joined
 		// respond in 1.8.80) re-signs older manifests, same profile, next
-		// seq. The profile stays the owner's choice; each session of a new
-		// capability still takes its own owner approval.
+		// seq. The profile stays the one set through the capabilities route.
 		if _, ok := response.ProfileCaps(m.Profile); ok && !m.MatchesProfile() {
 			n, err := a.signManifestLocked(req.TenantID, ep, m.Profile, m.Seq+1)
 			if err != nil {
 				return nil, err
 			}
-			a.auditApproval(req.TenantID, "authority", "manifest_refreshed", string(response.ActionKindCapability), ep, "", "success",
+			a.auditAction(req.TenantID, "authority", "manifest_refreshed", string(response.ActionKindCapability), ep, "", "success",
 				fmt.Sprintf("profile %s now holds %s (was %s), seq %d", n.Profile, strings.Join(n.Caps, ", "), strings.Join(m.Caps, ", "), n.Seq))
 			m = n
 		}
-		// Narrowing needs no approval: it can only take capabilities away.
+		// Narrowing needs no capability change: it can only take capabilities away.
 		if profile != "" && response.ProfileNarrows(m.Profile, profile) {
 			n, err := a.signManifestLocked(req.TenantID, ep, profile, m.Seq+1)
 			if err != nil {
 				return nil, err
 			}
-			a.auditApproval(req.TenantID, "hub", "manifest_narrowed", string(response.ActionKindCapability), ep, "", "success",
+			a.auditAction(req.TenantID, "hub", "manifest_narrowed", string(response.ActionKindCapability), ep, "", "success",
 				fmt.Sprintf("profile %s -> %s, seq %d", m.Profile, profile, n.Seq))
 			c := *n
 			return &c, nil
@@ -522,19 +521,19 @@ func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.Capability
 		profile = "respond"
 	}
 	if !ProfileInitialAllowed(profile) {
-		return nil, ErrManifestNeedsApproval
+		return nil, ErrManifestNeedsRoute
 	}
 	m, err := a.signManifestLocked(req.TenantID, ep, profile, 1)
 	if err != nil {
 		return nil, err
 	}
-	a.auditApproval(req.TenantID, "hub", "manifest_initial", string(response.ActionKindCapability), ep, "", "success", "profile "+profile)
+	a.auditAction(req.TenantID, "hub", "manifest_initial", string(response.ActionKindCapability), ep, "", "success", "profile "+profile)
 	c := *m
 	return &c, nil
 }
 
-// ProfileInitialAllowed reports whether a profile may be pinned without an
-// owner approval as an endpoint's first manifest.
+// ProfileInitialAllowed reports whether a profile may be pinned as an
+// endpoint's first manifest without the capabilities route.
 func ProfileInitialAllowed(profile string) bool {
 	return profile == "monitor" || profile == "respond"
 }
@@ -564,12 +563,12 @@ func (a *Authority) signManifestLocked(tenantID, ep, profile string, seq int64) 
 	return m, nil
 }
 
-// allowIsolationRoute lifts monitor-only (an isolation_change approval); the
-// authority raises the endpoint's manifest to respond when it is consumed.
+// allowIsolationRoute lifts monitor-only (an isolation_change authorization);
+// the authority raises the endpoint's manifest to respond when it signs it.
 const allowIsolationRoute = "/api/v1/endpoints/allow-isolation"
 
-// manifestApproval reports whether consuming this approval changes a manifest.
-func manifestApproval(kind response.ActionKind, payload []byte) bool {
+// changesManifest reports whether authorizing this action changes a manifest.
+func changesManifest(kind response.ActionKind, payload []byte) bool {
 	if kind == response.ActionKindCapability {
 		return true
 	}
@@ -580,24 +579,25 @@ func manifestApproval(kind response.ActionKind, payload []byte) bool {
 	return decodeJSON(payload, &p) == nil && p.Route == allowIsolationRoute
 }
 
-// capabilityPayload is the body of an owner-approved capability change.
+// capabilityPayload is the body of a capability change.
 type capabilityPayload struct {
 	EndpointID string `json:"endpoint_id"`
 	Profile    string `json:"profile"`
 	Reason     string `json:"reason"`
 }
 
-// applyCapabilityApproval signs the next manifest once an owner approved it.
-func (a *Authority) applyCapabilityApproval(tenantID string, stmt ApprovalStatement, payload []byte) error {
+// applyCapabilityChange signs the endpoint's next manifest.
+func (a *Authority) applyCapabilityChange(au *authorized) error {
+	tenantID := au.TenantID
 	var p routedPayload
-	if err := decodeJSON(payload, &p); err != nil {
+	if err := decodeJSON(au.Payload, &p); err != nil {
 		return err
 	}
 	var body capabilityPayload
 	if err := decodeJSON(p.Body, &body); err != nil {
 		return err
 	}
-	if len(stmt.Targets) != 1 || body.EndpointID != stmt.Targets[0] {
+	if len(au.Targets) != 1 || body.EndpointID != au.Targets[0] {
 		return errors.New("capability change names another endpoint")
 	}
 	b := a.manifests
@@ -609,7 +609,7 @@ func (a *Authority) applyCapabilityApproval(tenantID string, stmt ApprovalStatem
 		seq = cur.Seq + 1
 	}
 	if p.Route == allowIsolationRoute {
-		// Lifting monitor-only is the owner's raise to "respond"; a host
+		// Lifting monitor-only is a raise to "respond"; a host
 		// whose manifest already carries isolation keeps it.
 		if have && response.ProfileHas(cur.Profile, response.CapIsolate) {
 			return nil
@@ -620,7 +620,7 @@ func (a *Authority) applyCapabilityApproval(tenantID string, stmt ApprovalStatem
 	if err != nil {
 		return err
 	}
-	a.auditApproval(tenantID, stmt.Requester, "manifest_changed", string(response.ActionKindCapability), body.EndpointID, stmt.ID, "success",
+	a.auditAction(tenantID, au.Requester, "manifest_changed", string(response.ActionKindCapability), body.EndpointID, au.ID, "success",
 		fmt.Sprintf("profile %s, seq %d", m.Profile, m.Seq))
 	return nil
 }
@@ -683,7 +683,7 @@ func strictPayload(raw []byte) error {
 	return nil
 }
 
-// grantTTL is how long an approved grant of this kind stays usable.
+// grantTTL is how long a grant of this kind stays usable.
 func grantTTL(kind response.ActionKind, requested int64) int64 {
 	switch kind {
 	case response.ActionKindIsolationChange, response.ActionKindMeshQuarantine:

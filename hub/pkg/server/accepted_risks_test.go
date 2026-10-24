@@ -27,7 +27,6 @@ func TestAcceptedRisk(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.responseEnabled = true
-	owner := ownerOf(t, srv)
 	now := time.Now().UTC()
 	for _, id := range []string{"ep-kid", "ep-other"} {
 		if err := store.UpsertEndpoint(storage.Endpoint{ID: id, TenantID: "default", Hostname: id, OS: "Windows 11 Home", Status: "online", LastSeenAt: now}); err != nil {
@@ -38,7 +37,7 @@ func TestAcceptedRisk(t *testing.T) {
 	if w := acceptRisk(srv, "ep-nobody", true, "x"); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown machine: %d", w.Code)
 	}
-	syncRealPackage(t, srv, "audit.ps1")
+	audit, _ := syncRealPackage(t, srv, "audit.ps1")
 	if w := adminPut(srv, "/api/v1/maintenance/settings", `{"package":"windows-audit","enabled":true,"on_drift":"enforce"}`); w.Code != http.StatusOK {
 		t.Fatalf("on_drift: %d %s", w.Code, w.Body.String())
 	}
@@ -105,18 +104,21 @@ func TestAcceptedRisk(t *testing.T) {
 		t.Fatalf("one machine still drifts: %v %+v", err, fs[0].Unmapped)
 	}
 
-	// No fix ask for the accepted machine, one for the other.
+	// No fix run for the accepted machine, one for the other.
 	later := now.Add(10 * time.Minute)
 	for _, id := range []string{"ep-kid", "ep-other"} {
 		_ = store.UpsertEndpoint(storage.Endpoint{ID: id, TenantID: "default", Hostname: id, OS: "Windows 11 Home", Status: "online", LastSeenAt: later})
 	}
 	srv.runMaintenanceSchedules(later)
-	pending := owner.auth.PendingApprovals()
-	if len(pending) != 1 {
-		t.Fatalf("only the machine that did not accept asks: %+v", pending)
+	runs := func(ep string) int {
+		list, err := srv.responseStore.ScriptJobs("default", ep, audit.ID, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(list)
 	}
-	if got := pending[0].Targets; len(got) != 1 || got[0] != "ep-other" {
-		t.Fatalf("ask targets: %+v", got)
+	if runs("ep-kid") != 1 || runs("ep-other") != 2 {
+		t.Fatalf("only the machine that did not accept gets the fix run: kid %d, other %d jobs", runs("ep-kid"), runs("ep-other"))
 	}
 
 	// Un-accept restores everything.

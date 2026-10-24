@@ -27,19 +27,18 @@ func pemOf(t *testing.T, k *ecdsa.PrivateKey) string {
 
 // The pinned release key lists the routine keys; agents get the list in the
 // heartbeat; a release signed with a routine key rolls out canaries first
-// (the default rows approve it without asking, as an owner-signed rollout),
-// and retiring it halts the rollout, drops its queued updates and refuses to
+// (the authority signs a staged one at once), and retiring it halts the rollout, drops its queued updates and refuses to
 // roll it again.
 func TestRoutineKeysSignedReleaseRollsStaged(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
-	owner := ownerOf(t, s)
+	auth := authorityOf(t, s).auth
 	rel, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	routine, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	s.trust.mu.Lock()
 	s.trust.releasePub = []byte(pemOf(t, rel))
 	s.trust.mu.Unlock()
-	owner.auth.SetReleaseKey([]byte(pemOf(t, rel)))
+	auth.SetReleaseKey([]byte(pemOf(t, rel)))
 	call := func(method, path, body string) (int, map[string]any) {
 		t.Helper()
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -97,10 +96,13 @@ func TestRoutineKeysSignedReleaseRollsStaged(t *testing.T) {
 		t.Fatalf("an unstaged routine-signed rollout: %d %v", code, m)
 	}
 	if code, m := call("POST", "/api/v1/agents/update", `{"endpoint_ids":["canary","rest"],"version":"1.2.0","canary":["canary"]}`); code != http.StatusOK {
-		t.Fatalf("a staged routine-signed rollout runs under the agent_update row: %d %v", code, m)
+		t.Fatalf("a staged routine-signed rollout is authorized on the first request: %d %v", code, m)
 	}
 	if job, _ := db.GetAgentUpdateJob("canary"); job == nil || job.DesiredVersion != "1.2.0" {
 		t.Fatalf("canary not queued: %+v", job)
+	}
+	if !authorizedAuditHas(t, s.store, "canary") {
+		t.Fatalf("no ACTION_AUTHORIZED row for the staged rollout: %+v", authorizedAudit(t, s.store))
 	}
 
 	code, m = call("POST", "/api/v1/agents/rollback", `{"version":"1.2.0","reason":"canary misbehaves"}`)

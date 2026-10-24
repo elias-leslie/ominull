@@ -5,6 +5,11 @@ administrator sets a lock level (capability ceiling) at the host, and may pin a 
 held outside OmniNull (Nightshift's). Where a host authority is pinned, scripts run only on grants it signed (under any level); the
 hub carries those grants and never signs them.
 
+Since 2026-10-24 the response authority signs ordinary hub actions on the first request, with no owner approval
+(docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md section 2.4). For these two machines the lock level and the host
+authority are therefore the part that holds against a compromised hub or a leaked admin key: the agent refuses
+what they forbid even when the response key signed it.
+
 Agents from 1.8.81 implement everything here. Code: `agent/include/agent_trust.h` (ceilings, host files, offer
 checks, report), `agent/include/response_canonical.h` (grant bytes), `agent/include/response_dispatcher.h` (grant
 parsing, replay cache), `hub/pkg/response/dto.go` (grant bytes), `hub/pkg/server/signed_jobs.go` (courier).
@@ -26,8 +31,8 @@ the ceiling. An unknown level is refused (exit 1) and nothing is written; an unr
 | `engagement` | everything | |
 
 Terminal and remote screen are refused by the agent under `monitor`, `isolate`, `signed-scripts` and
-`monitor-signed-scripts`. The hub refuses those requests itself, from the machine's latest trust report, before any
-owner ask: a terminal under those levels, hub-signed scripts (one-off, maintenance, playbook) under `monitor`, `isolate`
+`monitor-signed-scripts`. The hub refuses those requests itself, from the machine's latest trust report, before the
+authority is asked to sign: a terminal under those levels, hub-signed scripts (one-off, maintenance, playbook) under `monitor`, `isolate`
 and `respond`, under `(monitor-)signed-scripts` without a host authority, and on any host that pins one (those take
 `ominullctl host-script run`); remote screen has its own preflight. The agent's refusal stays the real guard. The
 hub's per-machine "remote access off" setting (docs/REMOTE_SCREEN.md §7) refuses them
@@ -35,7 +40,7 @@ on the hub side as well; set it for the same machines.
 
 Capability names (manifest and ceiling): `update`, `isolate`, `mesh`, `collect`, `script`, `terminal`, `screen`.
 Under `signed-scripts` and `monitor-signed-scripts` the manifest must still carry `script`, so the endpoint's hub profile must
-carry it (one owner tap on the hub); the ceiling then cuts it down. The workstation uses `engagement`. A hypervisor the
+carry it (a profile change, authorized by the response authority on the first request); the ceiling then cuts it down. The workstation uses `engagement`. A hypervisor the
 hub keeps monitor-only uses `monitor-scripts` (collect, script and update; no isolate, mesh, terminal or screen). That
 profile adds no isolation, so it stands while monitor-only stays set; `engagement` on a monitor-only host is narrowed
 straight back to `monitor`.
@@ -57,7 +62,9 @@ them alone. Restart the agent after changing them.
 - `ed25519` is the raw 32-byte public key in hex. `id` must equal the lowercase hex SHA-256 of those 32 bytes (the
   `signer_key_id` grants carry); a key whose id is not its fingerprint, a duplicate id, or any malformed entry
   makes the whole file unusable.
-- `role`: `tap` grants may run any script; `auto` grants only allow-listed packages.
+- `role`: `tap` grants may run any script; `auto` grants only allow-listed packages. `tap` is only the wire name of
+  the any-script role (from the time Nightshift's approve page asked the owner for a tap); nobody taps now and the
+  value stays `tap` in files, trust reports and `operator_id`.
 - **Fails closed**: once `host_authority.json` exists, scripts take only host-authority grants. If the file is
   unreadable, fails the owner check or is malformed, no key loads and every script is refused until it is fixed or
   removed. Removing the file returns scripts to the hub's response key (subject to the ceiling).
@@ -126,7 +133,7 @@ written, the new grant is refused, never an old entry dropped. Files: `/var/lib/
 
 For endpoints whose latest trust report (under 15 minutes old) says `"host_authority":true`, a lock level that
 allows scripts (`signed-scripts`, `monitor-signed-scripts`, `engagement` or none) and the `engagement` or `monitor-scripts` profile;
-otherwise 403 with the reason, before anyone is asked to sign. Admin API key (`X-API-Key`). The hub never calls the
+otherwise 403 with the reason, before Nightshift is asked to sign. Admin API key (`X-API-Key`). The hub never calls the
 OmniNull authority on this path and never signs. `ominullctl host-script run` (below) does all three steps.
 
 1. **Reserve** a job id for the payload:
@@ -144,7 +151,7 @@ OmniNull authority on this path and never signs. `ominullctl host-script run` (b
    ```
 
    `payload_json` is the exact text the agent will digest (Go's encoding: fixed field order, `<`, `>`, `&`
-   escaped). Show the owner that text and sign over `action_digest`; never re-encode the payload yourself.
+   escaped). Sign over `action_digest` (a signer may log or show the text); never re-encode the payload yourself.
    The reservation is single-use and lapses after 15 minutes.
 
 2. **Sign** a V3 grant: `version` 3, `grant_id` (unique), `tenant_id` and `endpoint_id` from the answer,
@@ -160,7 +167,7 @@ OmniNull authority on this path and never signs. `ominullctl host-script run` (b
    used, lapsed or for another payload).
 
 The job then runs like any script job: supervised (docs/RESPONSE_SUPERVISOR.md), `maint wait` works on its id, and
-the console's job history shows it as "signed by Nightshift (owner tap)" or "(allow-listed package)". The hub audits
+the console's job history shows it as "signed by Nightshift" or "signed by Nightshift (allow-listed package)". The hub audits
 `SIGNED_JOB_QUEUED`.
 
 ## ominullctl host-script run
@@ -175,14 +182,15 @@ ominullctl host-script run ENDPOINT --package NAME [--mode audit|enforce|revert]
 
 1. Reserves with `{"package","mode"}` using its admin key.
 2. Writes the reserve answer to a private temp file and runs `nightshift sign host-grant FILE [--host LABEL] [--auto]`
-   (`OMINULL_HOST_SIGNER` names another command). Without `--auto` the owner taps on Nightshift's approve page,
-   which shows the whole script. With `--auto` the always-on signer signs only allow-listed packages.
+   (`OMINULL_HOST_SIGNER` names another command). Without `--auto` Nightshift's signer signs the reserved script
+   with the `tap` key (it asks the owner for nothing); with `--auto` the always-on signer signs only allow-listed
+   packages.
 3. Submits the payload byte for byte as reserved, with the grant the signer printed.
 4. Prints `job <id> <endpoint> <package>` and waits like `maint wait` (the hub holds each request open).
 
 Exit codes: 0 ok, 3 the run failed, 4 needs attention, 5 `--timeout` passed (as `maint wait`); 6 the endpoint
 refuses signed scripts (lock level, profile, no host authority, or no fresh trust report); 7 the reservation lapsed
-or was used (run again); 8 Nightshift did not sign (owner declined, no standing rule, signer closed); 9 the hub
+or was used (run again); 8 Nightshift did not sign (the signer refused or is closed); 9 the hub
 refused the signed grant.
 
 ## Trust report
@@ -203,7 +211,7 @@ one key loaded. The fleet trust view (`GET /api/v1/fleet/trust`, admin) carries 
 
 ### Lock facts for Nightshift
 
-`GET /api/v1/integrations/nightshift/locks` with the approval relay key (`X-API-Key`; the admin key is refused, as on
+`GET /api/v1/integrations/nightshift/locks` with the Nightshift relay key (`X-API-Key`; the admin key is refused, as on
 every relay route). It lists only machines whose latest trust report shows a ceiling or a host file, with public facts:
 
 ```json

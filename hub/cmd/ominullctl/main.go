@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -248,83 +247,8 @@ func parseGlobalFlags(args []string) (CLIConfig, []string) {
 }
 
 func (c *APIClient) doRequest(method, endpoint string, body interface{}) ([]byte, error) {
-	raw, status, err := c.doRequestWith(method, endpoint, body, nil)
-	if err == nil && status == http.StatusAccepted && strings.Contains(string(raw), `"approval_id"`) {
-		// A request the hub holds for the owner did not happen; a caller
-		// that should wait for the tap uses ownerApproved.
-		return nil, fmt.Errorf("%s waits for the owner's approval, which this command does not wait for: %s", endpoint, string(raw))
-	}
+	raw, _, err := c.doRequestWith(method, endpoint, body, nil)
 	return raw, err
-}
-
-// ownerApproved sends a request the hub holds for the owner's phone approval.
-// A 202 names the approval; this waits for the owner's decision, then sends
-// the same request again with X-Approval-ID, which the hub accepts once.
-func (c *APIClient) ownerApproved(method, endpoint string, body interface{}) ([]byte, error) {
-	raw, status, err := c.doRequestWith(method, endpoint, body, nil)
-	if err != nil || status != http.StatusAccepted {
-		return raw, err
-	}
-	var pending struct {
-		ID        string `json:"approval_id"`
-		Action    string `json:"action"`
-		Summary   string `json:"summary"`
-		ExpiresAt string `json:"expires_at"`
-	}
-	if json.Unmarshal(raw, &pending) != nil || pending.ID == "" {
-		return raw, nil
-	}
-	fmt.Fprintf(os.Stderr, "[*] Owner approval needed: %s - %s\n    Approve on the phone (approval %s, expires %s).\n",
-		pending.Action, pending.Summary, pending.ID, pending.ExpiresAt)
-	// Nobody is left to use an approval this process stops waiting for, so
-	// an interrupt or the deadline withdraws it: the owner is never handed a
-	// stale ask.
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(stop)
-	withdraw := func(why string) error {
-		_, _, werr := c.doRequestWith(http.MethodDelete, "/api/v1/approvals?id="+url.QueryEscape(pending.ID), nil, nil)
-		if werr != nil {
-			return fmt.Errorf("%s; withdrawing approval %s failed (%v), it lapses at %s", why, pending.ID, werr, pending.ExpiresAt)
-		}
-		return fmt.Errorf("%s; approval %s withdrawn", why, pending.ID)
-	}
-	type pollResult struct {
-		raw []byte
-		err error
-	}
-	deadline := time.Now().Add(16 * time.Minute)
-	for time.Now().Before(deadline) {
-		done := make(chan pollResult, 1)
-		go func() {
-			st, _, err := c.doRequestWith(http.MethodGet, "/api/v1/approvals?wait=10&id="+url.QueryEscape(pending.ID), nil, nil)
-			done <- pollResult{st, err}
-		}()
-		var pr pollResult
-		select {
-		case sig := <-stop:
-			signal.Stop(stop)
-			return nil, withdraw("stopped by " + sig.String())
-		case pr = <-done:
-		}
-		st, err := pr.raw, pr.err
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		var v struct {
-			State string `json:"state"`
-		}
-		_ = json.Unmarshal(st, &v)
-		switch v.State {
-		case "approved":
-			raw, _, err = c.doRequestWith(method, endpoint, body, map[string]string{"X-Approval-ID": pending.ID})
-			return raw, err
-		case "denied", "expired", "consumed":
-			return nil, fmt.Errorf("owner approval %s was %s", pending.ID, v.State)
-		}
-	}
-	return nil, withdraw("no owner decision")
 }
 
 func (c *APIClient) doRequestWith(method, endpoint string, body interface{}, headers map[string]string) ([]byte, int, error) {
@@ -560,7 +484,7 @@ func (c *APIClient) cmdMesh(args []string) error {
 		if len(args) > 3 {
 			reason = args[3]
 		}
-		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/mesh/quarantine", map[string]string{
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/mesh/quarantine", map[string]string{
 			"target_ip":  tip,
 			"target_mac": tmac,
 			"reason":     reason,
@@ -579,7 +503,7 @@ func (c *APIClient) cmdMesh(args []string) error {
 			return fmt.Errorf("usage: ominullctl mesh release <ip>")
 		}
 		tip := args[1]
-		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/mesh/unquarantine", map[string]string{
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/mesh/unquarantine", map[string]string{
 			"target_ip": tip,
 		})
 		if err != nil {
@@ -615,7 +539,7 @@ func (c *APIClient) cmdAgents(args []string) error {
 		if err != nil {
 			return err
 		}
-		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/agents/update", body)
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/agents/update", body)
 		if err != nil {
 			return err
 		}
@@ -630,23 +554,7 @@ func (c *APIClient) cmdAgents(args []string) error {
 		})
 		return nil
 	}
-	if args[0] == "rule" || args[0] == "forget-rule" {
-		// The owner's approve-all rule for owner-signed rollouts: shown, or
-		// removed (removing only narrows; the admin key is enough).
-		method := http.MethodGet
-		if args[0] == "forget-rule" {
-			method = http.MethodDelete
-		}
-		raw, err := c.doRequest(method, "/api/v1/approvals/rules", nil)
-		if err != nil {
-			return err
-		}
-		var res interface{}
-		_ = json.Unmarshal(raw, &res)
-		c.printOutput(res, func() { fmt.Println(string(raw)) })
-		return nil
-	}
-	return fmt.Errorf("usage: ominullctl agents versions|update|rule|forget-rule")
+	return fmt.Errorf("usage: ominullctl agents versions|update")
 }
 
 func (c *APIClient) cmdInstall(args []string) error {
@@ -1497,8 +1405,8 @@ func (c *APIClient) cmdLearning(args []string) error {
 		if *days > 0 {
 			body["days"] = *days
 		}
-		// Opening a window holds findings, so it waits for the owner's tap.
-		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/learning/windows", body)
+		// Opening a window holds findings; the hub authorizes it itself.
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/learning/windows", body)
 		if err != nil {
 			return err
 		}
@@ -1575,9 +1483,9 @@ func (c *APIClient) cmdLearning(args []string) error {
 		if len(list) == 0 {
 			return fmt.Errorf("name the proposals to apply with --ids; there is no apply-all")
 		}
-		// Every proposal quiets something, so the hub holds the apply for
-		// the owner's tap; wait for it rather than report a 202 as done.
-		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/learning/proposals/apply",
+		// Every proposal quiets something; the hub authorizes the apply
+		// itself and answers when it is done.
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/learning/proposals/apply",
 			map[string]interface{}{"window": *window, "ids": list})
 		if err != nil {
 			return err
@@ -1628,8 +1536,8 @@ func fatalIf(err error) {
 
 const agentUpdateUsage = "usage: ominullctl agents update <endpoint_id...|all> [--version V | V]"
 
-// agentUpdateBody: several endpoint ids make one rollout (one owner
-// approval). The version is --version V, or a trailing bare version
+// agentUpdateBody: several endpoint ids make one rollout (one
+// authorization). The version is --version V, or a trailing bare version
 // (digits and dots) as before.
 func agentUpdateBody(args []string) (map[string]interface{}, error) {
 	var ids []string
@@ -1713,12 +1621,11 @@ Fleet & CyberOps Commands:
   learning windows|open|close             Inspect, open and close learning windows
   learning proposals|apply                Read what a window learned and apply named proposals
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
-  agents versions|update <id...|all> [--version V]  Inspect fleet versions; update several machines in one approval
-  agents rule|forget-rule                 Show or remove the approve-all rule for owner-signed rollouts
-  maint run ENDPOINT PKG... --mode M      Run maintenance packages (Approvals row, rule or owner tap; --no-wait prints ids)
+  agents versions|update <id...|all> [--version V]  Inspect fleet versions; update several machines in one rollout
+  maint run ENDPOINT PKG... --mode M      Run maintenance packages (--no-wait prints ids)
   maint wait ID... [--all] [--timeout D]  Block until a job, run or playbook run ends or needs attention
                                           (exit 0 ok, 3 failed, 4 needs attention, 5 timeout)
-  maint script EP --file F --reason TEXT  Run a one-off script (one owner tap; --no-wait prints run and job ids)
+  maint script EP --file F --reason TEXT  Run a one-off script (--no-wait prints run and job ids)
   maint promote JOB_ID | --file F         Add a script with a package header to the library
   maint cancel JOB_ID                     Stop a running job (the agent kills it and its children)
   maint window show [EP]                  Maintenance windows: fleet default and each machine's own, with the next start
@@ -1727,12 +1634,11 @@ Fleet & CyberOps Commands:
   maint settings [ENDPOINT]               Effective package settings (fleet, or one host)
   maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]
                                           Change a fleet default or a host override
-  maint rules|forget-rule [ID]            Show or remove approve-all rules for maintenance packages
   host-script run EP --package NAME [--mode M] [--auto] [--timeout D] [--no-wait]
                                           Run a released package on a host-authority host: reserve, Nightshift signs, submit, wait
                                           (exit 6 endpoint refuses, 7 reservation lapsed, 8 signer refused, 9 hub refused the grant)
   install reports [list|show]             Inspect bootstrap error reports
-  enrol list|open|close                   LAN self-enrolment windows (open waits for the owner's tap)
+  enrol list|open|close                   LAN self-enrolment windows 
 
 Forensics & Response Commands:
   response jobs list|cancel <id>          Inspect and manage durable response jobs
@@ -1742,16 +1648,16 @@ Forensics & Response Commands:
   scripts sync DIR       Sync maintenance packages (DIR/*.ps1) into the library; unchanged ones are skipped
   shell sessions|show|close <id>          List and close active terminal sessions
 
-Remote Commands (each new session waits for the owner's passkey tap):
+Remote Commands:
   exec [--timeout S] ENDPOINT -- COMMAND  Run COMMAND (sh on Linux, PowerShell on Windows); prints its
                                           stdout and stderr and exits with its exit code (- reads stdin)
-  shell open [--ttl 90m] ENDPOINT         One tap, then exec/put/get on ENDPOINT reuse the session
+  shell open [--ttl 90m] ENDPOINT         Opens a session, then exec/put/get on ENDPOINT reuse the session
   shell end ENDPOINT                      End the held session
   screen open [--view] [--ttl 90m] [--viewer PATH] ENDPOINT
-                                          One tap, then shows ENDPOINT's screen in the screen viewer
+                                          Opens a session and shows ENDPOINT's screen in the screen viewer
                                           (--view: watch only); the session ends when the viewer closes
   screen hold [--view] [--ttl 90m] ENDPOINT
-                                          One tap for a session an agent then drives; ended sessions
+                                          A session an agent then drives; ended sessions
                                           make the next command fail with "open a new one"
   screen info|shot|click|move|drag|scroll|type|key ENDPOINT ...
                                           Act on the held session; X Y are pixels in the last
@@ -1759,7 +1665,7 @@ Remote Commands (each new session waits for the owner's passkey tap):
   screen watch|end ENDPOINT               Watch the held session view-only, or end it
   screen settings [ENDPOINT] [--ask-first on|off|fleet]
                                           Whether screen sessions ask the person at the keyboard
-                                          first (turning it off waits for the owner's tap)
+                                          first 
                                           (ominullctl help screen explains all of it)
   put ENDPOINT LOCAL REMOTE               Copy a small file (up to 2 MiB) to the endpoint
   get ENDPOINT REMOTE LOCAL|-             Copy a file from the endpoint

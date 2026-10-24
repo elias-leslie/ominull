@@ -301,7 +301,7 @@ func (s *Store) Supervision(tenantID string, jobIDs []string) (map[string]*JobSu
 }
 
 // RunKeyPrefix makes the idempotency key of a job dispatched for a run (the
-// owner's approval id): runID + "/" + grant id. JobsForRun finds them again.
+// authorization id): runID + "/" + grant id. JobsForRun finds them again.
 func RunKeyPrefix(runID string) string { return runID + "/" }
 
 // JobsForRun returns the jobs dispatched for a run, oldest first.

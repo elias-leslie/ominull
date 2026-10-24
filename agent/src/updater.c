@@ -478,7 +478,7 @@ void Update_Apply(const AGENT_CONFIG* config, const char* respJson) {
         printf("[!] Rejected agent update v%s: package or signature is not on a hub download path.\n", version);
         return;
     }
-    /* Never backwards, and only what the owner approved for this host: the
+    /* Never backwards, and only what the authority signed for this host: the
      * response authority's grant, verified against the pinned key. */
     const char* why = Agent_TrustUpdateRefusal(respJson, version, OMINULL_AGENT_VERSION);
     if (why) {

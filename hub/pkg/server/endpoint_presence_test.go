@@ -41,7 +41,7 @@ func TestEndpointPresenceNeedsAReasonAndAKnownHost(t *testing.T) {
 	body := `{"endpoint_id":"lt","presence":"intermittent","reason":"in use, often shut"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/presence", bytes.NewBufferString(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, srv, srv.Handler(), req, body); w.Code != http.StatusOK {
+	if w := serveAuthorized(t, srv.Handler(), req); w.Code != http.StatusOK {
 		t.Fatalf("approved intermittent = %d %s", w.Code, w.Body.String())
 	}
 	ep, err := store.GetEndpoint("lt")

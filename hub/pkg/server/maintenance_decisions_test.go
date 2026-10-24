@@ -13,15 +13,13 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// runRemoval runs a software removal audit on ep-lap under the owner's tap and
-// finishes it with stdout.
+// runRemoval runs a software removal audit on ep-lap and finishes it with
+// stdout.
 func runRemoval(t *testing.T, srv *Server, stdout string) {
 	t.Helper()
 	audit := `{"endpoint_ids":["ep-lap"],"packages":["windows-software-removal"],"mode":"audit"}`
-	id := pendingID(t, adminPost(srv, "/api/v1/maintenance/run", audit, ""))
-	ownerOf(t, srv).approve(t, id)
-	if w := adminPost(srv, "/api/v1/maintenance/run", audit, id); w.Code != http.StatusCreated {
-		t.Fatalf("approved audit: %d %s", w.Code, w.Body.String())
+	if w := postAdmin(srv, "/api/v1/maintenance/run", audit); w.Code != http.StatusCreated {
+		t.Fatalf("audit: %d %s", w.Code, w.Body.String())
 	}
 	offers, err := srv.responseStore.OfferPendingJobs("default", "ep-lap", 4, time.Minute)
 	if err != nil || len(offers) != 1 {
@@ -58,7 +56,7 @@ func TestOwnerDecisions(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.responseEnabled = true
-	ownerOf(t, srv)
+	authorityOf(t, srv)
 	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +96,11 @@ func TestOwnerDecisions(t *testing.T) {
 		`{"key":"nope","answer":"handled"}`:                                      "no open decision",
 		`{"key":"` + byID["wave-tool"].Key + `","answer":"delete","reason":"x"}`: "keep or handled",
 	} {
-		if w := adminPost(srv, "/api/v1/maintenance/decisions", body, ""); w.Code == http.StatusOK || !strings.Contains(w.Body.String(), want) {
+		if w := postAdmin(srv, "/api/v1/maintenance/decisions", body); w.Code == http.StatusOK || !strings.Contains(w.Body.String(), want) {
 			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
 		}
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/decisions", `{"key":"`+byID["wave-tool"].Key+`","answer":"keep","reason":"the kids use it"}`, ""); w.Code != http.StatusOK {
+	if w := postAdmin(srv, "/api/v1/maintenance/decisions", `{"key":"`+byID["wave-tool"].Key+`","answer":"keep","reason":"the kids use it"}`); w.Code != http.StatusOK {
 		t.Fatalf("keep: %d %s", w.Code, w.Body.String())
 	}
 	rows, _ := srv.maintenanceRows("default")
@@ -110,13 +108,13 @@ func TestOwnerDecisions(t *testing.T) {
 	if row.Params["keep"] != "wave-tool" || !strings.Contains(row.Reason, "keeps Wave Tool: the kids use it") {
 		t.Fatalf("override: %+v", row)
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/decisions", `{"key":"`+byID["hp-extras"].Key+`","answer":"handled"}`, ""); w.Code != http.StatusOK {
+	if w := postAdmin(srv, "/api/v1/maintenance/decisions", `{"key":"`+byID["hp-extras"].Key+`","answer":"handled"}`); w.Code != http.StatusOK {
 		t.Fatalf("handled: %d %s", w.Code, w.Body.String())
 	}
 	if v := getDecisions(t, srv); len(v.Open) != 1 || len(v.Answered) != 2 {
 		t.Fatalf("after answers: %+v", v)
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/decisions", `{"key":"`+byID["bad"].Key+`","answer":"handled"}`, ""); w.Code != http.StatusOK {
+	if w := postAdmin(srv, "/api/v1/maintenance/decisions", `{"key":"`+byID["bad"].Key+`","answer":"handled"}`); w.Code != http.StatusOK {
 		t.Fatalf("handled: %d %s", w.Code, w.Body.String())
 	}
 	findings, _ = srv.decisionFindings(time.Now().UTC())
@@ -144,15 +142,15 @@ func TestOwnerDecisions(t *testing.T) {
 	}
 }
 
-// Nightshift's inbox answers an open decision with the relay key: the same
-// rules as the console, recorded as by "nightshift (owner)"; the admin route
-// stays admin-only and the relay key answers nothing that is not open.
-func TestRelayDecisionAnswer(t *testing.T) {
+// Decisions are answered in the console with the admin key only. The relay
+// key (Nightshift's) answers nothing on that route, and the old relay
+// decision routes are gone.
+func TestDecisionsAnsweredInTheConsoleOnly(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.responseEnabled = true
-	ownerOf(t, srv)
+	authorityOf(t, srv)
 	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -164,83 +162,57 @@ func TestRelayDecisionAnswer(t *testing.T) {
 	for _, d := range getDecisions(t, srv).Open {
 		byID[d.Item.ID] = d
 	}
+	if len(byID) != 2 {
+		t.Fatalf("open: %+v", byID)
+	}
 	findings, _ := srv.decisionFindings(time.Now().UTC())
-	if len(findings) != 1 || findings[0].Unmapped["answer_in"] != "Nightshift inbox or OmniNull console" {
+	if len(findings) != 1 || findings[0].Unmapped["answer_in"] == "" {
 		t.Fatalf("answer_in: %+v", findings)
 	}
 
-	issue := adminPost(srv, "/api/v1/integrations/nightshift/approval-key", ``, "")
+	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}
 	_ = json.Unmarshal(issue.Body.Bytes(), &k)
-	relay := func(key, body string) (int, string) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/nightshift/decisions/answer", strings.NewReader(body))
+	if k.Key == "" {
+		t.Fatalf("relay key: %d %s", issue.Code, issue.Body.String())
+	}
+	hp, wave := byID["hp-extras"].Key, byID["wave-tool"].Key
+	as := func(method, path, key, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.Header.Set("X-API-Key", key)
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		return w.Code, w.Body.String()
+		return w
 	}
-	wave, hp := byID["wave-tool"].Key, byID["hp-extras"].Key
-	listOpen := func(key string) (int, []relayDecision) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/nightshift/decisions", nil)
-		req.Header.Set("X-API-Key", key)
-		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, req)
-		var v struct {
-			Open []relayDecision `json:"open"`
-		}
-		_ = json.Unmarshal(w.Body.Bytes(), &v)
-		if strings.Contains(w.Body.String(), `"answered"`) {
-			t.Fatalf("relay list carries answered items: %s", w.Body.String())
-		}
-		return w.Code, v.Open
+	if w := as(http.MethodPost, "/api/v1/maintenance/decisions", k.Key, `{"key":"`+hp+`","answer":"handled"}`); w.Code == http.StatusOK {
+		t.Fatalf("relay key answered on the console route: %s", w.Body.String())
 	}
-	if c, _ := listOpen("mock_admin_token"); c != http.StatusUnauthorized {
-		t.Fatalf("admin key on the relay list: %d", c)
-	}
-	if c, open := listOpen(k.Key); c != http.StatusOK || len(open) != 2 || open[0].GroupTitle == "" || open[0].Endpoint != "laptop-1" || len(open[0].Answers) != 2 {
-		t.Fatalf("relay list: %d %+v", c, open)
-	}
-	if c, b := relay("mock_admin_token", `{"key":"`+hp+`","answer":"handled"}`); c != http.StatusUnauthorized {
-		t.Fatalf("admin key on the relay route: %d %s", c, b)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/decisions", strings.NewReader(`{"key":"`+hp+`","answer":"handled"}`))
-	req.Header.Set("X-API-Key", k.Key)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	if w.Code == http.StatusOK {
-		t.Fatalf("relay key answered on the admin route: %s", w.Body.String())
-	}
-	if c, b := relay(k.Key, `{"key":"`+wave+`","answer":"keep"}`); c != http.StatusBadRequest {
-		t.Fatalf("keep without a reason: %d %s", c, b)
-	}
-	if c, b := relay(k.Key, `{"key":"`+wave+`","answer":"maybe"}`); c != http.StatusBadRequest {
-		t.Fatalf("bad answer: %d %s", c, b)
-	}
-	if c, b := relay(k.Key, `{"key":"`+hp+`","answer":"handled"}`); c != http.StatusOK || !strings.Contains(b, `"by":"nightshift (owner)"`) {
-		t.Fatalf("relay handled: %d %s", c, b)
-	}
-	if c, b := relay(k.Key, `{"key":"`+hp+`","answer":"handled"}`); c != http.StatusNotFound {
-		t.Fatalf("closed key: %d %s", c, b)
-	}
-	if c, b := relay(k.Key, `{"key":"`+wave+`","answer":"keep","reason":"the kids use it"}`); c != http.StatusOK {
-		t.Fatalf("relay keep: %d %s", c, b)
-	}
-	if c, open := listOpen(k.Key); c != http.StatusOK || len(open) != 0 {
-		t.Fatalf("after answers the list is empty: %d %+v", c, open)
-	}
-	logs, err := store.ListAuditLogs("", 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := 0
-	for _, l := range logs {
-		if l.Action == "MAINTENANCE_DECISION" && l.Username == "nightshift (owner)" {
-			n++
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/v1/integrations/nightshift/decisions", ""},
+		{http.MethodPost, "/api/v1/integrations/nightshift/decisions/answer", `{"key":"` + hp + `","answer":"handled"}`},
+	} {
+		if w := as(c.method, c.path, k.Key, c.body); w.Code == http.StatusOK {
+			t.Fatalf("%s %s still answers with the relay key: %s", c.method, c.path, w.Body.String())
 		}
 	}
-	if n != 2 {
-		t.Fatalf("want 2 MAINTENANCE_DECISION audits by nightshift (owner), got %d", n)
+	if v := getDecisions(t, srv); len(v.Open) != 2 || len(v.Answered) != 0 {
+		t.Fatalf("nothing should be answered yet: %+v", v)
+	}
+	if w := as(http.MethodPost, "/api/v1/maintenance/decisions", "mock_admin_token", `{"key":"`+hp+`","answer":"handled"}`); w.Code != http.StatusOK {
+		t.Fatalf("console handled: %d %s", w.Code, w.Body.String())
+	}
+	if w := as(http.MethodPost, "/api/v1/maintenance/decisions", "mock_admin_token", `{"key":"`+hp+`","answer":"handled"}`); w.Code != http.StatusNotFound {
+		t.Fatalf("closed key: %d %s", w.Code, w.Body.String())
+	}
+	if w := as(http.MethodPost, "/api/v1/maintenance/decisions", "mock_admin_token", `{"key":"`+wave+`","answer":"keep","reason":"the kids use it"}`); w.Code != http.StatusOK {
+		t.Fatalf("console keep: %d %s", w.Code, w.Body.String())
+	}
+	if v := getDecisions(t, srv); len(v.Open) != 0 || len(v.Answered) != 2 {
+		t.Fatalf("after answers: %+v", v)
+	}
+	if n := len(auditRowsOf(t, store, "MAINTENANCE_DECISION")); n != 2 {
+		t.Fatalf("want 2 MAINTENANCE_DECISION audits, got %d", n)
 	}
 }

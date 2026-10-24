@@ -2,10 +2,9 @@ package main
 
 // Remote commands for agents (and people) at a terminal of their own: run a
 // command on an enrolled endpoint and get its stdout, stderr and exit code
-// back, keep one approved session open for a run of commands, and copy small
-// files. Everything rides the hub's existing terminal session: the owner
-// approves each session with one passkey tap (POST /api/v1/terminal/sessions
-// answers 202 until they do), the session is recorded like any console shell,
+// back, keep one session open for a run of commands, and copy small
+// files. Everything rides the hub's existing terminal session: the hub
+// authorizes each session itself (POST /api/v1/terminal/sessions), the session is recorded like any console shell,
 // and it ends at the hub's session limits. No new listener on the endpoint.
 //
 // A terminal is a pty, made for people. To give a caller clean output the
@@ -441,7 +440,7 @@ func (rs *remoteShell) close() {
 // ---- hub side ----------------------------------------------------------
 
 // hubSafe refuses to send the admin key over plain HTTP off this host, as
-// scripts/owner-approval.sh does.
+// the other scripts do.
 func hubSafe(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -489,8 +488,7 @@ func (s *openedSession) lifetime(now time.Time) time.Duration {
 	return 0
 }
 
-// openSession asks the hub for a terminal on endpoint, waiting for the
-// owner's tap, and returns the session and its one-use operator token. d is
+// openSession asks the hub for a terminal on endpoint, and returns the session and its one-use operator token. d is
 // how long the session should run; zero asks for the hub's maximum (the hub
 // holds any request to its own limit).
 func (c *APIClient) openSession(endpoint string, d time.Duration) (*openedSession, error) {
@@ -543,7 +541,7 @@ func (c *APIClient) openSession(endpoint string, d time.Duration) (*openedSessio
 	if d > 0 {
 		body["max_duration_seconds"] = int64((d + time.Second - 1) / time.Second)
 	}
-	out, err := c.ownerApproved(http.MethodPost, "/api/v1/terminal/sessions", body)
+	out, err := c.doRequest(http.MethodPost, "/api/v1/terminal/sessions", body)
 	if err != nil {
 		return nil, err
 	}
@@ -648,7 +646,7 @@ func heldCall(endpoint string, job remoteJob) (remoteResult, bool, error) {
 	conn, err := net.Dial("unix", heldSocket(endpoint))
 	if err != nil {
 		// A held session that ended on its own must not turn the next exec
-		// into a fresh owner tap the owner did not expect.
+		// into a fresh session nobody expected.
 		if why, rerr := os.ReadFile(heldEndedMarker(endpoint)); rerr == nil {
 			_ = os.Remove(heldEndedMarker(endpoint))
 			return remoteResult{}, true, fmt.Errorf("the held session to %s ended (%s); open a new one with ominullctl shell open %s", endpoint, strings.TrimSpace(string(why)), endpoint)
@@ -839,7 +837,7 @@ func remoteFlags(name string, args []string) (*flag.FlagSet, *int, []string, err
 }
 
 // runJob uses a held session for the endpoint when there is one, otherwise
-// opens a one-shot session (one owner tap) and ends it afterwards.
+// opens a one-shot session and ends it afterwards.
 func (c *APIClient) runJob(endpoint string, job remoteJob) (remoteResult, error) {
 	if res, held, err := heldCall(endpoint, job); held {
 		return res, err
@@ -947,7 +945,7 @@ func (c *APIClient) cmdGet(args []string) error {
 	return os.WriteFile(rest[2], res.Stdout, 0o600)
 }
 
-// shellOpen: one owner tap, then commands on this endpoint reuse the session.
+// shellOpen: opens a session, then commands on this endpoint reuse the session.
 func (c *APIClient) shellOpen(args []string) error {
 	fs := flag.NewFlagSet("shell open", flag.ContinueOnError)
 	ttl := fs.Duration("ttl", 0, "how long to keep the session, e.g. 90m (default and most: the hub's session limit; the hub also ends an idle session)")
@@ -1028,8 +1026,8 @@ func shellEnd(args []string) error {
 	return nil
 }
 
-// cmdEnrol: LAN self-enrolment windows. Opening one waits for the owner's
-// tap; listing and closing do not.
+// cmdEnrol: LAN self-enrolment windows. Opening one is authorized by the hub;
+// listing and closing do not need it.
 func (c *APIClient) cmdEnrol(args []string) error {
 	action := "list"
 	if len(args) > 0 {
@@ -1087,7 +1085,7 @@ func (c *APIClient) cmdEnrol(args []string) error {
 			}
 			body["passcode"] = strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
 		}
-		raw, err := c.ownerApproved(http.MethodPost, "/api/v1/enrolment/windows", body)
+		raw, err := c.doRequest(http.MethodPost, "/api/v1/enrolment/windows", body)
 		if err != nil {
 			return err
 		}

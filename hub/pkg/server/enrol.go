@@ -311,9 +311,9 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Opening a window lets machines on those networks enrol themselves with
-	// no credential, so it waits for the owner's passkey tap like every other
-	// action that widens access. Closing one needs nobody. The local first-run
-	// setup session (before any approver can exist) is the one exception.
+	// no credential, so the authority authorizes it and the audit records it. Closing one
+	// needs nobody. The local first-run setup session (before the authority
+	// exists) is the one exception.
 	approvalID := ""
 	if _, setup := s.setupCSRF(r); !setup {
 		after := map[string]interface{}{
@@ -326,7 +326,7 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 			after: after, loosens: []string{"enrolment_window"},
 			wording: fmt.Sprintf("opened self-service enrolment for %s for %g hours", strings.Join(cidrs, ", "), req.Hours)}
 		var ok bool
-		if approvalID, ok = s.policyApproved(w, r, change); !ok {
+		if approvalID, ok = s.policyAuthorized(w, r, change); !ok {
 			return
 		}
 	}
@@ -348,7 +348,7 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 	}
 	approved := "local first-run setup"
 	if approvalID != "" {
-		approved = "owner approval " + approvalID
+		approved = "authorization " + approvalID
 	}
 	s.audit(r, "ENROLMENT_WINDOW_OPENED", window.ID,
 		fmt.Sprintf("Opened self-service enrolment for %s until %s (%s enrolments, passcode: %v) under %s",

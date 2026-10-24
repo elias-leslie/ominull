@@ -26,10 +26,10 @@ packages but small: a handful of machines, one owner, no new stores.
   hosts of its platform.
   Security compliance packages are the same system with `category:
   "security"`; none ship yet.
-- **Execution = an ordinary `script_exec` job**, signed and approved like any
-  other script run: from the console (browser session plus passkey), or from
-  `ominullctl maint run` and the schedule through the owner's Nightshift tap
-  (see "Owner approval and the package rule").
+- **Execution = an ordinary `script_exec` job**, authorized like any other
+  script run: from the console, from `ominullctl maint run` or from the
+  schedule, the hub asks the response authority, which signs the grants on the
+  first request and nobody is asked (see "Authorizing a package run").
 - **State = the latest job.** Nothing is stored per (host, package); the hub
   derives the current state from the newest job of each package on read.
 
@@ -113,7 +113,7 @@ packages but small: a handful of machines, one owner, no new stores.
 - **Run options** (`when_busy`, `window`) are set by the hub, never declared
   in a header, and gate the people checks (someone using the machine, a game)
   of enforce and revert runs; battery and Windows Update always count. The
-  owner sees them in the approval.
+  authority's audit statement names them.
   - `when_busy`: `skip` (the default: report `skipped`), `wait` (check again
     every minute for up to half the package's time limit, then skip) or `run`
     (do not wait for open apps or games). Playbook steps that change
@@ -124,7 +124,7 @@ packages but small: a handful of machines, one owner, no new stores.
     `Z` (a range may cross midnight). Inside it people do not count. The hub
     adds it to every enforce and revert run (console, schedule, playbook),
     maintenance mode excepted. Changing a window changes those runs'
-    payloads, so standing approve-all rules ask once more.
+    payloads (and so their digests).
 - **Maintenance windows** (`GET/PUT /api/v1/maintenance/windows[?endpoint_id=]`):
   a fleet default plus per-machine windows, stored as data (settings row
   `maintenance.windows`). Body `{"ranges":["01:00-05:00"],"clock":"machine"|"utc"}`
@@ -132,7 +132,7 @@ packages but small: a handful of machines, one owner, no new stores.
   machine's own window (it follows the fleet) or the fleet default. Unset, the
   default is 01:00-05:00 machine time (or the older single fleet window, which
   `PUT /api/v1/maintenance/settings {"window":..}` still sets). Audited as
-  `MAINTENANCE_WINDOWS_SET`; no tap. One run covers only machines whose
+  `MAINTENANCE_WINDOWS_SET`. One run covers only machines whose
   windows match ("run them separately" otherwise). Agents from 1.8.82 report
   their clock's UTC offset (trust report `utc_offset_minutes`); with it the
   hub shows whether the window is open and its next start, and the schedule
@@ -204,14 +204,14 @@ per-machine override, as for any package; "How long..." on the card).
   Hosts without systemd answer `na`.
 
 Turning it on or off from the card is an ordinary run (enforce / revert),
-so it asks on the phone; an audit does not.
+authorized on the first request like any other.
 
 ### Restart
 
 `windows-reboot` and `linux-reboot` (role `reboot`, careful, time limit 60
 minutes) restart a machine after a warning. The role means the hub never
 schedules them; they run as a playbook step or as a direct run from a
-machine's page, and both ask on the phone. Parameters: `only_if_needed`
+machine's page, and both are authorized on the first request. Parameters: `only_if_needed`
 (true: restart only when the system says a restart is pending),
 `warn_minutes` (10, 1-60) and `idle_minutes` (15).
 
@@ -261,8 +261,8 @@ hub.
 ### Software removal
 
 `windows-software-removal` uninstalls third-party software the hub's
-**software catalog** names. It is careful, so every run (audit too) asks on
-the phone, and the approval names the catalog's size.
+**software catalog** names. It is careful, so the authority's audit statement
+for every run (audit too) flags it as careful and names the catalog's size.
 
 - **Catalog.** One settings row (`maintenance.software_catalog`); a hub that
   never saved one uses the list shipped in
@@ -279,13 +279,13 @@ the phone, and the approval names the catalog's size.
 - **API.** `GET /api/v1/maintenance/catalog` (any role) returns the entries,
   whether they were saved here, and the category, method and flag labels.
   `PUT {"entry":{...}}` (admin) adds or replaces one entry: adding one or
-  changing what it matches or how it is removed asks the owner (the
-  authority writes the statement from the entry); a name or note change goes
-  straight through. `DELETE ?id=` removes one without asking. All are
-  audited as `SOFTWARE_CATALOG_CHANGED`.
+  changing what it matches or how it is removed is a loosening, which the
+  authority authorizes on the same request (it writes the audit statement from
+  the entry); a name or note change is not. `DELETE ?id=` removes one. All
+  are audited as `SOFTWARE_CATALOG_CHANGED`.
 - **Runs carry the catalog.** The hub puts the catalog in force into the
   run's `catalog` parameter at dispatch (compact JSON, notes dropped, at
-  most 12 KiB), so the run's approval covers the exact entries. Agents cut
+  most 12 KiB), so the run's grants cover the exact entries. Agents cut
   one environment variable at 2047 bytes, so the package reads catalog
   parameters from the signed parameters file (`OMINULL_PARAMS_FILE`), not
   the environment. The hub refuses a run whose parameters would pass the
@@ -316,11 +316,11 @@ settings row (`maintenance.playbooks`), edited from the Maintenance page or
 `GET/PUT/DELETE /api/v1/maintenance/playbooks` (PUT `{"playbook":{"id",
 "name","steps":[{"package","mode"}],"maintenance_mode","note"}}`, admin).
 Saving checks every step against the library (a live package, not
-maintenance mode itself, all on one platform), runs nothing and asks nobody.
+maintenance mode itself, all on one platform) and runs nothing.
 A Restart step is allowed anywhere in the list.
 
 - **Running one.** `POST /api/v1/maintenance/playbooks/run
-  {"playbook_id","endpoint_ids","dont_wait"}` (admin) asks the owner once for
+  {"playbook_id","endpoint_ids","dont_wait"}` (admin) is authorized once for
   every step on every machine. Steps that change something (not audits) wait
   while someone is using the machine or a game is open (`when_busy=wait`);
   `dont_wait` sends `run` instead. With maintenance mode on, the run is maintenance mode on
@@ -330,16 +330,15 @@ A Restart step is allowed anywhere in the list.
 - **Window.** Each step's time limit plus 10 minutes (and 10 minutes for
   each maintenance mode run, 75 more for each Restart step), rounded up to
   whole hours; a playbook that
-  would need more than 24 hours is refused. The payload the owner approves
+  would need more than 24 hours is refused. The payload the authority signs
   (`PackageRunPayload.playbook {name, window_seconds}`, route
-  `/api/v1/maintenance/playbooks/run`) carries the window, the approval reads
+  `/api/v1/maintenance/playbooks/run`) carries the window, the audit statement reads
   "one step after another, all within N hours" with the steps numbered (or,
-  when that does not fit the 300 characters an approval shows, a compact form:
-  short names, the mode only when it is not enforce, options said once; every
-  step, risk and changed setting is still named, and a playbook that still
-  does not fit is refused), and
-  the authority signs every grant of that run for exactly the window. A
-  playbook run is never a baseline and never offered an approve-all rule.
+  when that does not fit the 300 characters an audit statement shows, a compact form:
+  short names, the mode only when it is not enforce, options said once; a
+  playbook that still does not fit is cut with an ellipsis, and the grants stay bound to the
+  full payload), and
+  the authority signs every grant of that run for exactly the window.
 - **One step at a time.** The agent starts every job it is offered at once,
   so the hub keeps the grants and starts a machine's next step only when the
   one before it has ended (finished, failed, or quiet past its time limit
@@ -358,7 +357,7 @@ A Restart step is allowed anywhere in the list.
   with their steps (*Run…*, *Edit…*, *Remove*) and recent runs with each
   machine's progress ("Step 2 of 5: Cleanup (enforce), running", or the
   results once done). *Run…* picks Windows or Linux machines to match the
-  steps, offers "Don't wait for open apps", and waits for the phone.
+  steps and offers "Don't wait for open apps".
 
 ## Settings
 
@@ -385,10 +384,9 @@ One small table, `maintenance_settings`, keyed (tenant, package, endpoint):
   `window`. The Package settings card has the same field.
   Every change is audited (`MAINTENANCE_SETTINGS_CHANGED`) and starts a
   schedule pass.
-- Saving a setting runs nothing and needs no tap. What needs the owner is
-  decided when a run is asked for (see below): switching to enforce, turning
-  on a careful package or step, or changing parameters asks once; turning a
-  package off or back to audit never asks.
+- Saving a setting runs nothing. Every run, whatever its mode or parameters,
+  is authorized on the first request when it is asked for (see below); there is
+  no per-setting ask.
 
 ## Console
 
@@ -400,8 +398,8 @@ One small table, `maintenance_settings`, keyed (tenant, package, endpoint):
   default it would go back to, and a reset per row. Changes save as they are
   made. Under the Maintenance tab, the **Software removal catalog** card lists
   every entry (what it matches, category, how it is removed) with *Add…*,
-  *Edit…* and *Remove*; adding or changing what an entry removes waits for
-  the phone.
+  *Edit…* and *Remove*; adding or changing what an entry removes is authorized
+  on the same request and audited.
 - **Asset view, Maintenance and security card** (Windows hosts), same tabs:
   compliance for the category, the machine's category switch (an override
   asks for a reason and an optional end date), and per package the latest
@@ -425,48 +423,46 @@ agent runs each script job in a detached worker so heartbeats continue; the
 Windows agent runs it on a worker thread. Agents older than the 3600 s cap
 treat a larger timeout as the 60 s default.
 
-## Owner approval and the package rule
+## Authorizing a package run
 
 `POST /api/v1/maintenance/run` (`{"endpoint_ids","packages","mode"}`, admin
-key) goes through the hub's owner-approval gate like rollouts. The run uses
-each host's effective parameters; hosts in one call must share them. If the
-owner is needed the first call answers 202 with an approval id, the owner
-gets a Nightshift push and taps once, and the repeated call (with
-`X-Approval-ID`) creates one job per host and package.
+key) is authorized on the first request: the hub calls the response authority
+(`POST /v1/authorize`), which validates the payload, signs the grants and the
+hub dispatches one job per host and package at once. Nobody is asked and there
+is no 202, no `X-Approval-ID` from the caller (the hub sets it from the
+authorization id) and no rule to make. The run uses each host's effective
+parameters; hosts in one call must share them.
 
-- **What is approved**: the response authority sees the exact script payload
+- **What is signed**: the response authority sees the exact script payload
   of every run (source, digest, interpreter, parameters, timeout, output
-  bound) and the named hosts, and writes the text the owner sees ("Run as
+  bound) and the named hosts, and writes the audit text ("Run as
   SYSTEM on laptop-1: windows-cleanup (enforce), up to 60 min, settings
-  temp_days=30"). Changed parameters are listed against the defaults. Each
-  grant binds one host and one script payload, which must be exactly the
-  bytes `json.Marshal` makes of it.
+  temp_days=30"; at most 300 characters, cut with an ellipsis; the grants are
+  bound to the full payload, not the text). Changed parameters are listed
+  against the defaults. Each grant binds one host and one script payload, which
+  must be exactly the bytes `json.Marshal` makes of it. A request is
+  limited to 50 hosts.
 - **Which scripts count as packages**: the authority ships with the digest,
   name and risk of every file in `packages/windows` and `packages/linux`
   (`hub/pkg/responseauth/released_packages.json`, kept in step by a test).
   Only those sources, run by their platform's interpreter (`powershell.exe`
   or `/bin/sh`) with `mode` plus exactly the
   parameters their (trusted) header declares, each valid, are packages; the
-  hub's own copy of the header is never trusted. Anything else is shown as
-  "not a released package", asks every time and never gets a rule. So a
-  changed package needs a hub release before a rule can cover it. A run too
-  long to show whole in one ask is refused (split it).
-- **Baseline**: a run of only `safe` released packages in `audit` with every
-  parameter at its default changes nothing, so the authority approves it
-  without asking (method `baseline`, audited) and without the hourly limit.
-- **"Approve all like this"** is offered only when every item is `safe` with
-  no careful step on. It records the payload digests and hosts, plus the
-  audit twin of each enforce item (same parameters, mode audit); later runs
-  of exactly those payloads (or a subset) on those hosts (or a subset) go
-  through with no tap and are not held to the hourly limit. A new package
-  version, other parameters, timeout or host is a new digest or target and
-  asks again. Revert is treated like enforce: never a baseline, never an
-  audit twin, covered only by a rule made for that revert run.
-- **Careful** packages, and any run with a careful step on, never get a rule:
-  every run asks. A rule ends after 90 days unused; `ominullctl maint rules`
-  lists them and `maint forget-rule [ID]` removes one or all.
-- Nightshift accepts these statements (kind `script_exec`, offer `packages`)
-  from executor release 5d4e7248bcba on.
+  hub's own copy of the header is never trusted. Anything else is audited as
+  "not a released package". A changed package needs a hub release before the
+  authority names it as a package.
+- **Refusals**: an invalid payload, parameters outside the header's bounds,
+  ambiguous or reordered fields, more than 50 hosts, or a playbook that would
+  need more than 24 hours is refused with the reason (HTTP error and audit
+  `ACTION_REFUSED`). The endpoint can still refuse a run its lock level or
+  capability manifest forbids.
+- **One-off scripts** (`POST /api/v1/maintenance/script`) are authorized the
+  same way and audited as not a released package, with the script's name, shell,
+  size and digest prefix.
+- The old model is gone: approval rows, the "baseline" exception, "Approve all
+  like this" rules, `ominullctl maint rules|forget-rule` and the Nightshift
+  approval relay. Audit rows named `OWNER_APPROVAL_*` appear only in history;
+  authorized runs are `ACTION_AUTHORIZED`, then `SCRIPT_RUN_DISPATCHED`.
 
 ## Schedule
 
@@ -479,19 +475,19 @@ the last 30 s), no run of it is open there, its last success (`ok`, `fixed`,
 old. A laptop that was off simply catches up the next time it is online.
 Hosts whose run would be the identical payload are grouped into one request.
 
-The schedule requests approval like `maint run`: a baseline or rule-covered
-run dispatches at once; anything else files one ask on the owner's phone and
-waits for it (a host dropping offline keeps the same ask). Once approved the
-run is dispatched to the hosts still due and online. A declined or expired
-ask is not asked again for 24 hours, or until the settings change.
+The schedule asks the authority like `maint run` and dispatches at once
+(at most 50 hosts per run; the rest wait for the next pass). A run the
+authority will not sign, or an authority that is not available, shows up as a
+schedule block (console and Nightshift feed) with its reason and is tried again
+on the next pass.
 
 **Audit-then-enforce.** A safe package (not careful, not maintenance mode or Restart) may set `on_drift` to
 `"enforce"` at fleet or machine level (`null` clears it; it applies only while mode is audit). It keeps auditing on
-its interval. When a host's newest run of it is a scheduled audit that finished with `drift`, the next pass asks for
-one enforce run on that host, inside its maintenance window, the same way as any enforce run: a package rule covering
-that enforce payload approves it at once, otherwise it's one owner tap ("PACKAGE (enforce: the scheduled audit found
-drift)"). Nothing more is asked until the next scheduled audit; a hand-run audit's drift never triggers it. Careful
-packages are refused (`400`) because no rule can cover them, so they'd ask every time; run their enforce by hand.
+its interval. When a host's newest run of it is a scheduled audit that finished with `drift`, the next pass requests one
+enforce run on that host, inside its maintenance window, the same way as any enforce run: the authority signs it and
+it is dispatched at once ("PACKAGE (enforce: the scheduled audit found drift)"). Nothing more is requested until the
+next scheduled audit; a hand-run audit's drift never triggers it. Careful packages (and any with a role) are
+refused when you set `on_drift` (`400`): auto-enforce is only for safe packages, so run a careful package's enforce by hand.
 
 ## Nightshift feed
 
@@ -503,7 +499,8 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
   the latest runs, hosts that need changes, hosts that need a reboot and
   compliance per category.
 - `ominull.maintenance.schedule`: medium (board only) while a scheduled run is
-  waiting for the owner or was declined, resolved otherwise.
+  blocked (the authority refused it or was not available), resolved otherwise.
+  The message text still says "approval or a declined ask"; read it as a block.
 - `ominull.decisions.<run>`: one per run with items waiting for the owner
   (below), medium (board only), listing each item; resolved for a week once
   every item of the run is answered.
@@ -515,7 +512,7 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
   settings row `maintenance.run_records`).
 
 **Escalation.** `POST /api/v1/maintenance/escalate {"job_id","reason"}` (admin) hands a run to the owner: it becomes
-one decision (group `job:<id>`, answer `handled`) on the decisions card and in Nightshift's inbox, audited
+one decision (group `job:<id>`, answer `handled`) on the decisions card and the Nightshift feed, audited
 `MAINTENANCE_ESCALATED`. `404` unknown job, `400` no reason or not a script run. Escalating the same job again
 replaces the reason; the newest 50 are kept (settings row `maintenance.escalations`).
 
@@ -540,16 +537,10 @@ latest runs (`ominull.decisions.playbook.<id>`,
   runs skip it there (a reason is required); `handled` just closes it.
   Answers are audited (`MAINTENANCE_DECISION`) and kept in the settings row
   `maintenance.decisions` (the newest 500).
-- **Nightshift inbox.** The feed records say `"answer_in":"Nightshift inbox or OmniNull console"`. Nightshift
-  reads the open items and answers them with its approval relay key (no admin fallback). It reads with
-  `GET /api/v1/integrations/nightshift/decisions`, which returns `{"open":[{key, group, group_title, endpoint_id, endpoint, package,
-  item:{id,name,reason,keep?}, seen, answers}]}` with no answered list (the feed can't carry the items; its records stay
-  for the board count). It answers with
-  `POST /api/v1/integrations/nightshift/decisions/answer {"key","answer","reason"}`. The rules are the same
-  as the console's (keep needs a reason and a list setting); only keys that are open now (the ones the
-  `ominull.decisions.*` records list) are answered. `200 {"answered":{...}}`, `400` bad answer or keep without a
-  reason, `404` not open (answered already, or a newer run settled it). Audited `MAINTENANCE_DECISION` by
-  `nightshift (owner)`.
+- **Nightshift inbox (removed).** Nightshift no longer relays decisions:
+  `/api/v1/integrations/nightshift/decisions` and `/decisions/answer` are gone.
+  The feed records still carry `"answer_in":"Nightshift inbox or OmniNull console"`;
+  read it as the console (or `POST /api/v1/maintenance/decisions` with the admin key).
 - **Coming back.** An answered item opens again only if a run that finished
   after the answer reports it again.
 - **Console.** A *Decisions for you* card at the top of the Maintenance page,
@@ -561,7 +552,7 @@ latest runs (`ominull.decisions.playbook.<id>`,
 1. Sync: `ominullctl scripts sync packages/windows` and
    `ominullctl scripts sync packages/linux` (admin key).
 2. `ominullctl maint run HOST PKG... --mode audit|enforce|revert` runs with
-   the host's effective settings, asks the owner when needed, waits for each
+   the host's effective settings, waits for each
    job and prints one line per package: `HOST PKG {result line}`.
    `--no-wait` returns after the jobs are created. `ominullctl maint status
    HOST` prints where each package stands, with controls passed.
@@ -599,15 +590,14 @@ latest runs (`ominull.decisions.playbook.<id>`,
   and its end, "Don't wait", the hold after a restart, the maintenance window
   setting and the schedule never restarting a machine.
 - `hub/pkg/server/maintenance_mode_test.go`: each platform gets its own
-  package, the card state from the latest run, expiry, a Linux audit without a
-  tap and the schedule never running maintenance mode.
+  package, the card state from the latest run, expiry, a Linux audit and the schedule never running maintenance mode.
 - `hub/pkg/scripts/package_params_test.go`: header parsing, parameter checks,
   change summaries and settings resolution including expiry.
-- `hub/pkg/responseauth/package_rule_test.go`: baseline, rule coverage and
-  audit twins, careful packages and steps, revert, per-script grants,
-  forged, tampered or ambiguous payloads.
-- `hub/pkg/server/maintenance_run_test.go`: the run route under approval and
-  rule, settings validation and overrides, the schedule's asks and dispatch,
+- `hub/pkg/responseauth/package_run_test.go`: per-script grants, careful
+  steps named, playbook windows, forged, tampered, reordered or ambiguous
+  payloads, runs too long to show whole being cut.
+- `hub/pkg/server/maintenance_run_test.go`: the run route authorized on the
+  first request, settings validation and overrides, the schedule's dispatch,
   the feed records.
 
 ## Later (not built)

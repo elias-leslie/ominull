@@ -8,26 +8,19 @@ package server
 // catches up the next time it is online. Hosts with the same settings share
 // one run.
 //
-// Each due run goes to the response authority like a hand-made one. A
-// baseline run (a safe package auditing with its default settings) or one the
-// owner's package rule covers is approved at once and dispatched; grants are
-// signed now, for hosts online now. Anything else (enforce, a careful package,
-// changed settings) files one owner ask (a Nightshift push, one tap) and waits
-// for it; the run is dispatched once approved. An ask the owner declines or
-// lets expire is not filed again for the same settings for a day. Disabling a
-// package or switching it to audit never asks.
+// Each due run goes to the response authority like a hand-made one: the
+// authority checks it and signs the grants now, for hosts online now, and the
+// run is dispatched at once. Nobody is asked; a run the authority will not
+// sign shows up as a schedule block (Nightshift feed, console) with its
+// reason, and is tried again on the next pass.
 //
 // Audit-then-enforce: a safe package whose setting on_drift is "enforce"
 // (mode audit) keeps auditing on its interval; when a host's newest run is a
-// scheduled audit that found drift, the next pass asks for one enforce run
-// there, inside the host's maintenance window, through the same ask (a
-// package rule covering that enforce run approves it at once).
+// scheduled audit that found drift, the next pass runs one enforce run there,
+// inside the host's maintenance window.
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -49,11 +42,8 @@ const (
 	// machine, failed, no result) is tried again after this long.
 	maintenanceRetry = time.Hour
 	// endpointOnline matches the endpoints list: seen within 30 s.
-	endpointOnline = 30 * time.Second
-	// maintenanceReask: a declined or expired ask is not filed again for
-	// the same run sooner than this.
-	maintenanceMaxTargets = 50 // the authority's limit for one approval
-	maintenanceReask      = 24 * time.Hour
+	endpointOnline        = 30 * time.Second
+	maintenanceMaxTargets = 50 // the authority's limit for one authorization
 	schedulerName         = "maintenance schedule"
 )
 
@@ -65,8 +55,8 @@ type scheduleBlock struct {
 	Since     time.Time `json:"since"`
 }
 
-// pendingAsk is an owner ask the schedule filed and waits on.
-type pendingAsk struct {
+// scheduledRun is one due run: a package's item on the hosts it is due on.
+type scheduledRun struct {
 	ID      string
 	Tenant  string
 	Payload []byte
@@ -77,12 +67,10 @@ type pendingAsk struct {
 }
 
 type maintenanceBlocks struct {
-	run      sync.Mutex     // one pass at a time
-	kicks    sync.WaitGroup // passes started by a settings change
-	mu       sync.Mutex
-	items    map[string]scheduleBlock // run key
-	asks     map[string]*pendingAsk   // run key
-	declined map[string]time.Time     // run key -> when
+	run   sync.Mutex     // one pass at a time
+	kicks sync.WaitGroup // passes started by a settings change
+	mu    sync.Mutex
+	items map[string]scheduleBlock // run key
 }
 
 func (b *maintenanceBlocks) set(key string, blk scheduleBlock) {
@@ -189,25 +177,12 @@ func (s *Server) runMaintenanceSchedules(now time.Time) {
 			log.Printf("[!] maintenance schedule (%s): %v", tenant, err)
 		}
 	}
-	// Forget blocks and asks for runs that are no longer due or wanted.
+	// Forget blocks for runs that are no longer due or wanted.
 	b := &s.maintBlocks
 	b.mu.Lock()
 	for k := range b.items {
 		if !live[k] {
 			delete(b.items, k)
-		}
-	}
-	// An ask outlives a pass where its hosts are offline, so a laptop that
-	// drops off for a while picks up the same ask when it is back instead of
-	// putting a second one on the owner's phone.
-	for k, a := range b.asks {
-		if !live[k] && now.Sub(a.Since) >= maintenanceReask {
-			delete(b.asks, k)
-		}
-	}
-	for k, at := range b.declined {
-		if now.Sub(at) >= maintenanceReask {
-			delete(b.declined, k)
 		}
 	}
 	b.mu.Unlock()
@@ -230,7 +205,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 		if d.Script.Interpreter != d.Header.Interpreter() || d.Header.Role != "" {
 			continue
 		}
-		groups := map[string]*pendingAsk{} // item digest -> run
+		groups := map[string]*scheduledRun{} // item digest -> run
 		for _, ep := range eps {
 			if !d.Header.RunsOn(ep.OS) || busy[ep.ID] {
 				continue
@@ -273,7 +248,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 				if mode == "enforce" {
 					label = d.Header.Name + " (enforce: the scheduled audit found drift)"
 				}
-				g = &pendingAsk{Tenant: tenant, Items: []packageRunItem{{Raw: raw, Digest: dg, Script: d.Script, Version: d.Version.Version}},
+				g = &scheduledRun{Tenant: tenant, Items: []packageRunItem{{Raw: raw, Digest: dg, Script: d.Script, Version: d.Version.Version}},
 					Label: label}
 				groups[dg] = g
 			}
@@ -281,10 +256,9 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 		}
 		for dg, g := range groups {
 			g.Targets = sortedTargets(g.Targets)
-			// One ask per run payload, whatever hosts are due: a host going
-			// offline or coming back must not file a second ask or dodge a
-			// decline. An ask covers at most the authority's target limit;
-			// the rest wait for the next one.
+			// One run per payload, whatever hosts are due. A run covers at
+			// most the authority's target limit; the rest wait for the next
+			// pass.
 			if len(g.Targets) > maintenanceMaxTargets {
 				g.Targets = g.Targets[:maintenanceMaxTargets]
 			}
@@ -296,107 +270,30 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 	return nil
 }
 
-func (s *Server) runScheduledPackage(key string, run *pendingAsk, now time.Time) {
+func (s *Server) runScheduledPackage(key string, run *scheduledRun, now time.Time) {
 	b := &s.maintBlocks
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	block := func(reason string) {
 		b.set(key, scheduleBlock{Package: run.Label, Endpoints: run.Targets, Reason: reason, Since: now})
 	}
-	b.mu.Lock()
-	ask := b.asks[key]
-	declinedAt, declined := b.declined[key]
-	b.mu.Unlock()
-	if ask == nil && declined && now.Sub(declinedAt) < maintenanceReask {
-		block("you declined this run or let the ask expire; asking again a day later or when its settings change")
-		return
-	}
-	if ask != nil {
-		v, err := s.responseAuth.GetApproval(ctx, ask.ID, ask.Tenant)
-		if err != nil {
-			if errors.Is(err, responseauth.ErrApprovalNotFound) || now.Sub(ask.Since) >= maintenanceReask {
-				// The authority no longer has it (restarted, or long gone):
-				// ask afresh on the next pass instead of waiting forever.
-				b.mu.Lock()
-				delete(b.asks, key)
-				b.mu.Unlock()
-			}
-			block("could not read the owner ask: " + err.Error())
-			return
-		}
-		switch v.State {
-		case responseauth.ApprovalPending:
-			b.set(key, scheduleBlock{Package: run.Label, Endpoints: ask.Targets, Reason: "waiting for your approval", Since: now})
-			return
-		case responseauth.ApprovalApproved:
-			s.dispatchScheduled(ctx, key, ask, v.ID, run.Targets, now)
-		default:
-			b.mu.Lock()
-			delete(b.asks, key)
-			if b.declined == nil {
-				b.declined = map[string]time.Time{}
-			}
-			b.declined[key] = now
-			b.mu.Unlock()
-			block("you declined this run or let the ask expire; asking again a day later or when its settings change")
-		}
+	if s.responseAuth == nil {
+		block("the response authority is not available")
 		return
 	}
 	run.Payload = packageRunPayload(run.Items, run.Targets)
 	run.Since = now
-	v, err := s.responseAuth.RequestApproval(ctx, &responseauth.ApprovalRequestInput{
+	au, err := s.responseAuth.Authorize(ctx, &responseauth.AuthorizeInput{
 		TenantID: run.Tenant, Requester: schedulerName, Kind: response.ActionKindScriptExec,
-		Action: "Run maintenance", Summary: run.Label, Targets: run.Targets, Payload: run.Payload,
-		Facts: s.approvalFacts(run.Targets),
+		Targets: run.Targets, Payload: run.Payload,
 	})
 	if err != nil {
-		block("the owner could not be asked: " + err.Error())
+		block("the authority did not sign this run: " + err.Error())
 		return
 	}
-	run.ID = v.ID
-	if v.State == responseauth.ApprovalApproved {
-		s.dispatchScheduled(ctx, key, run, v.ID, run.Targets, now)
-		return
-	}
-	b.mu.Lock()
-	if b.asks == nil {
-		b.asks = map[string]*pendingAsk{}
-	}
-	b.asks[key] = run
-	b.mu.Unlock()
-	block("waiting for your approval")
-}
-
-// dispatchScheduled spends an approval (for exactly the hosts it named) and
-// creates jobs only on the hosts that are due and online now: a grant lives a
-// few minutes, so a host that went offline since the ask is asked for again
-// when it is back.
-func (s *Server) dispatchScheduled(ctx context.Context, key string, run *pendingAsk, approvalID string, due []string, now time.Time) {
-	b := &s.maintBlocks
-	b.mu.Lock()
-	delete(b.asks, key)
-	b.mu.Unlock()
-	sum := sha256.Sum256(run.Payload)
-	grants, err := s.responseAuth.ConsumeApproval(ctx, &responseauth.ApprovalConsumeRequest{
-		ID: approvalID, TenantID: run.Tenant, Requester: schedulerName, Kind: response.ActionKindScriptExec,
-		Digest: hex.EncodeToString(sum[:]), Targets: run.Targets,
-	})
-	if err != nil {
-		b.set(key, scheduleBlock{Package: run.Label, Endpoints: run.Targets, Reason: "approval could not be used: " + err.Error(), Since: now})
-		return
-	}
+	run.ID = au.ID
 	b.clear(key)
-	dueNow := map[string]bool{}
-	for _, ep := range due {
-		dueNow[ep] = true
-	}
-	use := grants[:0]
-	for _, g := range grants {
-		if dueNow[g.EndpointID] {
-			use = append(use, g)
-		}
-	}
-	jobs, err := s.dispatchPackageGrants(run.Tenant, schedulerName, run.ID, run.Items, use)
+	jobs, err := s.dispatchPackageGrants(run.Tenant, schedulerName, run.ID, run.Items, au.Grants)
 	if err != nil {
 		log.Printf("[!] maintenance schedule: %s: %v", run.Label, err)
 	}
@@ -410,7 +307,7 @@ func (s *Server) dispatchScheduled(ctx context.Context, key string, run *pending
 	_ = s.store.RecordAudit(storage.AuditEntry{
 		ID: uuid.New().String(), TenantID: run.Tenant, Username: "schedule", Action: "SCRIPT_RUN_DISPATCHED",
 		Resource: run.Items[0].Script.ID, Timestamp: now,
-		Details: fmt.Sprintf("Scheduled package %s v%d on %s (approval %s); jobs %s",
-			run.Label, run.Items[0].Version, strings.Join(run.Targets, ", "), approvalID, strings.Join(ids, ",")),
+		Details: fmt.Sprintf("Scheduled package %s v%d on %s (authorization %s); jobs %s",
+			run.Label, run.Items[0].Version, strings.Join(run.Targets, ", "), au.ID, strings.Join(ids, ",")),
 	})
 }

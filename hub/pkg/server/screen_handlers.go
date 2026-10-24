@@ -75,7 +75,7 @@ func screenSessionLength(sess *terminal.TerminalSession, now time.Time) string {
 }
 
 // handleScreenSessions lists and shows screen sessions (GET), opens one
-// under the owner's approval (POST, behind ownerApproved/resolveScreen) and
+// with the authority's authorization (POST, behind authorized/resolveScreen) and
 // ends one (DELETE ?id=).
 func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 	if s.terminalMgr == nil {
@@ -115,7 +115,7 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"sessions": out})
 
 	case http.MethodPost:
-		// ownerApproved (resolveScreen) has checked the request, asked the
+		// authorized (resolveScreen) has checked the request, asked the
 		// owner and spent the approval; its grant is this session's only
 		// authority.
 		var req screenOpenRequest
@@ -138,7 +138,7 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if grant == nil {
-			writeJSONError(w, http.StatusForbidden, "a screen session needs an owner approval")
+			writeJSONError(w, http.StatusForbidden, "a screen session was not authorized")
 			return
 		}
 		d := s.terminalDuration(req.MaxDurationSeconds)
@@ -688,15 +688,12 @@ type screenOpenRequest struct {
 	MaxDurationSeconds int    `json:"max_duration_seconds"`
 	// Unattended asks for a session that may open with nobody at the
 	// keyboard to allow it (a machine that asks the person first declines
-	// otherwise). The owner sees it in the approval and it is digested.
+	// otherwise). It is audited and digested.
 	Unattended bool `json:"unattended"`
-	// The steward's request for a stuck run (steward.go): the run, the
-	// owner's rule token as Nightshift keeps it, and Nightshift's narrowing.
-	StewardRun string                            `json:"steward_run,omitempty"`
-	RuleToken  string                            `json:"rule_token,omitempty"`
-	Narrow     *responseauth.StewardScreenNarrow `json:"narrow,omitempty"`
+	// The steward's request for a stuck run (steward.go): the run.
+	StewardRun string `json:"steward_run,omitempty"`
 	// Set by resolveScreen in the body it hands on, never by the caller:
-	// the steward session's length and ask-first as approved.
+	// the steward session's length and ask-first as signed.
 	ResolvedSeconds  int64 `json:"resolved_seconds,omitempty"`
 	ResolvedAskFirst *bool `json:"resolved_ask_first,omitempty"`
 }
@@ -772,12 +769,12 @@ func (s *Server) screenTrustRefusal(ctx context.Context, ep *storage.Endpoint) s
 	return ""
 }
 
-// resolveScreen describes a screen request for the owner's approval. The
+// resolveScreen describes a screen request for the authority. The
 // digested payload is exactly what the agent rebuilds and checks:
 // {"mode":"control"}, {"mode":"view"}, plus "unattended":true when asked
 // and then "ask_first":true when the endpoint's screen.ask_first is on (key
 // order mode, unattended, ask_first).
-func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	if !screenRoleCanOpen(r) {
 		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to open a screen session")
 		return nil, false
@@ -794,8 +791,8 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 	if !ok || !s.screenCapable(w, r, req.EndpointID, mode) {
 		return nil, false
 	}
-	if !isSteward(r) && (req.StewardRun != "" || req.RuleToken != "" || req.Narrow != nil) {
-		writeJSONError(w, http.StatusBadRequest, "steward_run, rule_token and narrow are the steward's")
+	if !isSteward(r) && req.StewardRun != "" {
+		writeJSONError(w, http.StatusBadRequest, "steward_run is the steward's")
 		return nil, false
 	}
 	req.ResolvedSeconds, req.ResolvedAskFirst = 0, nil
@@ -845,11 +842,11 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 	if req.Unattended {
 		summary += "; if nobody is signed in to allow it, it opens anyway with nobody at the keyboard"
 	}
-	return &approvalPlan{
+	return &actionPlan{
 		Kind: response.ActionKindScreenSession, Action: action, Summary: summary,
 		Targets: []string{req.EndpointID}, Payload: payload, SessionSeconds: int64(d / time.Second),
 		AskFirst: askFirst, Body: handOn,
-		StewardRun: req.StewardRun, StewardRuleToken: req.RuleToken, StewardNarrow: req.Narrow,
+		StewardRun: req.StewardRun,
 	}, true
 }
 

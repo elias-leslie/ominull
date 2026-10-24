@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
 
 	"ominull/hub/pkg/storage"
@@ -23,8 +22,8 @@ import (
 //   - full: the endpoint reaches only the hub. The fabric is not consulted and
 //     no exception may be named. Detector isolation is always full.
 //   - selective: the endpoint's effective policy is expanded into allow_ips
-//     before the owner approves, so the signed grant carries exactly what was
-//     approved; a rule changed later does not reach an isolation in force.
+//     before the authority signs, so the signed grant carries exactly what was
+//     authorized; a rule changed later does not reach an isolation in force.
 //   - omitted: the request's own allow_ips only, as before modes existed.
 //
 // Agents that report allow_prefixes enforce address ranges (no wider than /8
@@ -183,56 +182,6 @@ func (s *Server) fabricPolicyFor(endpointID string, now time.Time) (fabricPolicy
 		}
 	}
 	return p, nil
-}
-
-// fabricPin is a selective isolation's expanded fabric, kept under its
-// approval id until the approved request returns. In memory: a hub restart
-// in between means the request is expanded again, and an approval whose
-// list then differs is refused (fails closed) and must be asked for again.
-type fabricPin struct {
-	endpointID  string
-	enforced    []string
-	notEnforced []string
-	at          time.Time
-}
-
-type fabricPinStore struct {
-	mu   sync.Mutex
-	pins map[string]fabricPin
-}
-
-const (
-	fabricPinTTL = 24 * time.Hour
-	fabricPinMax = 1024
-)
-
-func (ps *fabricPinStore) put(approvalID string, p fabricPin) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.pins == nil {
-		ps.pins = map[string]fabricPin{}
-	}
-	now := time.Now()
-	for id, old := range ps.pins {
-		if now.Sub(old.at) > fabricPinTTL || len(ps.pins) >= fabricPinMax {
-			delete(ps.pins, id)
-		}
-	}
-	p.at = now
-	ps.pins[approvalID] = p
-}
-
-func (ps *fabricPinStore) get(approvalID, endpointID string) (fabricPin, bool) {
-	if approvalID == "" {
-		return fabricPin{}, false
-	}
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	p, ok := ps.pins[approvalID]
-	if !ok || p.endpointID != endpointID || time.Since(p.at) > fabricPinTTL {
-		return fabricPin{}, false
-	}
-	return p, true
 }
 
 // unionAddrs merges address lists, first occurrence kept.

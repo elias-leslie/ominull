@@ -77,7 +77,7 @@ func ModeOf(program string) (string, bool) {
 // IsScreen reports whether a session program is a screen session's.
 func IsScreen(program string) bool { return strings.HasPrefix(program, ProgramPrefix) }
 
-// CreateSession opens a waiting screen session under an owner-approved grant
+// CreateSession opens a waiting screen session under an authority-signed grant
 // for this endpoint. d is the session length (zero or less: the hub's
 // maximum); the shared caps and the one-per-endpoint cap apply.
 func CreateSession(tm *terminal.Manager, tenantID, endpointID, operatorID, mode string, grant *response.EndpointGrant, d time.Duration) (*terminal.TerminalSession, error) {

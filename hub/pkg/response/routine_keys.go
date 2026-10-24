@@ -21,7 +21,7 @@ import (
 // accept one only for an agent package's signature and its
 // OMINULL-RELEASE-V1 statement, never for trust bundles, host authority,
 // rotation or another routine-keys statement. The pinned release key (the
-// owner's tap key) signs which routine keys exist, in RoutineKeysStatement;
+// tap key) signs which routine keys exist, in RoutineKeysStatement;
 // agents rebuild it byte for byte (agent_trust.h).
 const (
 	RoutineKeysMax    = 4

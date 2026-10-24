@@ -398,7 +398,7 @@ static void test_offers_and_updates(int64_t now) {
 
     char r[16384];
     snprintf(r, sizeof(r), "{\"agent_update\":{\"version\":\"9.9.9\"},\"agent_update_grant\":%s}", FX_G_UPDATE);
-    expect("owner-approved update accepted", Trust_UpdateAuthorized(&T, r, strlen(r), "9.9.9", now) == NULL);
+    expect("authority-signed update accepted", Trust_UpdateAuthorized(&T, r, strlen(r), "9.9.9", now) == NULL);
     expect("update grant for another version refused", Trust_UpdateAuthorized(&T, r, strlen(r), "9.9.8", now) != NULL);
     snprintf(r, sizeof(r), "{\"agent_update\":{\"version\":\"9.9.9\"}}");
     expect("update without a grant refused", Trust_UpdateAuthorized(&T, r, strlen(r), "9.9.9", now) != NULL);

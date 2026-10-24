@@ -2,8 +2,8 @@
 set -euo pipefail
 HUB_URL="${OMINULL_HUB_URL:-http://127.0.0.1:9999}"
 : "${OMINULL_API_KEY:?export OMINULL_API_KEY with the hub admin key}"
-# shellcheck source=scripts/owner-approval.sh
-. "$(dirname "${BASH_SOURCE[0]}")/owner-approval.sh"
+# shellcheck source=scripts/hub-request.sh
+. "$(dirname "${BASH_SOURCE[0]}")/hub-request.sh"
 hub_url_safe "${HUB_URL}"
 echo "=== OMINULL THREAT NULLIFICATION FLEET STATUS ==="
 # The key reaches curl on a descriptor, not in its argv.

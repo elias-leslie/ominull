@@ -238,11 +238,6 @@ body.page {
   margin: 0;
 }
 
-.page-form .approval-wait {
-  position: static;
-  width: min(28em, 100%);
-}
-
 .term-list {
   list-style: none;
   margin: 0;

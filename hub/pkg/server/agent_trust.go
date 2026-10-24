@@ -178,7 +178,7 @@ func knownProfile(p string) bool {
 
 // monitorOnlyClamp is the profile a monitor-only host is held to: monitor,
 // unless its manifest is already a profile that adds no isolation
-// (monitor-scripts, which the owner approved), which then stands.
+// (monitor-scripts, which the authority signed), which then stands.
 func (s *Server) monitorOnlyClamp(endpointID, reported string) string {
 	s.trust.mu.Lock()
 	s.trust.init()
@@ -689,8 +689,8 @@ func decodeCapabilityRequest(w http.ResponseWriter, body []byte) (capabilityRequ
 	return req, true
 }
 
-// resolveCapabilities describes a manifest change for the owner's approval.
-func (s *Server) resolveCapabilities(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+// resolveCapabilities describes a manifest change for the authority.
+func (s *Server) resolveCapabilities(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	if r.Header.Get("X-Role") != "admin" {
 		writeJSONError(w, http.StatusForbidden, "admin role required")
 		return nil, false
@@ -700,13 +700,13 @@ func (s *Server) resolveCapabilities(w http.ResponseWriter, r *http.Request, bod
 		return nil, false
 	}
 	caps, _ := response.ProfileCaps(req.Profile)
-	return &approvalPlan{Kind: response.ActionKindCapability, Action: "Change what a host accepts",
+	return &actionPlan{Kind: response.ActionKindCapability, Action: "Change what a host accepts",
 		Summary: fmt.Sprintf("%s accepts %s (%s)", s.endpointLabels([]string{req.EndpointID}), req.Profile, strings.Join(caps, ", ")),
 		Targets: []string{req.EndpointID}}, true
 }
 
-// handleEndpointCapabilities runs after the owner approved: the authority has
-// already signed the new manifest while consuming the approval.
+// handleEndpointCapabilities runs after the authority authorized it: it has
+// already signed the new manifest.
 func (s *Server) handleEndpointCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -747,7 +747,7 @@ func (s *Server) handleEndpointCapabilities(w http.ResponseWriter, r *http.Reque
 
 // afterProfileChange keeps the manifest in step with the hub's monitor-only
 // verdict: narrowing is signed at once; a raise was signed by the authority
-// when the owner's approval was consumed and only needs re-reading.
+// when the authorization was granted and only needs re-reading.
 func (s *Server) afterProfileChange(ctx context.Context, endpointID string) {
 	ep, err := s.store.GetEndpoint(endpointID)
 	if err != nil || ep == nil {

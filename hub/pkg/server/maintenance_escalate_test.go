@@ -13,14 +13,9 @@ import (
 func TestMaintenanceEscalate(t *testing.T) {
 	t.Parallel()
 	srv := playbookTestServer(t)
-	ownerOf(t, srv)
+	authorityOf(t, srv)
 	audit := `{"endpoint_ids":["ep-lap"],"packages":["windows-audit"],"mode":"audit"}`
-	w := adminPost(srv, "/api/v1/maintenance/run", audit, "")
-	if w.Code == http.StatusAccepted {
-		id := pendingID(t, w)
-		ownerOf(t, srv).approve(t, id)
-		w = adminPost(srv, "/api/v1/maintenance/run", audit, id)
-	}
+	w := postAdmin(srv, "/api/v1/maintenance/run", audit)
 	var run struct {
 		Jobs []packageRunJob `json:"jobs"`
 	}
@@ -34,11 +29,11 @@ func TestMaintenanceEscalate(t *testing.T) {
 		`{"job_id":"` + jobID + `","reason":""}`: http.StatusBadRequest,
 		`{"job_id":"` + jobID + `"}`:             http.StatusBadRequest,
 	} {
-		if w := adminPost(srv, "/api/v1/maintenance/escalate", body, ""); w.Code != want {
+		if w := postAdmin(srv, "/api/v1/maintenance/escalate", body); w.Code != want {
 			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
 		}
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/escalate", `{"job_id":"`+jobID+`","reason":"the uninstaller wants a password"}`, ""); w.Code != http.StatusOK {
+	if w := postAdmin(srv, "/api/v1/maintenance/escalate", `{"job_id":"`+jobID+`","reason":"the uninstaller wants a password"}`); w.Code != http.StatusOK {
 		t.Fatalf("escalate: %d %s", w.Code, w.Body.String())
 	}
 	v := getDecisions(t, srv)
@@ -52,7 +47,7 @@ func TestMaintenanceEscalate(t *testing.T) {
 		!strings.Contains(d.Item.Reason, "the uninstaller wants a password") {
 		t.Fatalf("escalated decision: %+v", v.Open)
 	}
-	if w := adminPost(srv, "/api/v1/maintenance/decisions", `{"key":"`+d.Key+`","answer":"handled"}`, ""); w.Code != http.StatusOK {
+	if w := postAdmin(srv, "/api/v1/maintenance/decisions", `{"key":"`+d.Key+`","answer":"handled"}`); w.Code != http.StatusOK {
 		t.Fatalf("answer: %d %s", w.Code, w.Body.String())
 	}
 	for _, o := range getDecisions(t, srv).Open {

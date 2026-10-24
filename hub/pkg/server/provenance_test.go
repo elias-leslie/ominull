@@ -45,7 +45,7 @@ func TestRetiringEndpointPreservesHistoryAndLeavesFleetConverged(t *testing.T) {
 	retireBody := `{"endpoint_id":"retired-macos","reason":"platform retired"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/retire", bytes.NewBufferString(retireBody))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	w := serveApproved(t, srv, srv.Handler(), req, retireBody)
+	w := serveAuthorized(t, srv.Handler(), req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("retire returned %d: %s", w.Code, w.Body.String())
 	}

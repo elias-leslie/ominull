@@ -19,8 +19,8 @@ set +x
 
 HUB_URL="${OMINULL_HUB_URL:?set OMINULL_HUB_URL to the hub operator API base}"
 KEY_FILE="${OMINULL_ADMIN_KEY_FILE:?set OMINULL_ADMIN_KEY_FILE to the admin key file}"
-# shellcheck source=scripts/owner-approval.sh
-. "$(dirname "${BASH_SOURCE[0]}")/owner-approval.sh"
+# shellcheck source=scripts/hub-request.sh
+. "$(dirname "${BASH_SOURCE[0]}")/hub-request.sh"
 hub_url_safe "$HUB_URL" || exit 1
 NIGHTSHIFT="${NIGHTSHIFT_CMD:-nightshift}"
 ENDPOINT=""

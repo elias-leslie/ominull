@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,5 +133,43 @@ func TestUDSClientAndServer(t *testing.T) {
 	// Consuming a second time should fail
 	if err := client.ConsumeRecoveryToken(ctx, tenantID, opID, tok); err == nil {
 		t.Fatalf("expected second ConsumeRecoveryToken to fail")
+	}
+}
+
+// An authorization crosses the Unix socket as it does in production: the
+// grants come back signed, and a refusal keeps the authority's status.
+func TestUDSAuthorize(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ominull-uds-authorize-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+	sockPath := filepath.Join(tempDir, "authority.sock")
+	auth, err := NewAuthority(Config{StateDir: tempDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(auth, sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	time.Sleep(50 * time.Millisecond)
+	client := NewUDSClient(sockPath)
+
+	payload := []byte(`{"body":{"endpoint_id":"ep-1"},"route":"/api/v1/endpoints/isolate","targets":["ep-1"]}`)
+	au, err := client.Authorize(context.Background(), &AuthorizeInput{TenantID: "default", Requester: "admin", Kind: ActionKindIsolation,
+		Targets: []string{"ep-1"}, Payload: payload})
+	if err != nil || len(au.Grants) != 1 || au.Grants[0].EndpointID != "ep-1" {
+		t.Fatalf("authorize over the socket: %+v %v", au, err)
+	}
+	_, err = client.Authorize(context.Background(), &AuthorizeInput{TenantID: "default", Requester: "admin", Kind: ActionKindIsolation,
+		Targets: []string{"ep-1"}, Payload: []byte(`{"route":"/api/v1/nothing","body":{},"targets":["ep-1"]}`)})
+	var ae *AuthorityError
+	if !errors.As(err, &ae) || ae.Status < 400 {
+		t.Fatalf("a refusal should carry the authority's status: %v", err)
 	}
 }

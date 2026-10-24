@@ -213,7 +213,7 @@ type runJob struct {
 	Package    string `json:"package"`
 }
 
-// maintScript runs a one-off script: one owner tap, then the same runner,
+// maintScript runs a one-off script: the hub authorizes it, then the same runner,
 // supervision, result and audit as a package.
 func (c *APIClient) maintScript(args []string) error {
 	usage := "usage: ominullctl maint script ENDPOINT[,ENDPOINT...] --file F --reason TEXT [--name N] [--shell powershell|bash|sh] [--timeout 10m] [--no-wait]"
@@ -271,7 +271,7 @@ func (c *APIClient) maintScript(args []string) error {
 		}
 		body["timeout_seconds"] = int(d / time.Second)
 	}
-	raw, err := c.ownerApproved(http.MethodPost, "/api/v1/maintenance/script", body)
+	raw, err := c.doRequest(http.MethodPost, "/api/v1/maintenance/script", body)
 	if err != nil {
 		return err
 	}
@@ -336,7 +336,7 @@ func (c *APIClient) maintPromote(args []string) error {
 	}
 	_ = json.Unmarshal(raw, &out)
 	c.printOutput(out, func() {
-		fmt.Printf("[+] %s v%d is in the library (digest %s). It is not a released package, so every run asks the owner until a hub release ships it.\n", out.Package, out.Version, out.Digest)
+		fmt.Printf("[+] %s v%d is in the library (digest %s). It is not a released package, so each run is authorized one by one until a hub release ships it.\n", out.Package, out.Version, out.Digest)
 	})
 	return nil
 }

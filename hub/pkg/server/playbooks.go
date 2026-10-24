@@ -10,7 +10,7 @@ package server
 // The agent starts every job it is offered at once, so the hub holds each
 // machine's next step back until the one before it has ended (finished,
 // failed, or gone quiet past its time limit). The grants live for the window
-// the owner approved (responseauth.PlaybookRun); a step that has not started
+// the authority signed (responseauth.PlaybookRun); a step that has not started
 // by then is not started at all. A step that fails does not stop the ones
 // after it: each package checks and skips by itself, and maintenance mode
 // still ends. Scheduled package runs leave a machine alone while a playbook
@@ -177,7 +177,7 @@ type playbookHostStep struct {
 }
 
 type playbookRun struct {
-	ID         string                         `json:"id"` // the owner's approval
+	ID         string                         `json:"id"` // the authorization
 	Tenant     string                         `json:"tenant"`
 	PlaybookID string                         `json:"playbook_id"`
 	Name       string                         `json:"name"`
@@ -364,7 +364,7 @@ func (p *playbookPlan) payload() []byte {
 	return raw
 }
 
-func (s *Server) resolvePlaybookRun(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+func (s *Server) resolvePlaybookRun(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	if s.scriptsStore == nil || s.responseStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "scripts or response engine not initialized")
 		return nil, false
@@ -377,7 +377,7 @@ func (s *Server) resolvePlaybookRun(w http.ResponseWriter, r *http.Request, body
 	if _, ok := s.scopedEndpointIDs(w, r, plan.req.EndpointIDs); !ok || s.refuseLocked(w, "script", plan.req.EndpointIDs...) {
 		return nil, false
 	}
-	return &approvalPlan{
+	return &actionPlan{
 		Kind:    response.ActionKindScriptExec,
 		Action:  "Run playbook",
 		Summary: fmt.Sprintf("%s (%s) on %s", plan.book.Name, strings.Join(plan.labels, ", "), s.endpointLabels(plan.req.EndpointIDs)),
@@ -393,7 +393,7 @@ func tenantOr(t string) string {
 	return t
 }
 
-// handlePlaybookRun runs once the owner approved: it records the run with
+// handlePlaybookRun runs once the authority signed: it records the run with
 // every step's grant and starts the first step on each machine.
 func (s *Server) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -413,7 +413,7 @@ func (s *Server) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	}
 	grants := approvalGrants(r)
 	if len(grants) == 0 {
-		writeJSONError(w, http.StatusForbidden, "a playbook run needs the owner's approval")
+		writeJSONError(w, http.StatusForbidden, "a playbook run was not authorized")
 		return
 	}
 	requestedBy := s.operatorFromRequest(r)
@@ -453,7 +453,7 @@ func (s *Server) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "the run could not be saved: "+err.Error())
 		return
 	}
-	s.audit(r, "PLAYBOOK_RUN_STARTED", run.ID, fmt.Sprintf("Playbook %s (%s) on %s under owner approval, within %s",
+	s.audit(r, "PLAYBOOK_RUN_STARTED", run.ID, fmt.Sprintf("Playbook %s (%s) on %s authorized by the response authority, within %s",
 		plan.book.Name, strings.Join(plan.labels, ", "), strings.Join(plan.req.EndpointIDs, ", "), time.Duration(plan.window)*time.Second))
 	s.advancePlaybookRuns(now)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"run": s.playbookRunView(run.ID)})

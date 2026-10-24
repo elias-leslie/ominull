@@ -1,9 +1,8 @@
 package server
 
-// Package runs under owner approval: POST /api/v1/maintenance/run asks the
-// owner (Nightshift push, one passkey tap) to run named packages on named
-// Windows hosts, or runs them at once when the owner's package rule covers
-// exactly those scripts on those hosts. Each run is an ordinary script_exec
+// Package runs authorized by the response authority: POST /api/v1/maintenance/run has the
+// authority sign grants for named packages on named hosts and dispatches them
+// at once. Each run is an ordinary script_exec
 // job, so its result lands on the Maintenance card and the jobs page.
 
 import (
@@ -188,7 +187,7 @@ func packageRunPayload(items []packageRunItem, targets []string) []byte {
 	return raw
 }
 
-func (s *Server) resolveMaintenanceRun(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+func (s *Server) resolveMaintenanceRun(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	if s.scriptsStore == nil || s.responseStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "scripts or response engine not initialized")
 		return nil, false
@@ -209,7 +208,7 @@ func (s *Server) resolveMaintenanceRun(w http.ResponseWriter, r *http.Request, b
 	for _, it := range items {
 		names = append(names, it.Script.Name)
 	}
-	return &approvalPlan{
+	return &actionPlan{
 		Kind:    response.ActionKindScriptExec,
 		Action:  "Run maintenance",
 		Summary: fmt.Sprintf("%s (%s) on %s", strings.Join(names, ", "), req.Mode, s.endpointLabels(req.EndpointIDs)),
@@ -226,7 +225,7 @@ type packageRunJob struct {
 }
 
 // dispatchPackageGrants creates one script_exec job per grant. runID (the
-// owner's approval, when there is one) is kept in each job's idempotency key
+// authorization id, when there is one) is kept in each job's idempotency key
 // so the run's jobs can be found again (ominullctl maint wait RUN).
 func (s *Server) dispatchPackageGrants(tenantID, requestedBy, runID string, items []packageRunItem, grants []*response.EndpointGrant) ([]packageRunJob, error) {
 	byDigest := map[string]packageRunItem{}
@@ -258,7 +257,7 @@ func (s *Server) dispatchPackageGrants(tenantID, requestedBy, runID string, item
 	return out, nil
 }
 
-// handleMaintenanceRun runs once the owner approved (ownerApproved): it
+// handleMaintenanceRun runs once the authority has authorized it: it
 // creates the jobs the authority's grants allow.
 func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -281,7 +280,7 @@ func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request) {
 	}
 	grants := approvalGrants(r)
 	if len(grants) == 0 {
-		writeJSONError(w, http.StatusForbidden, "a package run needs the owner's approval")
+		writeJSONError(w, http.StatusForbidden, "a package run was not authorized")
 		return
 	}
 	requestedBy := s.operatorFromRequest(r)
@@ -291,7 +290,7 @@ func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request) {
 	runID := r.Header.Get(approvalHeader)
 	jobs, err := s.dispatchPackageGrants(tenantID, requestedBy, runID, items, grants)
 	for _, j := range jobs {
-		s.audit(r, "SCRIPT_RUN_DISPATCHED", j.JobID, fmt.Sprintf("Dispatched package %s v%d to %s under owner approval", j.Package, j.Version, j.EndpointID))
+		s.audit(r, "SCRIPT_RUN_DISPATCHED", j.JobID, fmt.Sprintf("Dispatched package %s v%d to %s authorized by the response authority", j.Package, j.Version, j.EndpointID))
 	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("created %d of %d jobs: %v", len(jobs), len(grants), err))

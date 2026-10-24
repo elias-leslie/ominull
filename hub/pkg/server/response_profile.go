@@ -18,7 +18,7 @@ import (
 // Making an endpoint monitor-only only narrows what the hub may do, so an
 // administrator can set it directly (never while it is isolated: that would
 // release the isolation without the owner). Lifting it is a capability raise
-// and takes an owner approval for the exact revision the owner was shown.
+// and takes an authorization for the exact revision the owner was shown.
 
 // guestContainmentHint tells an operator where guest containment lives. The
 // executor that runs it holds the hypervisor's management access; the hub
@@ -125,9 +125,9 @@ func writeProfileError(w http.ResponseWriter, err error) {
 }
 
 // resolveAllowIsolation describes lifting the operator's monitor-only setting
-// for the owner's approval. The body names the setting's current revision, and
+// for the authorization. The body names the setting's current revision, and
 // the approval covers that body, so it cannot lift a later setting.
-func (s *Server) resolveAllowIsolation(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+func (s *Server) resolveAllowIsolation(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	if r.Header.Get("X-Role") != "admin" {
 		writeJSONError(w, http.StatusForbidden, "admin role required")
 		return nil, false
@@ -152,7 +152,7 @@ func (s *Server) resolveAllowIsolation(w http.ResponseWriter, r *http.Request, b
 			"error": "name the setting's current revision", "response_profile_rev": ep.ResponseProfileRev})
 		return nil, false
 	}
-	return &approvalPlan{Kind: responseauth.ActionKindIsolation, Action: "Allow host isolation",
+	return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Allow host isolation",
 		Summary: "Let " + s.endpointLabels([]string{req.EndpointID}) + " be isolated at host level again", Targets: []string{req.EndpointID}}, true
 }
 

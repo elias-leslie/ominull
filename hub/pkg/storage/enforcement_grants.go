@@ -10,7 +10,7 @@ import (
 // move an endpoint's enforcement state (isolate, release, mesh quarantine) or
 // authorize an agent update. The hub only carries them: agents verify each
 // one themselves. They are kept until they expire so an endpoint that was
-// offline when the owner approved still receives its grant when it returns.
+// offline when the authority signed still receives its grant when it returns.
 
 // StoredGrant is one grant as the hub keeps it. Target is the endpoint ID, or
 // "mesh:<address>" for a fleet-wide mesh quarantine change.
@@ -24,7 +24,7 @@ type StoredGrant struct {
 	IssuedAt  int64
 	ExpiresAt int64
 	// Pending grants are kept but not delivered until MarkGrantsDeliverable:
-	// an owner-approved action's grants are stored before its handler runs
+	// an authority-signed action's grants are stored before its handler runs
 	// and released to agents only once the handler succeeded.
 	Pending bool
 }

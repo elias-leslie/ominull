@@ -363,7 +363,7 @@ const (
 )
 
 // ScreenSessionPayload is the digested action of a screen_session grant.
-// Unattended is set (and only then present) when the owner approved the
+// Unattended is set (and only then present) when the authority signed the
 // session opening with nobody at the keyboard to ask: on a machine that asks
 // the person first, the agent declines a session when nobody is signed in
 // unless its grant says this. Canonical bytes: {"mode":"control"},

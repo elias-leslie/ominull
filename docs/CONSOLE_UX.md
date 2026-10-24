@@ -112,8 +112,10 @@ Assets page head, so the phone top bar fits on one row.
 ### Decisions
 
 Decisions stay where they are answered (Maintenance, Alerts); the needs-you
-strip and the rail badge make them visible from anywhere. Owner approvals still
-arrive on the phone; the console shows "waiting for your phone" chips.
+strip and the rail badge make them visible from anywhere. There are no approvals
+to answer: admin actions are authorized by the response authority on the first
+request (the console no longer shows "waiting for your phone" chips or an
+approval sheet), and what it signed or refused is in the audit and the Timeline.
 
 ### Settings
 
@@ -224,7 +226,7 @@ in demo mode, with the fixture browser suite and the axe responsive check.
   one line with a count ("×6") and opens to the time span and each distinct
   detail. The page line says when repeats were folded.
 - A **What** filter keeps one kind (Finding, Hunt lead, Containment,
-  Approval, Sign-in...), with each kind's count; repeats of that kind fold
+  Authorization, Sign-in...), with each kind's count; repeats of that kind fold
   even when other kinds sat between them.
 
 Rendered from synthetic events (22 events on 14 lines):
@@ -251,7 +253,7 @@ Rendered from synthetic events (22 events on 14 lines):
   the window ("Window 01:00–05:00" or "No window") and open decisions.
   **Run…** (primary) opens one sheet: pick a package, a mode and the machines
   it fits (the list follows the package's Linux or Windows platform); one
-  approval covers the run. **New playbook** sits beside it.
+  authorization covers the run. **New playbook** sits beside it.
 - Order: Decisions for you → Playbook runs (shown when there is one, with a
   "1 running" chip) → Playbooks → Packages → Schedule → Software removal
   catalog. Each card's explanation is behind "?".
@@ -319,7 +321,7 @@ Rendered from synthetic events (22 events on 14 lines):
 - A machine's Overview has an **Access and lock** card (second, after Facts):
   the lock level in words (Signed scripts, Watch and signed scripts, No
   scripts, Everything), whether it is host-locked and which pinned keys it
-  takes scripts from, standing approvals, the last thing it refused and when,
+  takes scripts from, the last thing it refused and when,
   and whether the hub and the agent agree on isolation. An agent too old to
   report says so instead of staying empty.
 - The head shows chips (Lock: ..., Host-locked, Remote access off, Isolation
@@ -327,7 +329,8 @@ Rendered from synthetic events (22 events on 14 lines):
   filters: **Isolation mismatch** and **Host-locked**.
 - **Remote terminal and screen** has a Switch off... button (confirm sheet,
   applies at once, ends open sessions). Switching it back on loosens a
-  safety setting, so it waits for an owner tap on the phone.
+  safety setting, so the response authority authorizes it on the same
+  request and the audit records it.
 - The Access page has a read-only **Release keys** card: the routine keys
   (epoch and short fingerprints) and the retired agent releases with how many
   machines still run them. Needs the hub's `retired_versions` in

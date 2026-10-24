@@ -175,15 +175,16 @@ An https hub with its own CA takes `--ca` or `OMINULL_HUB_CA` (e.g. `/etc/ominul
 
 Run commands on an enrolled endpoint through the hub's terminal session, over
 the agent's existing outbound channel (no listener on the endpoint, no SSH).
-Every new session waits for the owner's passkey tap, is recorded like a console
+Every new session is authorized on the first request (the hub asks the
+response authority to sign the grant; nobody is asked), is recorded like a console
 shell, and ends at the hub's remote shell limits (by default 4 hours, or 15
 minutes idle; see below). Linux runs `/bin/sh`,
 Windows PowerShell (as SYSTEM). Output comes back clean: the command's own
 stdout and stderr, and `exec` exits with the command's exit code.
 
 ```bash
-ominullctl exec [--timeout S] ENDPOINT -- 'uname -a'     # one tap, one command, session ends
-ominullctl shell open [--ttl 90m] ENDPOINT               # one tap, then reuse:
+ominullctl exec [--timeout S] ENDPOINT -- 'uname -a'     # one command, session ends
+ominullctl shell open [--ttl 90m] ENDPOINT               # opens a session, then reuse:
 ominullctl exec ENDPOINT -- 'journalctl -u x -n 50'      #   runs in the held session
 ominullctl put ENDPOINT ./fix.sh /tmp/fix.sh             #   files up to 2 MiB
 ominullctl get ENDPOINT /var/log/syslog ./syslog         #   (- for stdout)
@@ -203,16 +204,16 @@ or with `GET`/`PUT /api/v1/terminal/limits`. The hub's flags or environment
 `--terminal-max-per-tenant`) are the startup defaults; values saved from the
 console win and survive restarts. Safety bounds: 5 minutes to 24 hours, idle 1
 minute up to the session length, 1 to 10 per endpoint, 1 to 50 in total.
-Lowering a limit applies at once; raising one waits for the owner's tap (the
-owner sees e.g. "Remote shell: sessions run up to 6 hours (was 4 hours)").
-Sessions already open keep the limits they started with, and the owner's tap
-to open a session names its length ("recorded, up to 4 hours").
+Lowering a limit applies at once; raising one is authorized by the response
+authority on the same request and recorded in the audit (e.g. "Remote shell:
+sessions run up to 6 hours (was 4 hours)"). Sessions already open keep the
+limits they started with, and each session's authorization names its length
+("recorded, up to 4 hours").
 
 A held session lives in a background process with a private socket under
-`$XDG_RUNTIME_DIR/ominull/`. Interrupting a command while it waits for the
-owner withdraws the ask (`DELETE /api/v1/approvals?id=`), so the owner is never
-left a stale one. `ominullctl enrol list|open|close` manages LAN self-enrolment
-windows; opening one waits for the owner's tap.
+`$XDG_RUNTIME_DIR/ominull/`. `ominullctl enrol list|open|close` manages LAN
+self-enrolment windows; opening one is authorized on the first request and
+audited.
 
 Protected operator routes use the admin key, a signed console session, native
 OIDC session, or verified Cloudflare Access assertion. Tenant routes remain
@@ -238,17 +239,14 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/agent/config` | GET | device-scoped control/config response |
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
-| `/api/v1/agents/rollback` | POST | admin (or Nightshift's relay key at `/api/v1/integrations/nightshift/agents/rollback`): `{version, reason}` retires an agent release: halts its staged rollouts, drops its queued updates and refuses to roll it again; machines already on it stay until a newer release; no tap |
+| `/api/v1/agents/rollback` | POST | admin (or Nightshift's relay key at `/api/v1/integrations/nightshift/agents/rollback`): `{version, reason}` retires an agent release: halts its staged rollouts, drops its queued updates and refuses to roll it again; machines already on it stay until a newer release; no authorization needed |
 | `/api/v1/trust/routine-keys` | GET/POST | admin (or the relay key at `/api/v1/integrations/nightshift/routine-keys`): the routine release keys the pinned release key listed, `{epoch, keys:[{id, public_key}], signature}` over `OMINULL-ROUTINE-KEYS-V1` (`/statement` returns the exact bytes; a higher epoch replaces, an empty list revokes). Agents get it in the heartbeat and accept a routine key only for agent packages and their release statements; a release signed with one rolls out canaries first |
-| `/api/v1/approvals` | GET/DELETE | follow an owner approval (`?id=&wait=`); the requester withdraws its own pending one |
-| `/api/v1/approvals/rules` | GET/DELETE | show or remove the approve-all rule for owner-signed rollouts |
-| `/api/v1/integrations/nightshift/approval-rules` | GET/POST | relay key only: the owner's Approvals rows, session and lab list pushed by Nightshift; tightening saves at once, loosening needs the owner's tap on the signed `approval_rules` ask from `/approval-rules/challenge`, named by `approval_id` and spent once; `forget` lists learned job shapes to ask about again. Every approval statement carries `row`, `row_inputs`, `ask_reason` and `blast {class, verdict, why}`: core (isolating a host-locked machine, capability or remote-access loosening, LAN self-enrolment, unreadable payloads) always asks; otherwise an open session (method `session`), a job shape the owner approved three times with no denial (method `learned`, any denial ends it), or the row (method `row`) approves it, at most 120 an hour |
-| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens waits for the owner's tap (202), and a save that also tightens saves its tightening half at once (`tightened_now`) so the owner is asked about the loosening alone; a loosening too large to show in full is refused (422); the owner's statement opens with the floor drill run against the proposed tuning (`drill_blinds` in the 202: the floor cases it would newly blind) |
+| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens is authorized by the response authority on the same request (no second step) and recorded in the audit with a Nightshift note; a loosening the authority cannot read (invalid or over 16 KiB) is refused with the reason; the authority's audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
 | `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason; what it closes is recorded as `FINDINGS_ACKNOWLEDGED` and counted on the Nightshift feed's detection-policy note, like an acknowledgement |
-| `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; moving a host toward parked waits for the owner's tap (202, kind `detection_policy`, target `endpoint:<id>`), back toward always on applies at once; audited |
-| `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint; opening waits for the owner's tap (202, `learning_window` `open`, target `learning:<scope_type>:<scope_id>`; an empty tenant scope is every host in every tenant). A window holds only beacon, volume and agent egress findings; threat-intel matches, sensitive ports, sweeps, resolver bypass and silence still page |
+| `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; moving a host toward parked is authorized by the response authority on the same request (kind `detection_policy`, target `endpoint:<id>`), back toward always on applies at once; audited |
+| `/api/v1/learning/windows` | GET/POST | list or open a learning window over a tenant, location or endpoint; opening is authorized by the response authority on the same request (`learning_window` `open`, target `learning:<scope_type>:<scope_id>`; an empty tenant scope is every host in every tenant). A window holds only beacon, volume and agent egress findings; threat-intel matches, sensitive ports, sweeps, resolver bypass and silence still page |
 | `/api/v1/learning/windows/close` | POST | end a window as completed or cancelled; applies at once with a Nightshift note |
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
 | `/api/v1/learning/proposals/apply` | POST | apply an explicit list of proposal ids |
@@ -289,7 +287,7 @@ workload is read from its own command line and a process can imitate one. A
 reason is required, and so is an `expires_at` in the future when an entry is
 added or changed: past it the entry vouches for nothing, the next save drops
 it, and the Nightshift feed's detection-policy note lists it. Moving an expiry
-later loosens (owner approval); moving it earlier tightens. Entries saved
+later loosens (authorized and audited); moving it earlier tightens. Entries saved
 before expiries existed were given one 90 days out at upgrade. A known workload silences only the novelty findings (new
 destination, interpreter egress) and, for an owner-`*` entry, off-hours;
 beaconing, upload volume and threat-intelligence matches still judge it.
@@ -337,17 +335,17 @@ runtime or interpreter, resolver bypass. A case it cannot match is skipped (a
 port sweep under an exclusion for one port, a lateral sweep under a public or
 too small range or inside a container network, the sweeps for a program the
 code exempts), and so is the burst, which an exclusion may cover by design.
-A loosening tuning save or exclusion that waits for the owner is drilled
-before it is applied: the 202 carries `drill_blinds`, the floor cases the
-proposed policy would blind that the saved one does not (a case that raises
-today and that the proposed policy no longer builds, such as the resolver
-bypass of a removed agent runtime, counts), and the owner's statement opens
-with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...", shortened to the count
-when the change leaves no room) or with "floor drill: blinds no floor case
-(the 10 MB burst yields to exclusions and quiet processes)". The approved retry drills again, so a
-policy that moved in between changes the digest and the owner is asked again.
-Presence, retirement and learning windows reach no floor rule the drill runs,
-so their statements carry no drill.
+A loosening tuning save or exclusion is drilled before it is applied: the
+floor cases the proposed policy would blind that the saved one does not (a case
+that raises today and that the proposed policy no longer builds, such as the
+resolver bypass of a removed agent runtime, counts). The authority's audit
+statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...",
+shortened to the count when the change leaves no room) or with "floor drill:
+blinds no floor case (the 10 MB burst yields to exclusions and quiet
+processes)". The drill does not block the save: the authority signs it and the
+audit and the Nightshift note show what it blinds. Presence, retirement and
+learning windows reach no floor rule the drill runs, so their statements carry
+no drill.
 
 Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
 Paging comes only from deterministic detectors: canary and decoy hits, silence
@@ -397,8 +395,8 @@ not its executable. Each runtime's maker is policy too:
 shared CDN or rented compute). A runtime's flow to its maker's domain inside
 those ranges skips the per-connection bandwidth baseline (its hourly upload
 volume still judges it), and the maker's domain is named as the probable cause
-of a new destination. Adding a domain or prefix loosens and needs the owner's
-approval; removing one tightens.
+of a new destination. Adding a domain or prefix loosens (authorized and audited);
+removing one tightens.
 
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses
@@ -469,25 +467,23 @@ first, rolls retained Linux and Windows canaries, waits for native package
 provenance, then rolls the rest. Production credentials and topology come from
 the operations vault or environment and never from tracked files.
 
-With `--canary`, the owner approves the release once. The approval covers
+With `--canary`, the release is authorized once. The authorization covers
 every endpoint; the hub queues only the canaries and holds the rest
 (`agent_rollouts`). Once each canary runs the version, has a clean provenance
 check and was seen in the last two minutes, the hub queues the held
 endpoints. A canary that fails the provenance check, or is not healthy within
 30 minutes, halts the rollout and nothing more is queued. `update-status`
 lists the last rollouts under `staged_rollouts`. A hub without staged rollouts
-gets the older two-approval sequence.
+gets the older two-request sequence.
 
-The ask for a rollout of an owner-signed release (every agent package's
-release statement verifies under the release key the authority pins) offers
-"Approve all like this". With that one passkey tap the response authority keeps
-a rule: later rollouts of owner-signed releases are approved without asking,
-as long as a rollout to more than one endpoint names canaries. Nothing else is
-covered (signing, trust bundles, key rotation, detection policy, isolation,
-enrolment, terminals). The rule ends 90 days after its last use, every rollout
-it approves is an `OWNER_APPROVAL_AUTO` audit row, the Nightshift feed's
-detection-policy note lists it with a busy-week flag, and
-`ominullctl agents forget-rule` removes it.
+An agent update is authorized on the first request (no rule, no tap). The
+authority checks the payload and the release evidence: every agent package's
+release statement should verify under the release key the authority pins (or
+under a routine key that key listed), and a rollout of a routine-key release to
+more than one endpoint must name canaries (otherwise it is refused). Evidence the
+authority cannot verify is still signed, because agents verify the package
+signature themselves before installing; the audit summary then says "release
+signature not verified by the authority". The audit row is `ACTION_AUTHORIZED`.
 
 Official protocol and provider references:
 
@@ -504,7 +500,7 @@ See [`docs/AGENT_TLS.md`](../docs/AGENT_TLS.md),
 [`docs/CLOUDFLARE.md`](../docs/CLOUDFLARE.md).
 
 Maintenance packages (Windows updates, cleanup, privacy, debloat, performance
-and a standards check, run as approved script jobs with a Maintenance card on
+and a standards check, run as authorized script jobs with a Maintenance card on
 the asset view) are described in
 [`docs/MAINTENANCE_PACKAGES.md`](../docs/MAINTENANCE_PACKAGES.md).
 

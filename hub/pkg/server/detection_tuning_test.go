@@ -20,7 +20,7 @@ func tuningBody(t *testing.T, srv *Server, method, body string) (int, map[string
 	}
 	r.Header.Set("X-API-Key", "mock_admin_token")
 	// A loosening save waits for the owner; the test owner approves it.
-	w := serveApproved(t, srv, srv.Handler(), r, body)
+	w := serveAuthorized(t, srv.Handler(), r)
 	out := map[string]interface{}{}
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	return w.Code, out

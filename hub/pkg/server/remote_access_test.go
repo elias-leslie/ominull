@@ -13,10 +13,11 @@ import (
 )
 
 // Remote access off: on at once (closing open sessions), refuses terminal and
-// screen before anyone is asked, and only the owner's tap switches it back.
+// screen before anything is signed; switching it back on is a loosening the
+// authority signs at once.
 func TestServer_RemoteAccessOff(t *testing.T) {
 	t.Parallel()
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -62,7 +63,7 @@ func TestServer_RemoteAccessOff(t *testing.T) {
 		t.Fatalf("fleet view: %v", m)
 	}
 
-	// Refused before any approval is asked for, terminal and screen alike.
+	// Refused before anything is signed, terminal and screen alike.
 	for path, body := range map[string]string{
 		"/api/v1/screen/sessions":   `{"endpoint_id":"win-ra","mode":"view"}`,
 		"/api/v1/terminal/sessions": `{"endpoint_id":"win-ra","program":"powershell.exe"}`,
@@ -72,26 +73,24 @@ func TestServer_RemoteAccessOff(t *testing.T) {
 		}
 	}
 	// Other machines are untouched.
-	if code, _ := call(http.MethodPost, "/api/v1/screen/sessions", `{"endpoint_id":"win-free","mode":"view"}`); code != http.StatusAccepted {
+	if code, _ := call(http.MethodPost, "/api/v1/screen/sessions", `{"endpoint_id":"win-free","mode":"view"}`); code >= 300 {
 		t.Fatalf("other machine: %d", code)
 	}
 
-	// Switching it back on loosens: the owner's tap first.
+	// Switching it back on loosens: signed at once (200, carrying the authorization id).
 	code, m = call(http.MethodPut, "/api/v1/remote-access/settings", `{"endpoint_id":"win-ra","off":false}`)
-	if code != http.StatusAccepted || m["approval_id"] == nil {
-		t.Fatalf("on: %d %v", code, m)
+	if code != http.StatusOK || m["approval_id"] == nil || srv.remoteAccessOff("win-ra") {
+		t.Fatalf("on: %d %v off=%v", code, m, srv.remoteAccessOff("win-ra"))
 	}
-	view, _ := auth.GetApproval(m["approval_id"].(string), "")
-	if view.Action != "Allow remote terminal and screen again" || !strings.Contains(view.Summary, "allowed again on endpoint win-ra") {
-		t.Fatalf("approval %q %q", view.Action, view.Summary)
+	signed := false
+	logs, _ := store.ListAuditLogs("", 100)
+	for _, l := range logs {
+		if l.Action == "ACTION_AUTHORIZED" && strings.Contains(l.Details, "allowed again on endpoint win-ra") {
+			signed = true
+		}
 	}
-	if !srv.remoteAccessOff("win-ra") {
-		t.Fatal("switched back on before the owner approved")
-	}
-	resp := doApproved(t, srv, client, http.MethodPut, ts.URL+"/api/v1/remote-access/settings", `{"endpoint_id":"win-ra","off":false}`, bearer)
-	resp.Body.Close()
-	if resp.StatusCode != 200 || srv.remoteAccessOff("win-ra") {
-		t.Fatalf("on approved: %d", resp.StatusCode)
+	if !signed {
+		t.Fatalf("switching remote access back on was not recorded as authorized: %+v", logs)
 	}
 
 	// An unreadable row refuses everywhere until rewritten.

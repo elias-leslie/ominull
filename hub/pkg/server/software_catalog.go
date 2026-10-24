@@ -3,8 +3,8 @@ package server
 // The software removal catalog: GET/PUT/DELETE /api/v1/maintenance/catalog.
 // One settings row holds the catalog (scripts.Catalog); a hub that never
 // saved one uses the seed shipped with it. Adding or changing an entry widens
-// what a removal package may uninstall, so it waits for the owner's tap
-// through the same hub-policy approval as a detection loosening (the
+// what a removal package may uninstall, so the authority authorizes it
+// through the same hub-policy path as a detection loosening (the
 // authority writes the statement from the entry itself); a change to name or
 // note only, and deleting an entry, go straight through. Every run of a
 // package with a catalog parameter carries the catalog as it is at that
@@ -174,7 +174,7 @@ func (s *Server) handleSoftwareCatalog(w http.ResponseWriter, r *http.Request) {
 	if before != nil {
 		c.before = *before
 	}
-	approvalID, ok := s.policyApproved(w, r, c)
+	approvalID, ok := s.policyAuthorized(w, r, c)
 	if !ok {
 		return
 	}
@@ -182,7 +182,7 @@ func (s *Server) handleSoftwareCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if approvalID != "" {
-		how += " with owner approval " + approvalID
+		how += ", authorization " + approvalID
 	}
 	s.audit(r, softwareCatalogAudit, "catalog:"+e.ID, how+": "+wording+"; credential "+credentialOf(r)+" (unverified)")
 	view := s.catalogView()

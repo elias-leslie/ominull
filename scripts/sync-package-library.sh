@@ -2,7 +2,7 @@
 # Brings the hub's package library in step with the released packages, then
 # checks every synced digest is in hub/pkg/responseauth/released_packages.json.
 # A library left at an older version makes every run of that package read
-# "not a released package" on the owner's approval (1.8.83, windows-reboot).
+# "not a released package" (1.8.83, windows-reboot).
 # Needs OMINULL_HUB_URL, OMINULL_ADMIN_KEY and OMINULL_HUB_CA; CTL names the
 # ominullctl to use (default build/ominullctl).
 set -euo pipefail

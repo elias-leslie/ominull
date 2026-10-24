@@ -5,8 +5,8 @@ package server
 // endpoint and per tenant. The hub's startup flags (--terminal-max-duration
 // and friends) are the defaults; limits saved here win and survive restarts
 // (one row in the settings table). Lowering a limit applies at once. Raising
-// one waits for the owner's passkey tap through the same hub-policy approval
-// a detection loosening uses, because agents hold the admin key. Sessions
+// one is authorized by the response authority through the same hub-policy
+// path a detection loosening uses and is recorded in the audit. Sessions
 // already open keep the limits they started with.
 
 import (
@@ -27,7 +27,7 @@ const (
 )
 
 // terminalLimitsJSON is the limits as the API, the settings row and the
-// owner's approval payload carry them.
+// authorization payload carry them.
 type terminalLimitsJSON struct {
 	MaxDurationSeconds int64 `json:"max_duration_seconds"`
 	IdleTimeoutSeconds int64 `json:"idle_timeout_seconds"`
@@ -223,7 +223,7 @@ func (s *Server) putTerminalLimits(w http.ResponseWriter, r *http.Request) {
 		before: limitsJSON(before), after: limitsJSON(after),
 		loosens: limitRaises(before, after), wording: wording, subject: "remote shell limits",
 	}
-	approvalID, ok := s.policyApproved(w, r, c)
+	approvalID, ok := s.policyAuthorized(w, r, c)
 	if !ok {
 		return
 	}
@@ -239,7 +239,7 @@ func (s *Server) putTerminalLimits(w http.ResponseWriter, r *http.Request) {
 	s.terminalMgr.SetLimits(after)
 	how := "lowered"
 	if approvalID != "" {
-		how = "raised with owner approval " + approvalID
+		how = "raised, authorization " + approvalID
 	}
 	if req.Reset {
 		how += ", back to the startup defaults"

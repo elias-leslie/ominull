@@ -79,10 +79,9 @@ type Server struct {
 	// responseAuth communicates with the Response Authority daemon
 	responseAuth responseauth.Client
 	// maintBlocks is why scheduled package runs could not run (Nightshift feed).
-	maintBlocks  maintenanceBlocks
-	approvalWake approvalNotifier
+	maintBlocks maintenanceBlocks
 	// jobWake wakes ominullctl maint wait long-polls on job events.
-	jobWake approvalNotifier
+	jobWake wakeNotifier
 	// policyMu serialises detection-policy writes from reading the saved
 	// policy to saving the new one (detection_policy.go), so two saves cannot
 	// interleave and an approval is spent against the policy it was asked on.
@@ -107,7 +106,6 @@ type Server struct {
 	// responseEnabled toggles the unreleased response, evidence, script, terminal,
 	// and vulnerability mutation routes. Off by default; all unreleased routes fail closed.
 	responseEnabled bool
-	fabricPins      fabricPinStore // selective isolations awaiting approval (trust_fabric.go)
 	// trust caches the authority's public keys and manifests and the agents'
 	// trust reports; see agent_trust.go.
 	trust agentTrustCache
@@ -2028,8 +2026,8 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 // retaining its telemetry, asset identity, certificate history, and audit log.
 // It clears recorded isolation first so an operator never retires a host with
 // a stale Ominull control order waiting for a heartbeat that will not come.
-// A retired host is no longer watched for silence, so retiring one waits for
-// the owner's tap like any other loosening of detection policy.
+// A retired host is no longer watched for silence, so retiring one is
+// authorized and audited like any other loosening of detection policy.
 func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2068,7 +2066,7 @@ func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
 	if before.Status != "retired" {
 		change.loosens = []string{"retire"}
 	}
-	approvalID, ok := s.policyApproved(w, r, change)
+	approvalID, ok := s.policyAuthorized(w, r, change)
 	if !ok {
 		return
 	}
@@ -2479,7 +2477,7 @@ func (s *Server) endpointIdentityOK(w http.ResponseWriter, r *http.Request, endp
 // outside the caller's tenant. The whole request fails rather than silently
 // applying to a partial set.
 // scopedEndpointIDs refuses any id that is not a registered endpoint (for
-// admin too: an owner approval must never name a machine that does not
+// admin too: an authorization must never name a machine that does not
 // exist) or that lies outside a tenant caller's scope.
 func (s *Server) scopedEndpointIDs(w http.ResponseWriter, r *http.Request, ids []string) ([]string, bool) {
 	tenantID := ""
@@ -2956,7 +2954,7 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 		s.policyMu.Lock()
 		defer s.policyMu.Unlock()
 		// An exclusion silences detection, so every create, and every save
-		// over an existing id (a renewal), loosens and waits for the owner.
+		// over an existing id (a renewal), loosens, so the authority authorizes it.
 		var before any
 		named := ex.ID != ""
 		if named {
@@ -2997,7 +2995,7 @@ func (s *Server) handleExclusions(w http.ResponseWriter, r *http.Request) {
 			loosens: []string{"exclusion"},
 			wording: fmt.Sprintf("exclusion %s (%s %s:%d, %s scope %s) until %s: %s", ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port, ex.Scope, ex.ScopeValue, ex.ExpiresAt.Format(time.RFC3339), ex.Reason),
 		}
-		approvalID, ok := s.policyApproved(w, r, change)
+		approvalID, ok := s.policyAuthorized(w, r, change)
 		if !ok {
 			return
 		}
@@ -3112,7 +3110,7 @@ func (s *Server) handleToggleExclusion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	change.wording = fmt.Sprintf("%s exclusion %s (%s %s:%d)", strings.ToLower(state), ex.Name, ex.ProcessPath, ex.DstIPRange, ex.Port)
-	approvalID, ok := s.policyApproved(w, r, change)
+	approvalID, ok := s.policyAuthorized(w, r, change)
 	if !ok {
 		return
 	}
@@ -3762,22 +3760,14 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/integrations/nightshift/router-health", s.nightshiftFeedAuth(s.handleRouterHealth))
 	mux.HandleFunc("/api/v1/integrations/nightshift/findings", s.nightshiftFeedAuth(s.handleNightshiftFeed))
 	mux.HandleFunc("/api/v1/integrations/nightshift/key", s.authMiddleware(s.handleNightshiftFeedKey))
-	// The approval relay: Nightshift carries pending owner approvals to the
-	// owner's phone and brings the signed answer back. Its key can neither
-	// read the fleet nor approve anything; only the owner's passkey can.
-	mux.HandleFunc("/api/v1/integrations/nightshift/approvals", s.approvalRelayAuth(s.handleRelayApprovals))
-	mux.HandleFunc("/api/v1/integrations/nightshift/approvals/answer", s.approvalRelayAuth(s.handleRelayAnswer))
-	mux.HandleFunc("/api/v1/integrations/nightshift/approval-rules", s.approvalRelayAuth(s.handleRelayApprovalRules))
-	mux.HandleFunc("/api/v1/integrations/nightshift/approval-rules/challenge", s.approvalRelayAuth(s.handleRelayApprovalRulesChallenge))
+	// Routes behind the Nightshift relay key (no owner is ever asked: these
+	// carry facts and verdicts only).
 	mux.HandleFunc("/api/v1/integrations/nightshift/alerts/verdict", s.approvalRelayAuth(s.handleRelayAlertVerdict))
 	// Lock facts only (ceiling, host authority, remote access off) for the
 	// machines that carry a lock, so Nightshift confirms its installer's work.
 	mux.HandleFunc("/api/v1/integrations/nightshift/locks", s.approvalRelayAuth(s.handleNightshiftLocks))
 	// Each enrolled agent's build, so Nightshift checks none still trusts a retired release key.
 	mux.HandleFunc("/api/v1/integrations/nightshift/agent-builds", s.approvalRelayAuth(s.handleNightshiftBuilds))
-	// The owner answered a maintenance decision in Nightshift's inbox.
-	mux.HandleFunc("/api/v1/integrations/nightshift/decisions", s.approvalRelayAuth(s.responseGate(s.handleRelayDecisions)))
-	mux.HandleFunc("/api/v1/integrations/nightshift/decisions/answer", s.approvalRelayAuth(s.responseGate(s.handleRelayDecisionAnswer)))
 	mux.HandleFunc("/api/v1/integrations/nightshift/approval-key", s.authMiddleware(s.handleApprovalRelayKey))
 	mux.HandleFunc("/api/v1/router/flows", s.authMiddleware(s.handleRouterFlows))
 	mux.HandleFunc("/api/v1/router/talkers", s.authMiddleware(s.handleRouterTalkers))
@@ -3818,8 +3808,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/monitor-only", s.authMiddleware(requireAdmin(s.handleMonitorOnly)))
 	mux.HandleFunc("/api/v1/trust/rules", s.authMiddleware(requireAdmin(s.handleTrustRules)))
 	mux.HandleFunc("/api/v1/trust/effective", s.authMiddleware(requireAdmin(s.handleTrustEffective)))
-	mux.HandleFunc("/api/v1/endpoints/allow-isolation", s.authMiddleware(s.ownerApproved(s.resolveAllowIsolation, s.handleAllowIsolation)))
-	mux.HandleFunc("/api/v1/endpoints/capabilities", s.authMiddleware(s.ownerApproved(s.resolveCapabilities, s.handleEndpointCapabilities)))
+	mux.HandleFunc("/api/v1/endpoints/allow-isolation", s.authMiddleware(s.authorized(s.resolveAllowIsolation, s.handleAllowIsolation)))
+	mux.HandleFunc("/api/v1/endpoints/capabilities", s.authMiddleware(s.authorized(s.resolveCapabilities, s.handleEndpointCapabilities)))
 	mux.HandleFunc("/api/v1/fleet/trust", s.authMiddleware(s.handleFleetTrust))
 	mux.HandleFunc("/api/v1/trust/statement", s.authMiddleware(s.handleTrustStatement))
 	mux.HandleFunc("/api/v1/trust/bundle", s.authMiddleware(s.handleTrustBundle))
@@ -3828,7 +3818,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/integrations/nightshift/routine-keys", s.approvalRelayAuth(s.handleRoutineKeys))
 	mux.HandleFunc("/api/v1/integrations/nightshift/routine-keys/statement", s.approvalRelayAuth(s.handleRoutineKeysStatement))
 	mux.HandleFunc("/api/v1/agent/config", s.deviceOrLegacyMiddleware(s.handleAgentConfig))
-	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.ownerApproved(s.resolveAgentUpdate, s.handleAgentsUpdate)))
+	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.authorized(s.resolveAgentUpdate, s.handleAgentsUpdate)))
 	mux.HandleFunc("/api/v1/agents/rollback", s.authMiddleware(requireAdminRole(s.handleAgentRollback)))
 	mux.HandleFunc("/api/v1/integrations/nightshift/agents/rollback", s.approvalRelayAuth(s.handleAgentRollback))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
@@ -3845,15 +3835,13 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/baseline/endpoint", s.authMiddleware(s.handleBaselineEndpoint))
 	mux.HandleFunc("/api/v1/baseline/propose", s.authMiddleware(s.handleBaselinePropose))
 
-	// Isolation changes, agent updates, mesh quarantines and terminals take an
-	// owner approval (push to the owner's phone, one passkey tap, verified by
-	// the response authority): see owner_approval.go.
-	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.ownerApproved(s.resolveIsolate, s.handleIsolate)))
-	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.ownerApproved(s.resolveUnisolate, s.handleUnisolate)))
-	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.ownerApproved(s.resolveBulkIsolation(true), s.handleBulkIsolate)))
-	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.ownerApproved(s.resolveBulkIsolation(false), s.handleBulkUnisolate)))
-	mux.HandleFunc("/api/v1/approvals", s.authMiddleware(s.handleApprovals))
-	mux.HandleFunc("/api/v1/approvals/rules", s.authMiddleware(requireAdmin(s.handleApprovalRules)))
+	// Isolation changes, agent updates, mesh quarantines, terminals and
+	// screens, package runs: the response authority checks and signs the grants
+	// before the handler runs (action_authorize.go). Nobody is asked.
+	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.authorized(s.resolveIsolate, s.handleIsolate)))
+	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.authorized(s.resolveUnisolate, s.handleUnisolate)))
+	mux.HandleFunc("/api/v1/endpoints/isolate-bulk", s.authMiddleware(s.authorized(s.resolveBulkIsolation(true), s.handleBulkIsolate)))
+	mux.HandleFunc("/api/v1/endpoints/unisolate-bulk", s.authMiddleware(s.authorized(s.resolveBulkIsolation(false), s.handleBulkUnisolate)))
 	mux.HandleFunc("/api/v1/events", s.deviceOrLegacyMiddleware(s.handleEvents))
 
 	// 4. Exclusions, traffic profiles, detection, analytics, DNS, and threat intel.
@@ -3910,8 +3898,8 @@ func (s *Server) routes() *http.ServeMux {
 	// lands in a
 	// privileged firewall command on every agent that receives it. Nothing
 	// with that reach is driven by a credential that ships to endpoints.
-	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(requireAdmin(s.ownerApproved(s.resolveMesh(true), s.handleMeshQuarantine))))
-	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(requireAdmin(s.ownerApproved(s.resolveMesh(false), s.handleMeshUnquarantine))))
+	mux.HandleFunc("/api/v1/mesh/quarantine", s.authMiddleware(requireAdmin(s.authorized(s.resolveMesh(true), s.handleMeshQuarantine))))
+	mux.HandleFunc("/api/v1/mesh/unquarantine", s.authMiddleware(requireAdmin(s.authorized(s.resolveMesh(false), s.handleMeshUnquarantine))))
 	mux.HandleFunc("/api/v1/mesh/quarantined", s.authMiddleware(s.handleMeshQuarantinedList))
 
 	// 10. Next-Gen Response & Forensic Collection API (Fail-closed behind responseGate)
@@ -3934,7 +3922,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/evidence/prune", s.authMiddleware(requireAdmin(s.handleEvidencePrune)))
 
 	// 12. Interactive Remote Pseudoterminal Shell API (Fail-closed behind responseGate)
-	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.ownerApproved(s.resolveTerminal, s.handleTerminalSessions))))
+	mux.HandleFunc("/api/v1/terminal/sessions", s.authMiddleware(s.responseGate(s.authorized(s.resolveTerminal, s.handleTerminalSessions))))
 	mux.HandleFunc("/api/v1/terminal/limits", s.authMiddleware(s.responseGate(s.handleTerminalLimits)))
 	mux.HandleFunc("/api/v1/terminal/sessions/close", s.authMiddleware(s.responseGate(s.handleTerminalSessionClose)))
 	mux.HandleFunc("/api/v1/terminal/sessions/attach", s.authMiddleware(s.responseGate(s.handleTerminalSessionAttach)))
@@ -3947,7 +3935,7 @@ func (s *Server) routes() *http.ServeMux {
 	// (screen_handlers.go). No console page: the native viewer started by
 	// ominullctl attaches with a one-use X-Screen-Token header and no Origin;
 	// the agent socket carries the agent's own token.
-	mux.HandleFunc("/api/v1/screen/sessions", s.authMiddleware(s.responseGate(s.ownerApproved(s.resolveScreen, s.handleScreenSessions))))
+	mux.HandleFunc("/api/v1/screen/sessions", s.authMiddleware(s.responseGate(s.authorized(s.resolveScreen, s.handleScreenSessions))))
 	mux.HandleFunc("/api/v1/screen/sessions/close", s.authMiddleware(s.responseGate(s.handleScreenSessionClose)))
 	mux.HandleFunc("/api/v1/screen/sessions/attach", s.authMiddleware(s.responseGate(s.handleScreenSessionAttach)))
 	mux.HandleFunc("/api/v1/screen/ws/operator", s.responseGate(s.handleScreenWSOperator))
@@ -3956,8 +3944,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/screen/sessions/watch", s.authMiddleware(s.responseGate(s.handleScreenWatch)))
 	// The viewer's only credential is the launch code itself.
 	mux.HandleFunc("/api/v1/screen/launch/redeem", s.responseGate(s.handleScreenLaunchRedeem))
-	mux.HandleFunc("/api/v1/screen/steward", s.authMiddleware(s.responseGate(s.ownerApproved(s.resolveStewardScreen, s.handleStewardScreen))))
-	mux.HandleFunc("/api/v1/integrations/nightshift/steward-screen", s.approvalRelayAuth(s.responseGate(s.ownerApproved(s.resolveStewardScreen, s.handleStewardScreen))))
 	mux.HandleFunc("/api/v1/integrations/steward/key", s.authMiddleware(s.handleStewardKey))
 	mux.HandleFunc("/api/v1/screen/settings", s.authMiddleware(s.responseGate(s.handleScreenSettings)))
 	mux.HandleFunc("/api/v1/remote-access/settings", s.authMiddleware(s.responseGate(s.handleRemoteAccess)))
@@ -3974,8 +3960,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/maintenance/playbooks", s.authMiddleware(s.responseGate(s.handlePlaybooks)))
 	mux.HandleFunc("/api/v1/maintenance/decisions", s.authMiddleware(s.responseGate(s.handleDecisions)))
 	mux.HandleFunc("/api/v1/maintenance/escalate", s.authMiddleware(s.responseGate(s.handleMaintenanceEscalate)))
-	mux.HandleFunc("/api/v1/maintenance/playbooks/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolvePlaybookRun, s.handlePlaybookRun)))))
-	mux.HandleFunc("/api/v1/maintenance/run", s.authMiddleware(s.responseGate(requireAdmin(s.ownerApproved(s.resolveMaintenanceRun, s.handleMaintenanceRun)))))
+	mux.HandleFunc("/api/v1/maintenance/playbooks/run", s.authMiddleware(s.responseGate(requireAdmin(s.authorized(s.resolvePlaybookRun, s.handlePlaybookRun)))))
+	mux.HandleFunc("/api/v1/maintenance/run", s.authMiddleware(s.responseGate(requireAdmin(s.authorized(s.resolveMaintenanceRun, s.handleMaintenanceRun)))))
 	mux.HandleFunc("/api/v1/maintenance/script", s.authMiddleware(s.responseGate(s.handleOneOffScriptRoute())))
 	mux.HandleFunc("/api/v1/maintenance/script/promote", s.authMiddleware(s.responseGate(requireAdmin(s.handlePromoteScript))))
 	mux.HandleFunc("/api/v1/maintenance/wait", s.authMiddleware(s.responseGate(s.handleMaintenanceWait)))

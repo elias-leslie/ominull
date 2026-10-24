@@ -6,11 +6,10 @@ package server
 // the silence floor reports it), and opening a learning window (which holds
 // the behavioural findings of every host it covers). Each change is compared field by field with what is saved now.
 // One that only tightens applies at once and leaves a note for Nightshift. One
-// that loosens anything waits for the owner's passkey tap, through the same
-// response-authority approval isolation uses: the admin key, a console session
-// and a JWT minted from the admin key can all ask, and none of them can make
-// it happen. The authority's statement shows the owner the field-level diff,
-// and its digest binds the exact before and after, so an approval granted
+// that loosens anything is authorized by the response authority and recorded
+// in the audit with a note for Nightshift, through the same authorization
+// isolation uses. The authority's statement carries the field-level diff, and
+// its digest binds the exact before and after, so an authorization granted
 // against one saved policy is refused once that policy has changed.
 //
 // The credential a change came through (api-key, jwt or console) is recorded
@@ -18,9 +17,6 @@ package server
 // hub identity.
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -169,7 +165,7 @@ const drillFailed = "the drill could not run"
 const drillMaxShown = 256
 
 // credentialOf names how the caller authenticated; relay-key is Nightshift's
-// approval relay, which closes findings when the owner answers there.
+// relay key, which closes findings with its verdict.
 // Unverified: whoever holds the admin key can present any of these.
 func credentialOf(r *http.Request) string {
 	switch m := r.Header.Get("X-Auth-Method"); m {
@@ -179,16 +175,18 @@ func credentialOf(r *http.Request) string {
 	return "unknown"
 }
 
-// policyApproved lets a change through when it loosens nothing, or when the
-// owner has approved exactly this change. Otherwise it answers the request
-// itself (202 with the approval to wait for, or the refusal) and returns false.
-func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policyChange) (string, bool) {
+// policyAuthorized has the authority sign off a change that loosens
+// detection (nothing else is asked: the hub applies the change itself, the
+// authority audits it and the Nightshift feed's detection-policy note reports
+// it). A change that loosens nothing passes without the authority. It returns
+// the authorization id for the audit row.
+func (s *Server) policyAuthorized(w http.ResponseWriter, r *http.Request, c policyChange) (string, bool) {
 	if len(c.loosens) == 0 {
 		return "", true
 	}
 	if s.responseAuth == nil {
 		writeJSONError(w, http.StatusServiceUnavailable,
-			"this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+"), which needs the owner's approval, and the response authority that asks for it is not available")
+			"this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+") and the response authority that signs it off is not available")
 		return "", false
 	}
 	c.drill, c.drilled = s.drillProposed(c)
@@ -202,62 +200,17 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 		tenantID = "default"
 	}
 	requester := s.operatorFromRequest(r) + " (" + credentialOf(r) + ")"
-	id := strings.TrimSpace(r.Header.Get(approvalHeader))
-	if id == "" {
-		v, err := s.responseAuth.RequestApproval(r.Context(), &responseauth.ApprovalRequestInput{
-			TenantID: tenantID, Requester: requester, Kind: responseauth.ActionKindDetection,
-			Summary: c.wording, Targets: []string{c.target}, Payload: payload,
-		})
-		if err == nil && v.State == responseauth.ApprovalApproved && (v.Method == "row" || v.Method == "session" || v.Method == "learned") {
-			// The owner's Approvals row, open work session or a job shape
-			// the owner approved before lets this change through; spent below.
-			s.audit(r, autoApprovedAudit, c.target, fmt.Sprintf("%s (approval %s) approved without asking (%s; row %s): %s", v.Action, v.ID, v.Method, v.Row, v.Summary))
-			id = v.ID
-		} else if err != nil {
-			s.audit(r, "OWNER_APPROVAL_UNAVAILABLE", c.target, "detection policy: "+err.Error())
-			writeJSONError(w, approvalStatus(err), "this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+") and the owner's approval could not be requested: "+err.Error())
-			return "", false
-		}
-		if id == "" {
-			s.approvalWake.notify()
-			s.audit(r, "OWNER_APPROVAL_REQUESTED", c.target, fmt.Sprintf("%s (approval %s): %s", v.Action, v.ID, v.Summary))
-			body := map[string]interface{}{
-				"approval_id": v.ID,
-				"state":       v.State,
-				"action":      v.Action,
-				"summary":     v.Summary,
-				"targets":     v.Targets,
-				"loosens":     c.loosens,
-				"expires_at":  v.ExpiresAt,
-				"next":        "This change loosens " + c.loosensWhat() + ", so the owner approves it on their phone. Poll GET /api/v1/approvals?id=" + v.ID + "&wait=20, then repeat this request with header " + approvalHeader + ".",
-			}
-			if c.tightenedFirst != "" {
-				body["tightened_now"] = c.tightenedFirst
-			}
-			if c.drilled {
-				body["drill_blinds"] = c.drill
-			}
-			writeJSON(w, http.StatusAccepted, body)
-			return "", false
-		}
-	}
-	sum := sha256.Sum256(payload)
-	if _, err := s.responseAuth.ConsumeApproval(r.Context(), &responseauth.ApprovalConsumeRequest{
-		ID: id, TenantID: tenantID, Requester: requester, Kind: responseauth.ActionKindDetection,
-		Digest: hex.EncodeToString(sum[:]), Targets: []string{c.target},
-	}); err != nil {
-		s.audit(r, "OWNER_APPROVAL_REFUSED", c.target, fmt.Sprintf("detection policy with approval %s: %v", id, err))
-		status := approvalStatus(err)
-		if status == http.StatusNotFound {
-			status = http.StatusForbidden
-		}
-		writeJSONError(w, status, "owner approval not valid for this change: "+err.Error()+
-			". If the saved policy changed since the approval was asked for, ask again.")
+	au, err := s.responseAuth.Authorize(r.Context(), &responseauth.AuthorizeInput{
+		TenantID: tenantID, Requester: requester, Kind: responseauth.ActionKindDetection,
+		Targets: []string{c.target}, Payload: payload,
+	})
+	if err != nil {
+		s.audit(r, "ACTION_REFUSED", c.target, "detection policy: "+err.Error())
+		writeJSONError(w, authorizeStatus(err), "this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+") and the authority did not sign it off: "+err.Error())
 		return "", false
 	}
-	s.approvalWake.notify()
-	s.audit(r, "OWNER_APPROVAL_USED", c.target, "detection policy change under approval "+id)
-	return id, true
+	s.audit(r, "ACTION_AUTHORIZED", c.target, fmt.Sprintf("detection policy change loosening %s (authorization %s): %s", strings.Join(c.loosens, ", "), au.ID, au.Summary))
+	return au.ID, true
 }
 
 // notePolicyChange records an applied change for the audit trail and for the
@@ -265,7 +218,7 @@ func (s *Server) policyApproved(w http.ResponseWriter, r *http.Request, c policy
 func (s *Server) notePolicyChange(r *http.Request, c policyChange, approvalID string) {
 	how := "tightened"
 	if approvalID != "" {
-		how = "loosened (" + strings.Join(c.loosens, ", ") + ") with owner approval " + approvalID
+		how = "loosened (" + strings.Join(c.loosens, ", ") + ") with authorization " + approvalID
 	}
 	s.audit(r, policyChangedAudit, c.target, fmt.Sprintf("%s %s %s: %s; credential %s (unverified)",
 		how, strings.ReplaceAll(c.policy, "_", " "), c.op, c.wording, credentialOf(r)))
@@ -754,7 +707,7 @@ func windowCovers(after, before storage.DetectionTuning) bool {
 	return true
 }
 
-// exclusionView is an exclusion as the owner approves it: without the time it
+// exclusionView is an exclusion as the authority words it: without the time it
 // happens to be written at, and without an id the hub has yet to pick.
 func exclusionView(ex storage.Exclusion, keepID bool) storage.Exclusion {
 	ex.CreatedAt = time.Time{}
@@ -896,18 +849,14 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		}
 		unmapped["known_workloads_expired"] = expired
 	}
-	// The owner's approve-all rule for owner-signed agent rollouts is named
-	// while it lives, with each rollout it approved in the window, so it can
-	// be seen and removed (DELETE /api/v1/approvals/rules).
-	rulesPart, rulesShown := s.rolloutRulesNote(now, unmapped)
-	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 && len(clamped) == 0 && len(expired) == 0 && !rulesShown {
+	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 && len(clamped) == 0 && len(expired) == 0 {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No detection policy changes in the last 24 h", nil, unmapped))
 		return out, nil
 	}
 	var parts []string
 	if len(changes) > 0 {
-		parts = append(parts, fmt.Sprintf("%s in the last 24 h (%d loosened with the owner's approval, %d tightened)",
+		parts = append(parts, fmt.Sprintf("%s in the last 24 h (%d loosened, %d tightened)",
 			plural(len(changes), "detection policy change", "detection policy changes"), loosened, len(changes)-loosened))
 	}
 	if len(dismissed) > 0 {
@@ -923,8 +872,8 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		if !issuedComplete {
 			atLeast = "at least "
 		}
-		parts = append(parts, fmt.Sprintf("the Nightshift approval relay key was issued %s%s in the last 24 h, last by %s at %s; "+
-			"any admin-key holder can issue it, so a closure through it since then need not be the owner's answer",
+		parts = append(parts, fmt.Sprintf("the Nightshift relay key was issued %s%s in the last 24 h, last by %s at %s; "+
+			"any admin-key holder can issue it, so a closure through it since then need not be Nightshift's own verdict",
 			atLeast, plural(len(issued), "time", "times"), issued[0].Username, issued[0].Timestamp.UTC().Format(time.RFC3339)))
 	}
 	if len(clamped) > 0 {
@@ -933,49 +882,6 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	if n, _ := unmapped["known_workloads_expired_omitted"].(int); len(expired) > 0 {
 		parts = append(parts, fmt.Sprintf("expired known workloads no longer vouch for anything: %d; renew or remove them in the tuning", len(expired)+n))
 	}
-	if rulesPart != "" {
-		parts = append(parts, rulesPart)
-	}
 	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil
-}
-
-// rolloutRulesNote describes the live approve-all rollout rules and the
-// rollouts approved without asking in the feed window, adding both to
-// unmapped. It reports whether there was anything to say.
-func (s *Server) rolloutRulesNote(now time.Time, unmapped map[string]any) (string, bool) {
-	if s.responseAuth == nil {
-		return "", false
-	}
-	var parts []string
-	rules, err := s.responseAuth.RolloutRules(context.Background(), "")
-	if err != nil {
-		unmapped["rollout_rules_error"] = err.Error()
-		parts = append(parts, "the approve-all rule for agent rollouts could not be read: "+err.Error())
-	}
-	for _, r := range rules {
-		p := fmt.Sprintf("agent rollouts of releases you signed run without asking (canaries first) under the approve-all rule made %s; %d this week; it ends %s unless used; remove it with ominullctl agents forget-rule",
-			r.CreatedAt.Format("2006-01-02"), r.Week, r.EndsAt.Format("2006-01-02"))
-		if r.Spike {
-			p += "; BUSY WEEK: far more rollouts than usual"
-		}
-		parts = append(parts, p)
-	}
-	if len(rules) > 0 {
-		unmapped["rollout_rules"] = rules
-	}
-	auto, _, err := s.auditWindow(autoApprovedAudit, now.Add(-feedAnomalyWindow))
-	if err == nil && len(auto) > 0 {
-		shown := auto
-		if len(shown) > feedDismissedListShown {
-			shown = shown[:feedDismissedListShown]
-		}
-		rows := make([]map[string]any, 0, len(shown))
-		for _, e := range shown {
-			rows = append(rows, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "change": e.Details})
-		}
-		unmapped["rollouts_auto_approved"] = rows
-		parts = append(parts, fmt.Sprintf("%s approved without asking in the last 24 h", plural(len(auto), "agent rollout", "agent rollouts")))
-	}
-	return strings.Join(parts, "; "), len(parts) > 0
 }

@@ -73,12 +73,6 @@ func fakeScreenHub(t *testing.T) (*httptest.Server, func() []string) {
 			t.Errorf("sent %v", req)
 		}
 		mode, _ := req["mode"].(string)
-		if r.Header.Get("X-Approval-ID") == "" {
-			note("asked")
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"approval_id":"ap-1","state":"pending","action":"Watch screen","summary":"Watch the screen on win-01"}`))
-			return
-		}
 		note("opened")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = fmt.Fprintf(w, `{"session_id":"ss-1","mode":%q,"connect_token":"op-secret"}`, mode)
@@ -104,21 +98,12 @@ func fakeScreenHub(t *testing.T) (*httptest.Server, func() []string) {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(body), `"ask_first":false`) && r.Header.Get("X-Approval-ID") == "" {
-			note("settings asked")
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"approval_id":"ap-1","state":"pending","action":"Stop asking before screen sessions","summary":"Screen sessions on endpoint win-01 open without asking"}`))
-			return
-		}
 		note("settings put " + string(body))
 		_, _ = w.Write([]byte(`{"endpoint_id":"win-01","ask_first":false,"source":"endpoint","fleet_ask_first":false,"changed":true}`))
 	})
 	mux.HandleFunc("/api/v1/screen/sessions/watch", func(w http.ResponseWriter, r *http.Request) {
 		note("watch")
 		_, _ = w.Write([]byte(`{"session_id":"ss-1","token":"watch-secret","mode":"view","host":"Office PC","expires_at":"2030-01-01T00:00:00Z"}`))
-	})
-	mux.HandleFunc("/api/v1/approvals", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"ap-1","state":"approved"}`))
 	})
 	mux.HandleFunc("/api/v1/endpoints", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`[{"id":"win-01","hostname":"Office PC"}]`))
@@ -172,12 +157,12 @@ func TestScreenOpenStartsViewer(t *testing.T) {
 	if strings.Contains(out.String(), "op-secret") || !strings.Contains(out.String(), "Watch-only screen session on win-01 ended") {
 		t.Fatalf("printed %q", out.String())
 	}
-	if s := strings.Join(seen(), ","); s != "asked,opened,deleted ss-1" {
+	if s := strings.Join(seen(), ","); s != "opened,deleted ss-1" {
 		t.Fatalf("hub saw %s", s)
 	}
 }
 
-// With no viewer to be found nothing is asked of the owner; a viewer that
+// With no viewer to be found nothing reaches the hub; a viewer that
 // cannot start leaves no session holding the endpoint's slot.
 func TestScreenOpenWithoutViewer(t *testing.T) {
 	hub, seen := fakeScreenHub(t)
@@ -195,7 +180,7 @@ func TestScreenOpenWithoutViewer(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "session was ended") {
 		t.Fatalf("err %v", err)
 	}
-	if s := strings.Join(seen(), ","); s != "asked,opened,deleted ss-1" {
+	if s := strings.Join(seen(), ","); s != "opened,deleted ss-1" {
 		t.Fatalf("hub saw %s", s)
 	}
 	if err := c.screenOpen(nil, &out); err == nil {
@@ -369,14 +354,14 @@ func TestScreenHeldSession(t *testing.T) {
 	if _, err := os.Stat(heldScreenFile("win-01")); !os.IsNotExist(err) {
 		t.Fatal("held state left after end")
 	}
-	asks := 0
+	opens := 0
 	for _, s := range seen() {
-		if s == "asked" {
-			asks++
+		if s == "opened" {
+			opens++
 		}
 	}
-	if asks != 3 {
-		t.Fatalf("%d owner asks, want one per hold (3)", asks)
+	if opens != 3 {
+		t.Fatalf("%d sessions opened, want one per hold (3)", opens)
 	}
 }
 
@@ -417,7 +402,7 @@ func TestScreenSettings(t *testing.T) {
 	if err := c.screenSettings([]string{"win-01", "--ask-first", "off"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if s := strings.Join(seen(), ","); s != `settings get endpoint_id=win-01,settings asked,settings put {"ask_first":false}` {
+	if s := strings.Join(seen(), ","); s != `settings get endpoint_id=win-01,settings put {"ask_first":false}` {
 		t.Fatalf("hub saw %s", s)
 	}
 	if err := c.screenSettings([]string{"--ask-first", "maybe"}, &out); err == nil {

@@ -349,12 +349,12 @@ func (s *Server) buildJobView(job *response.JobRecord, hostName string, stamp fu
 // jobActor names who moved a job: the agent on its host, the hub's scheduler,
 // or the operator.
 // requesterLabel names who asked for a job. Jobs from the host-authority
-// courier were signed by Nightshift: a tap key (the owner approved this
-// script) or the auto key (an allow-listed package).
+// courier were signed by Nightshift: a tap key (a script signed one at a time)
+// or the auto key (an allow-listed package).
 func requesterLabel(by string) string {
 	switch by {
 	case response.OperatorNightshiftTap:
-		return "signed by Nightshift (owner tap)"
+		return "signed by Nightshift"
 	case response.OperatorNightshiftAuto:
 		return "signed by Nightshift (allow-listed package)"
 	}

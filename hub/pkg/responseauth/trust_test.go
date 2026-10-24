@@ -15,7 +15,6 @@ import (
 
 	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/responseauth"
-	"ominull/hub/pkg/responseauth/approvaltest"
 )
 
 func pub(t *testing.T, h string) ed25519.PublicKey {
@@ -27,21 +26,14 @@ func pub(t *testing.T, h string) ed25519.PublicKey {
 	return b
 }
 
-// approveAndConsume runs one owner approval end to end.
-func approveAndConsume(t *testing.T, auth *responseauth.Authority, ap *approvaltest.Approver, in *responseauth.ApprovalRequestInput) []*response.EndpointGrant {
+// authorizeGrants authorizes one action and returns its grants.
+func authorizeGrants(t *testing.T, auth *responseauth.Authority, in *responseauth.AuthorizeInput) []*response.EndpointGrant {
 	t.Helper()
-	v, err := auth.RequestApproval(in)
+	au, err := auth.Authorize(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "approve", Assertion: ap.Assert(v.Challenge, "approve")}); err != nil {
-		t.Fatal(err)
-	}
-	grants, err := auth.ConsumeApproval(&responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: in.TenantID, Requester: in.Requester, Kind: in.Kind, Digest: digestOf(in.Payload), Targets: in.Targets})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return grants
+	return au.Grants
 }
 
 func routedPayload(route string, body map[string]interface{}, targets []string) []byte {
@@ -51,7 +43,7 @@ func routedPayload(route string, body map[string]interface{}, targets []string) 
 }
 
 func TestTrustKeysAreThreeDistinctStableKeys(t *testing.T) {
-	auth, _ := newApprovalAuthority(t)
+	auth := newTestAuthority(t)
 	k1, err := auth.TrustKeys("default")
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +70,7 @@ func TestTrustKeysAreThreeDistinctStableKeys(t *testing.T) {
 }
 
 func TestAutoIsolationIsNarrowAndRationed(t *testing.T) {
-	auth, _ := newApprovalAuthority(t)
+	auth := newTestAuthority(t)
 	keys, _ := auth.TrustKeys("default")
 	g, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1", Reason: "port sweep"})
 	if err != nil {
@@ -124,11 +116,11 @@ func TestAutoIsolationIsNarrowAndRationed(t *testing.T) {
 }
 
 func TestEnforcementGrantsAreStrictlyOrdered(t *testing.T) {
-	auth, ap := newApprovalAuthority(t)
-	a := approveAndConsume(t, auth, ap, isolateRequest())
+	auth := newTestAuthority(t)
+	a := authorizeGrants(t, auth, isolateRequest())
 	in := isolateRequest()
 	in.Payload = routedPayload("/api/v1/endpoints/unisolate", map[string]interface{}{"endpoint_id": "ep-1"}, []string{"ep-1"})
-	b := approveAndConsume(t, auth, ap, in)
+	b := authorizeGrants(t, auth, in)
 	if b[0].IssuedAt <= a[0].IssuedAt {
 		t.Fatalf("release issued at %d, isolation at %d", b[0].IssuedAt, a[0].IssuedAt)
 	}
@@ -138,7 +130,7 @@ func TestEnforcementGrantsAreStrictlyOrdered(t *testing.T) {
 }
 
 func TestNonCanonicalPayloadRefused(t *testing.T) {
-	auth, _ := newApprovalAuthority(t)
+	auth := newTestAuthority(t)
 	for name, raw := range map[string]string{
 		"spaces":      `{"body": {"endpoint_id":"ep-1"},"route":"/api/v1/endpoints/isolate","targets":["ep-1"]}`,
 		"case keys":   `{"Route":"/api/v1/endpoints/unisolate","body":{"endpoint_id":"ep-1"},"route":"/api/v1/endpoints/isolate","targets":["ep-1"]}`,
@@ -147,19 +139,19 @@ func TestNonCanonicalPayloadRefused(t *testing.T) {
 	} {
 		in := isolateRequest()
 		in.Payload = []byte(raw)
-		if _, err := auth.RequestApproval(in); err == nil {
+		if _, err := auth.Authorize(in); err == nil {
 			t.Fatalf("%s payload accepted", name)
 		}
 	}
 	in := isolateRequest()
 	in.TenantID = "default#policy"
-	if _, err := auth.RequestApproval(in); err == nil {
+	if _, err := auth.Authorize(in); err == nil {
 		t.Fatal("slot tenant accepted")
 	}
 }
 
 func TestManifestLifecycle(t *testing.T) {
-	auth, ap := newApprovalAuthority(t)
+	auth := newTestAuthority(t)
 	keys, _ := auth.TrustKeys("default")
 	polKey := pub(t, keys.PolicyKey)
 	m, err := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
@@ -169,52 +161,46 @@ func TestManifestLifecycle(t *testing.T) {
 	if err := m.Verify(polKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-2", Profile: "engagement"}); !errors.Is(err, responseauth.ErrManifestNeedsApproval) {
-		t.Fatalf("initial engagement without approval: %v", err)
+	if _, err := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-2", Profile: "engagement"}); !errors.Is(err, responseauth.ErrManifestNeedsRoute) {
+		t.Fatalf("initial engagement without a signed change: %v", err)
 	}
 	same, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1", Profile: "engagement"})
 	if same.Seq != 1 || same.Profile != "respond" {
-		t.Fatalf("a raise without approval changed the manifest: %+v", same)
+		t.Fatalf("a raise without a signed change changed the manifest: %+v", same)
 	}
 	narrow, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1", Profile: "monitor"})
 	if narrow.Seq != 2 || narrow.Profile != "monitor" || narrow.Verify(polKey) != nil {
 		t.Fatalf("narrowing: %+v", narrow)
 	}
 
-	// Lifting monitor-only raises to respond when the owner's approval is used.
-	allow := &responseauth.ApprovalRequestInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation, Targets: []string{"ep-1"},
+	// Lifting monitor-only raises to respond when the allow-isolation grant is signed.
+	allow := &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation, Targets: []string{"ep-1"},
 		Payload: routedPayload("/api/v1/endpoints/allow-isolation", map[string]interface{}{"endpoint_id": "ep-1", "reason": "lab", "revision": 1}, []string{"ep-1"})}
-	approveAndConsume(t, auth, ap, allow)
+	authorizeGrants(t, auth, allow)
 	raised, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
 	if raised.Seq != 3 || raised.Profile != "respond" {
 		t.Fatalf("after allow-isolation: %+v", raised)
 	}
 
-	// Engagement only through a capability_change approval.
-	change := &responseauth.ApprovalRequestInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindCapability, Targets: []string{"ep-1"},
+	// Engagement only through a signed capability change.
+	change := &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindCapability, Targets: []string{"ep-1"},
 		Payload: routedPayload("/api/v1/endpoints/capabilities", map[string]interface{}{"endpoint_id": "ep-1", "profile": "engagement", "reason": "pentest"}, []string{"ep-1"})}
-	v, err := auth.RequestApproval(change)
+	v, err := auth.Authorize(change)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(v.Summary, "engagement") {
 		t.Fatalf("summary %q does not name the profile", v.Summary)
 	}
-	if _, err := auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: v.ID, Decision: "approve", Assertion: ap.Assert(v.Challenge, "approve")}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := auth.ConsumeApproval(&responseauth.ApprovalConsumeRequest{ID: v.ID, TenantID: "default", Requester: "admin", Kind: change.Kind, Digest: digestOf(change.Payload), Targets: change.Targets}); err != nil {
-		t.Fatal(err)
-	}
 	eng, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
 	if eng.Seq != 4 || eng.Profile != "engagement" || !eng.Has(response.CapScript) || eng.Verify(polKey) != nil {
-		t.Fatalf("after capability approval: %+v", eng)
+		t.Fatalf("after the capability change: %+v", eng)
 	}
 }
 
-func TestIsolationExceptionsAreApprovedWithTheIsolation(t *testing.T) {
-	auth, _ := newApprovalAuthority(t)
-	mk := func(baselines interface{}, route string, targets []string) *responseauth.ApprovalRequestInput {
+func TestIsolationExceptionsAreSignedWithTheIsolation(t *testing.T) {
+	auth := newTestAuthority(t)
+	mk := func(baselines interface{}, route string, targets []string) *responseauth.AuthorizeInput {
 		body := map[string]interface{}{"endpoint_id": targets[0]}
 		if route == "/api/v1/endpoints/isolate-bulk" {
 			body = map[string]interface{}{"scope": "ids", "ids": targets}
@@ -224,10 +210,10 @@ func TestIsolationExceptionsAreApprovedWithTheIsolation(t *testing.T) {
 			fields["baselines"] = baselines
 		}
 		raw, _ := json.Marshal(fields)
-		return &responseauth.ApprovalRequestInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation, Targets: targets, Payload: raw}
+		return &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation, Targets: targets, Payload: raw}
 	}
 	dns := []response.IsolationBaseline{{Endpoints: []string{"ep-1"}, Rules: []response.IsolationRule{{Destination: "10.0.0.53", Port: 53, Protocol: "udp", Service: "dns"}}}}
-	v, err := auth.RequestApproval(mk(dns, "/api/v1/endpoints/isolate", []string{"ep-1"}))
+	v, err := auth.Authorize(mk(dns, "/api/v1/endpoints/isolate", []string{"ep-1"}))
 	if err != nil || !strings.Contains(v.Summary, "exceptions: dns udp/53 10.0.0.53") {
 		t.Fatalf("summary %+v %v", v, err)
 	}
@@ -240,24 +226,24 @@ func TestIsolationExceptionsAreApprovedWithTheIsolation(t *testing.T) {
 		"protocol any":          []response.IsolationBaseline{{Endpoints: []string{"ep-1"}, Rules: []response.IsolationRule{{Destination: "10.0.0.53", Port: 53, Protocol: "any", Service: "dns"}}}},
 	}
 	for name, b := range bad {
-		if _, err := auth.RequestApproval(mk(b, "/api/v1/endpoints/isolate", []string{"ep-1"})); err == nil {
+		if _, err := auth.Authorize(mk(b, "/api/v1/endpoints/isolate", []string{"ep-1"})); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
 	}
 	// A release cannot carry exceptions, and no other top-level member passes.
 	rel := mk(dns, "/api/v1/endpoints/isolate", []string{"ep-1"})
 	rel.Payload = []byte(strings.Replace(string(rel.Payload), "/api/v1/endpoints/isolate", "/api/v1/endpoints/unisolate", 1))
-	if _, err := auth.RequestApproval(rel); err == nil {
+	if _, err := auth.Authorize(rel); err == nil {
 		t.Fatal("a release with exceptions accepted")
 	}
 	extra := isolateRequest()
 	extra.Payload = []byte(`{"body":{"endpoint_id":"ep-1"},"route":"/api/v1/endpoints/isolate","targets":["ep-1"],"zzz":1}`)
-	if _, err := auth.RequestApproval(extra); err == nil {
+	if _, err := auth.Authorize(extra); err == nil {
 		t.Fatal("an unknown payload member accepted")
 	}
 	upper := isolateRequest()
 	upper.Payload = []byte(`{"body":{"Endpoint_id":"ep-1"},"route":"/api/v1/endpoints/isolate","targets":["ep-1"]}`)
-	if _, err := auth.RequestApproval(upper); err == nil {
+	if _, err := auth.Authorize(upper); err == nil {
 		t.Fatal("an upper-case key accepted")
 	}
 	// The detector's narrow grant carries the host's own exceptions only.

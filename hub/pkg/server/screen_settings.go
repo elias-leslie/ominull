@@ -14,8 +14,8 @@ package server
 //
 // Turning ask-first on applies at once. Turning it off (or dropping an
 // override so a machine follows a fleet default that is off) loosens safety,
-// so it waits for the owner's tap through the hub-policy approval, as raising
-// the remote shell limits does: agents hold the admin key.
+// so the authority authorizes it and the audit records it, as raising the
+// remote shell limits does.
 
 import (
 	"encoding/json"
@@ -216,7 +216,7 @@ func (s *Server) putScreenSettings(w http.ResponseWriter, r *http.Request, endpo
 			c.loosens = []string{"asking the person at the keyboard first"}
 		}
 	}
-	approvalID, ok := s.policyApproved(w, r, c)
+	approvalID, ok := s.policyAuthorized(w, r, c)
 	if !ok {
 		return
 	}
@@ -231,7 +231,7 @@ func (s *Server) putScreenSettings(w http.ResponseWriter, r *http.Request, endpo
 	how := "tightened"
 	switch {
 	case approvalID != "":
-		how = "loosened with owner approval " + approvalID
+		how = "loosened, authorization " + approvalID
 	case was == now:
 		how = "rewritten"
 	}

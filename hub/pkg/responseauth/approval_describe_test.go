@@ -2,14 +2,13 @@ package responseauth
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
 	"ominull/hub/pkg/response"
 )
 
-// The owner sees a staged rollout as staged, worked out from the payload.
+// A staged rollout reads as staged as staged, worked out from the payload.
 func TestDescribeStagedAgentUpdate(t *testing.T) {
 	payload := []byte(`{"route":"/api/v1/agents/update","body":{"all":true,"version":"1.2.0","canary":["ep-1"]},"targets":["ep-1","ep-2","ep-3"]}`)
 	_, summary, err := describeApproval(ActionKindAgentUpdate, payload, []string{"ep-1", "ep-2", "ep-3"}, "admin")
@@ -22,7 +21,7 @@ func TestDescribeStagedAgentUpdate(t *testing.T) {
 	}
 }
 
-// The owner sees a detection-policy change field by field, derived from the
+// A detection-policy change reads field by field, derived from the
 // before and after the digest covers, never from the hub's own words.
 func TestDescribeDetectionPolicy(t *testing.T) {
 	tuning := []string{"detection:tuning"}
@@ -32,9 +31,8 @@ func TestDescribeDetectionPolicy(t *testing.T) {
 		t.Fatalf("action %q summary %q err %v", action, summary, err)
 	}
 
-	// Changes that do not all fit the statement are refused, never cut to
-	// "and N more": eleven tightening numbers ahead of one quiet entry
-	// would otherwise push the quiet entry out of sight.
+	// Changes that do not all fit the summary are cut to an ellipsis (the
+	// digest covers the whole change, and the hub's own audit row has it all).
 	before, after := map[string]interface{}{"quiet_processes": []string{"/usr/sbin/chronyd"}}, map[string]interface{}{"quiet_processes": []string{"/usr/sbin/chronyd", "/usr/bin/curl"}}
 	for _, k := range []string{"admin_fanout_max_hosts", "agent_baseline_days", "agent_upload_factor", "agent_upload_floor_mb", "bandwidth_cooldown_minutes",
 		"bandwidth_min_samples", "beacon_cooldown_minutes", "beacon_min_interval_seconds", "beacon_min_samples", "beacon_min_span_minutes", "first_seen_cooldown_minutes",
@@ -43,7 +41,7 @@ func TestDescribeDetectionPolicy(t *testing.T) {
 	}
 	raw, _ := json.Marshal(map[string]interface{}{"policy": "detection_tuning", "op": "save", "before": before, "after": after})
 	_, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin")
-	if !errors.Is(err, ErrApprovalTooLong) || summary != "" {
+	if err != nil || len([]rune(summary)) != approvalMaxSummary || !strings.HasSuffix(summary, "…") {
 		t.Fatalf("an oversized change was described as %q (err %v)", summary, err)
 	}
 	// Short enough, every change shows in full.

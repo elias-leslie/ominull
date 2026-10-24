@@ -60,8 +60,8 @@ length, then port/protocol), deny on a tie; no match means not trusted.
   the compiled allow list, which part agents enforce, and one decision.
 - `POST /api/v1/endpoints/isolate` takes `mode`: `full` reaches only the hub
   and refuses `allow_ips`; `selective` adds the endpoint's effective policy to
-  `allow_ips` before the owner approves, so the signed grant carries exactly
-  what was approved. Without `mode` only the request's own `allow_ips` apply.
+  `allow_ips` in the same request before the authority signs, so the signed
+  grant carries exactly the list the agent enforces. Without `mode` only the request's own `allow_ips` apply.
   Detector isolation is always full.
 
 Agents from 1.8.65 report `allow_prefixes` and enforce address ranges in the
@@ -72,11 +72,8 @@ policy's merged prefixes; a request may name a range only for one endpoint
 (bulk isolation names addresses). An older agent refuses a grant naming a
 range, so for it only addresses a rule names (`ip`, or a `/32` / `/128`) and
 the policy allows are added, a trusted range is listed as not enforced in the
-approval summary and stays closed, and a request naming a range is refused
-before approval. The expansion is kept
-under the approval id, so a rule changed while the owner decides does not
-void the approval (after a hub restart it is expanded again and refused if it
-differs). Port- or
+audit summary and stays closed, and a request naming a range is refused
+before the authority signs it. Port- or
 direction-scoped allows are withheld for the same reason. Each isolation gets
 an id; the fabric as it stood is recorded under it
 (`ISOLATION_FABRIC_SNAPSHOT`), and a rule created or deleted while it is in

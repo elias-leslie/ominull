@@ -13,7 +13,7 @@ class ReleaseHeaders(unittest.TestCase):
         api = re.search(r'^api\(\) \{.*?^\}', source, re.M | re.S)
         assert api is not None
         hdr = re.search(r'^hdr\(\) \{.*?^\}', source, re.M | re.S)
-        helper = Path(__file__).with_name('owner-approval.sh').read_text()
+        helper = Path(__file__).with_name('hub-request.sh').read_text()
         config = re.search(r'^hub_curl_config\(\) \{.*?^\}', helper, re.M | re.S)
         assert config is not None
         script = '''set -eu

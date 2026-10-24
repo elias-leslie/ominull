@@ -193,7 +193,7 @@ func TestASaveWithoutKnownWorkloadsKeepsThem(t *testing.T) {
 	// test owner approves it.
 	sheet := httptest.NewRequest(http.MethodPost, "/api/v1/detection/tuning", strings.NewReader(`{"off_hours_start":23}`))
 	sheet.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, srv, srv.Handler(), sheet, `{"off_hours_start":23}`); w.Code != http.StatusOK {
+	if w := serveAuthorized(t, srv.Handler(), sheet); w.Code != http.StatusOK {
 		t.Fatalf("sheet-shaped save = %d %s", w.Code, w.Body.String())
 	}
 	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 1 || got.OffHoursStart != 23 {

@@ -166,8 +166,8 @@ verify_sig() {
     openssl dgst -sha256 -verify "${verify_pub}" -signature "$2" "$1" >/dev/null 2>&1
 }
 
-# A command backend may put a whole run behind one approval (Nightshift's
-# nightshift-release-signer: the owner approves once with a passkey):
+# A command backend may put a whole run behind one session (Nightshift's
+# nightshift-release-signer signs it without asking anyone):
 #   CMD begin release VERSION NAME[=SHA256]...   or   CMD begin trust TENANT FILE
 # prints a session token that later "CMD sign" calls get as
 # OMINULL_SIGNING_SESSION; "CMD end" closes it. A signer without sessions exits
@@ -179,7 +179,7 @@ signing_begin() {
     case "${rc}" in
     0) OMINULL_SIGNING_SESSION="${token}"; export OMINULL_SIGNING_SESSION ;;
     64) ;;
-    *) echo "[-] The signer opened no signing session (not approved, or it failed)." >&2; exit 1 ;;
+    *) echo "[-] The signer opened no signing session (it refused, or it failed)." >&2; exit 1 ;;
     esac
 }
 signing_end() {

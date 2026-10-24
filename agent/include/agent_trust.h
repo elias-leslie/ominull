@@ -9,14 +9,14 @@
  *
  *   keys       three ed25519 public keys, pinned on first contact (or at
  *              enrollment) and never replaced silently afterwards:
- *                response     owner-approved grants (isolation, release,
+ *                response     authority-signed grants (isolation, release,
  *                             agent update, mesh quarantine, terminal, ...)
  *                auto_isolate the detector's narrow key: isolate only
  *                policy       capability manifests
  *   manifest   which actions this endpoint accepts at all (monitor, respond,
  *              engagement), signed by the policy key, sequence-numbered
  *   grants     EndpointGrant V2 over a typed payload (route, body, targets),
- *              the same bytes the owner approved; per-slot monotonic
+ *              the same bytes the authority signed; per-slot monotonic
  *   state      what this host is authorized to enforce right now, durable,
  *              so a restart or a hub that changes its mind does not move it
  *
@@ -86,7 +86,7 @@ static const char* const TRUST_KEY_FIELDS[TRUST_KEY_COUNT] = {"response_key", "a
 /* ---------------------------------------------------------------------------
  * Strict, bounded JSON reading.
  *
- * The payload an agent acts on is the payload the owner approved, and the
+ * The payload an agent acts on is the payload the authority signed, and the
  * authority read it with Go's decoder. Two readers that disagree about what a
  * document says are an attack surface: duplicate keys (Go keeps the last),
  * escaped keys ("rout\u0065" is "route" to Go) and case variants (Go matches
@@ -435,7 +435,7 @@ typedef struct {
 } TrustMeshSlot;
 
 /* One isolation exception (a baseline permit): the same shape the hub's
- * baseline policy resolves to, bound into the isolation the owner approved. */
+ * baseline policy resolves to, bound into the isolation the authority signed. */
 typedef struct {
     char service[16];
     char destination[64];
@@ -1647,7 +1647,7 @@ typedef struct {
 
 /* Trust_ParseBaselines finds this host's isolation exceptions in the signed
  * payload: "baselines":[{"endpoints":[...],"rules":[...]}]. The hub binds them
- * when it asks for the approval, so the owner approves exactly these holes and
+ * when it asks for the approval, so the grant covers exactly these holes and
  * the heartbeat's copy is never used for a signed isolation. No entry for this
  * host means none: hub and loopback only. */
 static inline const char* Trust_ParseBaselines(const char* payload, const char* end, const char* self, TrustAction* a) {
@@ -1686,7 +1686,7 @@ static inline const char* Trust_ParseBaselines(const char* payload, const char* 
     }
 }
 
-/* Trust_ParseAction reads the payload the owner approved and works out what it
+/* Trust_ParseAction reads the payload the authority signed and works out what it
  * does to this host. kind is the grant's signed action kind; the route must
  * belong to it, so a grant for one kind can never carry another's action. */
 static inline const char* Trust_ParseAction(const char* payload, size_t len, const char* kind, const char* grantEndpoint,
@@ -2058,7 +2058,7 @@ static inline const char* Trust_UpdateAuthorized(const TrustContext* t, const ch
     TrustAction a;
     why = Trust_ParseAction(text, plen, g.action_kind, g.endpoint_id, t->endpoint_id, &a);
     if (why) return why;
-    if (strcmp(a.version, version) != 0) return "the owner approved a different version than the one offered";
+    if (strcmp(a.version, version) != 0) return "the authority signed a different version than the one offered";
     if (!Trust_Allows(t, "agent_update")) return "this endpoint's manifest does not allow agent updates";
     return NULL;
 }

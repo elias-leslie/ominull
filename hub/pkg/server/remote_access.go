@@ -8,8 +8,7 @@ package server
 // hostname.
 //
 // Switching it on applies at once and closes the machine's open sessions.
-// Switching it off loosens safety, so it waits for the owner's tap through the
-// hub-policy approval (agents hold the admin key).
+// Switching it off loosens safety, so the authority authorizes it and the audit records it.
 
 import (
 	"encoding/json"
@@ -160,7 +159,7 @@ func (s *Server) putRemoteAccess(w http.ResponseWriter, r *http.Request, endpoin
 	if !now {
 		c.loosens = []string{"remote terminal and screen switched off"}
 	}
-	approvalID, ok := s.policyApproved(w, r, c)
+	approvalID, ok := s.policyAuthorized(w, r, c)
 	if !ok {
 		return
 	}
@@ -189,7 +188,7 @@ func (s *Server) putRemoteAccess(w http.ResponseWriter, r *http.Request, endpoin
 	}
 	how := "switched off"
 	if approvalID != "" {
-		how = "switched back on with owner approval " + approvalID
+		how = "switched back on, authorization " + approvalID
 	}
 	s.audit(r, remoteAccessAudit, target, how+": "+wording+"; credential "+credentialOf(r)+" (unverified)")
 	view := s.remoteAccessView(after, endpointID)

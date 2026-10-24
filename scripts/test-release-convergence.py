@@ -36,9 +36,8 @@ def status(online=("required",), offline=("sleeping",), outdated=(), issues=(), 
 
 
 class ReleaseConvergence(unittest.TestCase):
-    def release(self, responses, *, canary="", wait=True, approval=False):
+    def release(self, responses, *, canary="", wait=True):
         requests = []
-        approvals = []
         snapshots = copy.deepcopy(responses)
 
         class Handler(BaseHTTPRequestHandler):
@@ -46,12 +45,6 @@ class ReleaseConvergence(unittest.TestCase):
                 pass
 
             def do_GET(self):
-                if self.path.startswith("/api/v1/approvals?"):
-                    approvals.append(self.path)
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"id": "ap-1", "state": "approved"}).encode())
-                    return
                 requests.append(("GET", self.path))
                 response = snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
                 self.send_response(200)
@@ -60,13 +53,6 @@ class ReleaseConvergence(unittest.TestCase):
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                if approval and self.headers.get("X-Approval-ID") != "ap-1":
-                    approvals.append("held")
-                    self.send_response(202)
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"approval_id": "ap-1", "state": "pending", "action": "Update agents",
-                                                 "summary": "x", "expires_at": "soon"}).encode())
-                    return
                 requests.append(("POST", body))
                 self.send_response(200)
                 self.end_headers()
@@ -92,15 +78,12 @@ class ReleaseConvergence(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
-        self.approvals = approvals
         return result, requests
 
-    def test_agent_update_waits_for_the_owner_then_resubmits_once(self):
-        result, requests = self.release([status(outdated=("required",)), status()], approval=True)
+    def test_agent_update_is_one_request_with_no_approval(self):
+        result, requests = self.release([status(outdated=("required",)), status()])
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("Owner approval needed", result.stderr)
-        self.assertEqual(self.approvals[0], "held")
-        self.assertTrue(self.approvals[1].startswith("/api/v1/approvals?wait=20&id=ap-1"))
+        self.assertNotIn("approval", (result.stderr + result.stdout).lower())
         self.assertEqual([r for r in requests if r[0] == "POST"], [("POST", {"all": True, "version": VERSION})])
 
     def test_offline_pending_does_not_block_online_convergence(self):
@@ -227,13 +210,12 @@ class ReleaseConvergence(unittest.TestCase):
         self.assertIn("online cohort converged", result.stdout)
         self.assertEqual(len([method for method, _ in requests if method == "POST"]), 2)
 
-    def test_staged_rollout_needs_one_approval(self):
+    def test_staged_rollout_is_one_request(self):
         result, requests = self.release([
             status(outdated=("required",), staged=""), status(staged="canary"), status(staged="released"),
-        ], canary="required", approval=True)
+        ], canary="required")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("Hub released the fleet", result.stdout)
-        self.assertEqual(self.approvals.count("held"), 1)
         self.assertEqual([r for r in requests if r[0] == "POST"],
                          [("POST", {"all": True, "version": VERSION, "canary": ["required"]})])
 

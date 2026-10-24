@@ -62,7 +62,7 @@ func keyOf(t *testing.T, h string) ed25519.PublicKey {
 	return b
 }
 
-// signTrustBundle stands in for the owner: a test release key replaces the
+// signTrustBundle stands in for the release signer: a test release key replaces the
 // pinned one, the hub's statement is signed with it and posted.
 func signTrustBundle(t *testing.T, srv *Server, keys *response.TrustKeys) string {
 	t.Helper()
@@ -134,7 +134,7 @@ func TestAgentTrustDelivery(t *testing.T) {
 	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-b", ResponseCapabilities: `{"isolate":true}`})
 	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-pve", ResponseCapabilities: `{"isolate":true}`})
 	monitorOnly(t, srv, "ep-pve")
-	auth := ownerOf(t, srv).auth
+	auth := authorityOf(t, srv).auth
 	keys, _ := auth.TrustKeys("default")
 
 	// A legacy agent (no trust report) gets none of it.
@@ -177,12 +177,12 @@ func TestAgentTrustDelivery(t *testing.T) {
 		t.Fatalf("monitor-only manifest %q, want monitor", m.Profile)
 	}
 
-	// The owner isolates ep-a: the grant reaches ep-a, verifiable by the agent.
+	// An isolation of ep-a: the grant reaches ep-a, verifiable by the agent.
 	h := srv.Handler()
 	body := `{"endpoint_id":"ep-a","allow_ips":["10.0.0.9"],"force":true}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/isolate", strings.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, srv, h, req, body); w.Code != http.StatusOK {
+	if w := serveAuthorized(t, h, req); w.Code != http.StatusOK {
 		t.Fatalf("isolate: %d %s", w.Code, w.Body.String())
 	}
 	pinned := &response.AgentTrustReport{V: 1, Keys: "pinned", ResponseKey: true, AutoIsolateKey: true, PolicyKey: true, ManifestSeq: m.Seq, Profile: "respond", IsoSeen: 1, MeshSeen: 1}
@@ -213,7 +213,7 @@ func TestAgentTrustDelivery(t *testing.T) {
 	mbody := `{"target_ip":"10.0.0.66","reason":"beaconing"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/mesh/quarantine", strings.NewReader(mbody))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, srv, h, req, mbody); w.Code >= 300 {
+	if w := serveAuthorized(t, h, req); w.Code >= 300 {
 		t.Fatalf("mesh: %d %s", w.Code, w.Body.String())
 	}
 	mg := grantsIn(t, trustBeat(t, srv, "ep-b", &response.AgentTrustReport{V: 1, Keys: "pinned", ResponseKey: true, AutoIsolateKey: true, PolicyKey: true, IsoSeen: 1, MeshSeen: 1}))
@@ -228,11 +228,11 @@ func TestAgentTrustDelivery(t *testing.T) {
 		t.Fatalf("auto grants %+v", ag)
 	}
 
-	// An agent update the owner approved carries its grant.
+	// An authorized agent update carries its grant.
 	ubody := `{"endpoint_ids":["ep-a"],"version":"9.9.9"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/update", strings.NewReader(ubody))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, srv, h, req, ubody); w.Code >= 300 {
+	if w := serveAuthorized(t, h, req); w.Code >= 300 {
 		t.Fatalf("update: %d %s", w.Code, w.Body.String())
 	}
 	ug := srv.updateGrantFor("ep-a", "9.9.9")
@@ -288,12 +288,12 @@ func TestMonitorOnlyNarrowsManifest(t *testing.T) {
 	if err := json.Unmarshal(out["capability_manifest"], &n); err != nil || n.Profile != "monitor" || n.Seq != m.Seq+1 {
 		t.Fatalf("after monitor-only: %+v %v", n, err)
 	}
-	// Lifting it is the owner's raise back to respond.
+	// Lifting it is a raise back to respond, signed at once.
 	cur, _ := store.GetEndpoint("ep-h")
 	body := fmt.Sprintf(`{"endpoint_id":"ep-h","reason":"not a hypervisor","revision":%d}`, cur.ResponseProfileRev)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/allow-isolation", strings.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, srv, srv.Handler(), req, body); w.Code != http.StatusOK {
+	if w := serveAuthorized(t, srv.Handler(), req); w.Code != http.StatusOK {
 		t.Fatalf("allow-isolation: %d %s", w.Code, w.Body.String())
 	}
 	out = trustBeat(t, srv, "ep-h", &response.AgentTrustReport{V: 1, Keys: "pinned", ManifestSeq: n.Seq, Profile: "monitor"})
@@ -307,19 +307,16 @@ func TestMonitorOnlyNarrowsManifest(t *testing.T) {
 	}
 }
 
-func TestCapabilityChangeNeedsOwner(t *testing.T) {
+func TestCapabilityChangeIsAuthorizedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-c", ResponseCapabilities: `{"isolate":true}`})
 	trustBeat(t, srv, "ep-c", &response.AgentTrustReport{V: 1, Keys: "missing"})
 	body := `{"endpoint_id":"ep-c","profile":"engagement","reason":"lab exercise"}`
-	if w := adminPost(srv, "/api/v1/endpoints/capabilities", body, ""); w.Code != http.StatusAccepted {
-		t.Fatalf("want 202 approval, got %d %s", w.Code, w.Body.String())
-	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/capabilities", strings.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	w := serveApproved(t, srv, srv.Handler(), req, body)
+	w := serveAuthorized(t, srv.Handler(), req)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"script"`) {
 		t.Fatalf("capability change: %d %s", w.Code, w.Body.String())
 	}
@@ -342,7 +339,7 @@ func TestCapabilityRaiseKeepsMonitorOnly(t *testing.T) {
 	body := `{"endpoint_id":"ep-m","profile":"engagement","reason":"lab exercise"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/capabilities", strings.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
-	w := serveApproved(t, srv, srv.Handler(), req, body)
+	w := serveAuthorized(t, srv.Handler(), req)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "still_monitor_only") {
 		t.Fatalf("capability change: %d %s", w.Code, w.Body.String())
 	}
@@ -378,7 +375,7 @@ func TestIsolationGrantCarriesItsExceptions(t *testing.T) {
 	}
 
 	// A failed action withdraws the grants kept for it.
-	failing := srv.ownerApproved(srv.resolveIsolate, func(w http.ResponseWriter, r *http.Request) {
+	failing := srv.authorized(srv.resolveIsolate, func(w http.ResponseWriter, r *http.Request) {
 		if len(grantedTargets(r)) == 0 {
 			t.Error("handler ran without its grants")
 		}
@@ -391,7 +388,7 @@ func TestIsolationGrantCarriesItsExceptions(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/isolate", strings.NewReader(body))
 	req.Header.Set("X-API-Key", "mock_admin_token")
 	req.Header.Set("X-Role", "admin")
-	if w := serveApproved(t, srv, srv.authMiddleware(failing), req, body); w.Code != http.StatusInternalServerError {
+	if w := serveAuthorized(t, srv.authMiddleware(failing), req); w.Code != http.StatusInternalServerError {
 		t.Fatalf("failing isolate: %d %s", w.Code, w.Body.String())
 	}
 	if left := grantsIn(t, trustBeat(t, srv, "ep-y", pinned)); len(left) != 0 {
@@ -449,7 +446,7 @@ func TestPendingGrantsAreReconciled(t *testing.T) {
 	}
 }
 
-func TestApprovedAddressesAreNormalizedBeforeSigning(t *testing.T) {
+func TestAuthorizedAddressesAreNormalizedBeforeSigning(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
 	nb, allow, ok := normalizedAllowIPs(rec, []byte(`{"allow_ips":[" 10.0.0.9 ","::ffff:10.0.0.8"],"endpoint_id":"ep-1"}`), []string{" 10.0.0.9 ", "::ffff:10.0.0.8"}, true)
@@ -477,7 +474,7 @@ func TestMonitorScriptsProfile(t *testing.T) {
 		body := `{"endpoint_id":"ep-h","profile":"` + profile + `","reason":"signed upkeep"}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/capabilities", strings.NewReader(body))
 		req.Header.Set("X-API-Key", "mock_admin_token")
-		w := serveApproved(t, srv, srv.Handler(), req, body)
+		w := serveAuthorized(t, srv.Handler(), req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("capability change %s: %d %s", profile, w.Code, w.Body.String())
 		}
@@ -517,6 +514,6 @@ func TestMonitorScriptsProfile(t *testing.T) {
 	trustBeat(t, srv, "ep-r", &response.AgentTrustReport{V: 1, Keys: "missing"})
 	got, err := srv.responseAuth.EndpointManifest(context.Background(), &responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-r", Profile: "monitor-scripts"})
 	if err != nil || got.Profile != "respond" {
-		t.Fatalf("respond -> monitor-scripts was signed without approval: %+v %v", got, err)
+		t.Fatalf("respond -> monitor-scripts was signed by the manifest request alone: %+v %v", got, err)
 	}
 }

@@ -28,7 +28,7 @@ usage() {
 
 Options:
   --version X.Y.Z  release version (otherwise use VERSION)
-  --canary IDS     comma-separated endpoint IDs; one approval, the hub rolls these,
+  --canary IDS     comma-separated endpoint IDs; one request, the hub rolls these,
                    then the rest once they are healthy (halts if not)
   --skip-tests     skip local quality tests (never skips signing or live checks)
   --hub-only       build, sign, install hub, and publish artifacts; do not roll agents
@@ -199,7 +199,7 @@ api() {
 }
 
 
-. "${ROOT_DIR}/scripts/owner-approval.sh"
+. "${ROOT_DIR}/scripts/hub-request.sh"
 hub_url_safe "${HUB_URL}" || exit 1
 
 target_json() {
@@ -209,7 +209,7 @@ target_json() {
 queue() {
     local ids="$1" canary="${2:-}" body
     if [ -n "${canary}" ]; then
-        # One approval for the release: the hub queues the canaries and holds
+        # One request for the release: the hub queues the canaries and holds
         # the rest until the canaries are healthy (or halts the rollout).
         body="$(jq -cn --arg version "${VERSION}" --argjson canary "$(target_json "${canary}")" \
             '{all:true,version:$version,canary:$canary}')"
@@ -219,9 +219,8 @@ queue() {
     else
         body="$(jq -cn --arg version "${VERSION}" '{all:true,version:$version}')"
     fi
-    # The hub holds an agent update for the owner's phone approval (202), then
-    # accepts the same body once with X-Approval-ID.
-    owner_approved "${HUB_URL}" OMINULL_ADMIN_KEY /api/v1/agents/update "${body}"
+    # The hub authorizes the agent update itself.
+    hub_post "${HUB_URL}" OMINULL_ADMIN_KEY /api/v1/agents/update "${body}"
 }
 
 validate_status() {
@@ -368,7 +367,7 @@ fi
 
 if [ -n "${CANARY_IDS}" ]; then
     # A hub without staged rollouts would ignore the canary field and update
-    # everything at once, so it gets two approvals instead.
+    # everything at once, so it gets two requests instead.
     queue_report "${CANARY_IDS}"
     if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then wait_for "${CANARY_IDS}"; fi
     if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then

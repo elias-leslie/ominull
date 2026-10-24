@@ -20,7 +20,7 @@ import (
 // capability manifest; the signed manifest pinned at enrollment replaces this
 // setting as its source once agents enforce it). The setting is refused while
 // the endpoint is isolated (releasing an isolation takes the owner), and every
-// change bumps a revision, so an owner approval to lift it covers exactly the
+// change bumps a revision, so an authorization to lift it covers exactly the
 // setting the owner saw.
 //
 // The hub refuses to record an isolation for such an endpoint at every entry
@@ -35,10 +35,10 @@ var ErrMonitorOnly = errors.New("endpoint is monitor-only: host isolation is ref
 
 // ErrIsolated refuses making an isolated endpoint monitor-only: that would lift
 // the isolation without the owner.
-var ErrIsolated = errors.New("endpoint is isolated: release the isolation first (owner-approved), then make it monitor-only")
+var ErrIsolated = errors.New("endpoint is isolated: release the isolation first, then make it monitor-only")
 
 // ErrProfileChanged refuses lifting a monitor-only setting that changed since
-// the revision the caller (and the owner's approval) named.
+// the revision the caller (and the authorization) named.
 var ErrProfileChanged = errors.New("the monitor-only setting changed since that revision")
 
 // monitorOnlySQL is 1 for a monitor-only endpoints row and 0 otherwise, never

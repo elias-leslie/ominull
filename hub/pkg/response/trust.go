@@ -20,7 +20,7 @@ import (
 // every byte of the canonical forms below.
 
 // Enforcement kinds. An isolation change, an agent update and a mesh
-// quarantine are owner-approved (tenant response key). The detector's
+// quarantine are authority-signed (tenant response key). The detector's
 // automatic isolation has its own narrow key and kind.
 const (
 	ActionKindIsolationChange ActionKind = "isolation_change"
@@ -28,7 +28,7 @@ const (
 	ActionKindMeshQuarantine  ActionKind = "mesh_quarantine"
 	ActionKindAutoIsolate     ActionKind = "auto_isolate"
 	ActionKindCapability      ActionKind = "capability_change"
-	// ActionKindDetectionPolicy is an owner-approved loosening of the hub's
+	// ActionKindDetectionPolicy is an authority-signed loosening of the hub's
 	// own detection policy (tuning, exclusions). The hub applies it; no agent
 	// ever receives a grant of this kind.
 	ActionKindDetectionPolicy ActionKind = "detection_policy"
@@ -47,7 +47,7 @@ const (
 	CapTerminal = "terminal"
 	CapScript   = "script"
 	// CapScreen is remote screen view/control. It sits beside the terminal:
-	// each session still takes its own owner approval.
+	// each session still takes its own authorization.
 	CapScreen = "screen"
 )
 
@@ -320,7 +320,7 @@ func (r *AgentTrustReport) HostKey(signerKeyID string) *HostKeyReport {
 }
 
 // IsolationBaseline binds the exceptions an isolation leaves open (DNS, DHCP,
-// NTP, custom) into the payload the owner approves, for the endpoints named.
+// NTP, custom) into the payload the authority signs, for the endpoints named.
 // Agents use only these while isolated, never the heartbeat's copy. Field
 // order is alphabetical so the struct encodes canonically.
 type IsolationBaseline struct {

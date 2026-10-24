@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// Opening an enrolment window waits for the owner: the first request creates
-// nothing, the approved retry opens exactly the window approved, and closing
-// one needs no approval.
-func TestOpeningAnEnrolmentWindowWaitsForTheOwner(t *testing.T) {
+// Opening an enrolment window is a loosening the authority signs at once: the
+// first request opens exactly the window asked for and the audit says it was
+// authorized; closing one needs no authorization.
+func TestOpeningAnEnrolmentWindowIsAuthorizedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -20,39 +20,34 @@ func TestOpeningAnEnrolmentWindowWaitsForTheOwner(t *testing.T) {
 	req.Header.Set("X-API-Key", "mock_admin_token")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"approval_id"`) {
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "approval_id") {
 		t.Fatalf("first request: %d %s", w.Code, w.Body.String())
 	}
-	if windows, _ := store.ListEnrolmentWindows(); len(windows) != 0 {
-		t.Fatalf("a window opened before the owner approved: %+v", windows)
+	windows, _ := store.ListEnrolmentWindows()
+	if len(windows) != 1 || windows[0].MaxUses != 2 || len(windows[0].CIDRs) != 1 || windows[0].CIDRs[0] != "10.0.0.0/24" {
+		t.Fatalf("the window asked for did not open: %+v", windows)
 	}
-	var pending struct {
-		ID      string `json:"approval_id"`
-		Summary string `json:"summary"`
+	var out struct {
+		Window struct {
+			ID string `json:"id"`
+		} `json:"window"`
 	}
-	_ = json.Unmarshal(w.Body.Bytes(), &pending)
-	if !strings.Contains(pending.Summary, "10.0.0.0/24") || !strings.Contains(pending.Summary, "at most 2 installs") {
-		t.Fatalf("the owner is not shown what opens: %q", pending.Summary)
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out.Window.ID == "" {
+		t.Fatalf("no window in the answer: %s", w.Body.String())
+	}
+	logs, _ := store.ListAuditLogs("", 50)
+	authorized := false
+	for _, l := range logs {
+		if l.Action == "ACTION_AUTHORIZED" && strings.Contains(l.Details, "10.0.0.0/24") {
+			authorized = true
+		}
+	}
+	if !authorized {
+		t.Fatalf("opening the window left no ACTION_AUTHORIZED row: %+v", logs)
 	}
 
-	// The approval covers this window only: a wider one is refused with it.
-	ownerOf(t, srv).approve(t, pending.ID)
-	wider := httptest.NewRequest(http.MethodPost, "/api/v1/enrolment/windows", strings.NewReader(`{"label":"reinstall","cidrs":["10.0.0.0/16"],"hours":2,"max_uses":2}`))
-	wider.Header.Set("X-API-Key", "mock_admin_token")
-	wider.Header.Set(approvalHeader, pending.ID)
-	w = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, wider)
-	if w.Code == http.StatusOK {
-		t.Fatalf("a wider window was opened under the approval: %s", w.Body.String())
-	}
-
-	out := openTestWindow(t, srv, body)
-	win, _ := out["window"].(map[string]interface{})
-	id, _ := win["id"].(string)
-	if id == "" {
-		t.Fatalf("no window: %v", out)
-	}
-	del := httptest.NewRequest(http.MethodDelete, "/api/v1/enrolment/windows?id="+id, nil)
+	del := httptest.NewRequest(http.MethodDelete, "/api/v1/enrolment/windows?id="+out.Window.ID, nil)
 	del.Header.Set("X-API-Key", "mock_admin_token")
 	w = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, del)

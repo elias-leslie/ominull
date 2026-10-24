@@ -547,7 +547,7 @@ func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuni
 }
 
 // PrepareDetectionTuning normalises and checks a draft without saving it, so a
-// replay, and the owner approving a loosening, judge exactly what a save would
+// replay, and the authority signing a loosening, judge exactly what a save would
 // store.
 func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 	t = t.normalised()
@@ -1087,7 +1087,7 @@ func (t DetectionTuning) IsVouchedPair(path, sha, asn, org, tenancy string) bool
 //
 // ExpiresAt is when the entry stops vouching. A new entry needs one in the
 // future; an entry without one, or past it, vouches for nothing. Moving it
-// later loosens detection and waits for the owner; moving it earlier tightens.
+// later loosens detection and is authorized by the authority; moving it earlier tightens.
 type KnownWorkload struct {
 	Workload      string    `json:"workload"`
 	Owner         string    `json:"owner"`

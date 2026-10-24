@@ -21,7 +21,6 @@ func main() {
 	stateDir := flag.String("state-dir", envOr("OMINULL_AUTH_STATE_DIR", "/var/lib/ominull-response-authority"), "Authority state directory")
 	partition := flag.String("partition", envOr("OMINULL_AUTH_PARTITION", "portable-local"), "Signer partition name")
 	epochFloor := flag.Int64("trust-epoch-floor", envInt("OMINULL_AUTH_TRUST_EPOCH_FLOOR"), "Lowest trust bundle epoch to hand out (raise after a rotation that lost the authority state)")
-	approvers := flag.String("approvers", envOr("OMINULL_AUTH_APPROVERS", responseauth.DefaultApproversPath), "Root-pinned owner approver keys (JSON)")
 	trustStatement := flag.String("trust-statement", "", "Print the trust bundle statement for TENANT (asked of the running authority) and exit")
 	flag.Parse()
 
@@ -55,7 +54,6 @@ func main() {
 	auth, err := responseauth.NewAuthority(responseauth.Config{
 		StateDir:        *stateDir,
 		SignerPartition: *partition,
-		ApproversPath:   *approvers,
 		TrustEpochFloor: *epochFloor,
 	})
 	if err != nil {

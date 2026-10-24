@@ -44,7 +44,7 @@ func TestCanaryUpdateDoesNotPublishToOtherEndpoints(t *testing.T) {
 	}
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(`{"endpoint_ids":["canary"],"version":"1.2.0"}`))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	w := serveApproved(t, s, s.Handler(), r, `{"endpoint_ids":["canary"],"version":"1.2.0"}`)
+	w := serveAuthorized(t, s.Handler(), r)
 	if w.Code != 200 {
 		t.Fatalf("queue: %d %s", w.Code, w.Body.String())
 	}
@@ -110,7 +110,7 @@ func TestUpdateStatusDoesNotCallStaleEndpointOnline(t *testing.T) {
 	}
 }
 
-// One approval covers a staged rollout: the canary is queued at once, the
+// One authorization covers a staged rollout: the canary is queued at once, the
 // rest only after the canary runs the version with clean provenance.
 func TestStagedRolloutReleasesAfterHealthyCanary(t *testing.T) {
 	t.Parallel()
@@ -124,7 +124,7 @@ func TestStagedRolloutReleasesAfterHealthyCanary(t *testing.T) {
 	body := `{"all":true,"version":"1.2.0","canary":["canary"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, s, s.Handler(), r, body); w.Code != 200 {
+	if w := serveAuthorized(t, s.Handler(), r); w.Code != 200 {
 		t.Fatalf("staged queue: %d %s", w.Code, w.Body.String())
 	}
 	queued := func(id string) bool {
@@ -195,7 +195,7 @@ func TestStagedRolloutHaltsOnBadCanary(t *testing.T) {
 	body := `{"endpoint_ids":["canary","fleet-a"],"version":"1.2.0","canary":["canary"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, s, s.Handler(), r, body); w.Code != 200 {
+	if w := serveAuthorized(t, s.Handler(), r); w.Code != 200 {
 		t.Fatalf("staged queue: %d %s", w.Code, w.Body.String())
 	}
 	// The canary runs the version but not from the native package.
@@ -231,7 +231,7 @@ func TestStagedRolloutHaltsOnBadCanary(t *testing.T) {
 	body = `{"endpoint_ids":["fleet-a","canary"],"version":"1.2.0","canary":["fleet-a"]}`
 	r = httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, s, s.Handler(), r, body); w.Code != 200 {
+	if w := serveAuthorized(t, s.Handler(), r); w.Code != 200 {
 		t.Fatalf("second staged queue: %d %s", w.Code, w.Body.String())
 	}
 	s.advanceAgentRollouts(time.Now().Add(rolloutCanaryDeadline + time.Minute))
@@ -256,14 +256,14 @@ func TestPlainUpdateSupersedesStagedRollout(t *testing.T) {
 	body := `{"all":true,"version":"1.2.0","canary":["canary"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, s, s.Handler(), r, body); w.Code != 200 {
+	if w := serveAuthorized(t, s.Handler(), r); w.Code != 200 {
 		t.Fatalf("staged queue: %d %s", w.Code, w.Body.String())
 	}
 	s.agentVersion = "1.3.0" // the hub was upgraded meanwhile
 	body = `{"all":true,"version":"1.3.0"}`
 	r = httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, s, s.Handler(), r, body); w.Code != 200 {
+	if w := serveAuthorized(t, s.Handler(), r); w.Code != 200 {
 		t.Fatalf("plain update: %d %s", w.Code, w.Body.String())
 	}
 	ros, _ := db.AgentRollouts(false, 5)
@@ -296,7 +296,7 @@ func TestStagedRolloutQueuesNoCanaryWhenOneCannotInstall(t *testing.T) {
 	body := `{"endpoint_ids":["a","b","c"],"version":"1.2.0","canary":["a","b"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
 	r.Header.Set("X-API-Key", "mock_admin_token")
-	if w := serveApproved(t, s, s.Handler(), r, body); w.Code != 409 {
+	if w := serveAuthorized(t, s.Handler(), r); w.Code != 409 {
 		t.Fatalf("want 409, got %d %s", w.Code, w.Body.String())
 	}
 	if job, _ := db.GetAgentUpdateJob("a"); job != nil {

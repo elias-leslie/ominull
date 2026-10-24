@@ -153,9 +153,10 @@ func TestTrustRulesNeedAdmin(t *testing.T) {
 	}
 }
 
-// A rule changed while the owner is deciding does not void the approval: the
-// expansion approved is the one enforced.
-func TestSelectiveIsolationPinnedToApproval(t *testing.T) {
+// A selective isolation is signed and enforced with the allow list the fabric
+// expands to at the request; a rule added afterwards does not widen the
+// isolation in force.
+func TestSelectiveIsolationEnforcesTheExpansionSigned(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -164,56 +165,20 @@ func TestSelectiveIsolationPinnedToApproval(t *testing.T) {
 	if _, err := store.CreateTrustRule(trustfabric.Rule{ScopeType: "endpoint", ScopeID: "pos-05", Kind: "ip", Value: "198.51.100.25", Action: "allow"}); err != nil {
 		t.Fatal(err)
 	}
-	h := srv.Handler()
-	body := `{"endpoint_id":"pos-05","mode":"selective"}`
-	ask := func(approvalID string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/isolate", strings.NewReader(body))
-		req.Header.Set("X-API-Key", "mock_admin_token")
-		if approvalID != "" {
-			req.Header.Set(approvalHeader, approvalID)
-		}
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, req)
-		return w
+	w := postJSON(t, srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"pos-05","mode":"selective"}`)
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "approval_id") {
+		t.Fatalf("selective isolation on the first request: %d %s", w.Code, w.Body.String())
 	}
-	pendingID := func(w *httptest.ResponseRecorder) string {
-		var p struct {
-			ApprovalID string `json:"approval_id"`
-		}
-		if w.Code != http.StatusAccepted || json.Unmarshal(w.Body.Bytes(), &p) != nil || p.ApprovalID == "" {
-			t.Fatalf("want 202 with an approval id: %d %s", w.Code, w.Body.String())
-		}
-		return p.ApprovalID
+	if _, allow, _ := store.GetEndpointIsolation("pos-05"); strings.Join(allow, ",") != "198.51.100.25" {
+		t.Fatalf("enforced %v, want the expansion at the request", allow)
 	}
-
-	id := pendingID(ask(""))
+	if !authorizedAuditHas(t, store, "pos-05", "198.51.100.25") {
+		t.Fatalf("no ACTION_AUTHORIZED row naming the expansion: %+v", authorizedAudit(t, store))
+	}
 	if _, err := store.CreateTrustRule(trustfabric.Rule{ScopeType: "provider", Kind: "ip", Value: "192.0.2.7", Action: "allow"}); err != nil {
 		t.Fatal(err)
 	}
-	ownerOf(t, srv).approve(t, id)
-	if w := ask(id); w.Code != http.StatusOK {
-		t.Fatalf("approved isolation refused after a rule change: %d %s", w.Code, w.Body.String())
-	}
 	if _, allow, _ := store.GetEndpointIsolation("pos-05"); strings.Join(allow, ",") != "198.51.100.25" {
-		t.Fatalf("enforced %v, want what was approved", allow)
-	}
-
-	// Without the pin (a hub restart) a changed fabric fails closed.
-	if w := postJSON(t, srv, "/api/v1/endpoints/unisolate", `{"endpoint_id":"pos-05"}`); w.Code != http.StatusOK {
-		t.Fatalf("unisolate: %d", w.Code)
-	}
-	id = pendingID(ask(""))
-	srv.fabricPins.mu.Lock()
-	srv.fabricPins.pins = nil
-	srv.fabricPins.mu.Unlock()
-	if _, err := store.CreateTrustRule(trustfabric.Rule{ScopeType: "provider", Kind: "ip", Value: "192.0.2.8", Action: "allow"}); err != nil {
-		t.Fatal(err)
-	}
-	ownerOf(t, srv).approve(t, id)
-	if w := ask(id); w.Code != http.StatusForbidden {
-		t.Fatalf("unpinned changed expansion: %d %s", w.Code, w.Body.String())
-	}
-	if iso, _, _ := store.GetEndpointIsolation("pos-05"); iso {
-		t.Fatal("isolated with a list nobody approved")
+		t.Fatalf("a later rule widened the isolation in force: %v", allow)
 	}
 }

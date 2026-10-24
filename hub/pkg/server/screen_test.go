@@ -86,7 +86,7 @@ func TestServer_ScreenSessionFlow(t *testing.T) {
 	client := &http.Client{}
 	open := func(body string) (*http.Response, map[string]interface{}) {
 		t.Helper()
-		resp := doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", body, bearer)
+		resp := doAuthorized(t, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", body, bearer)
 		defer resp.Body.Close()
 		raw, _ := io.ReadAll(resp.Body)
 		var m map[string]interface{}
@@ -94,7 +94,7 @@ func TestServer_ScreenSessionFlow(t *testing.T) {
 		return resp, m
 	}
 
-	// Refusals before any approval is asked for.
+	// Refusals before the authority is asked to sign anything.
 	for _, tc := range []struct{ body, want string }{
 		{`{"endpoint_id":"linux-noscr"}`, "reports no screen capability"},
 		{`{"endpoint_id":"win-watch","mode":"control"}`, "view-only session"},
@@ -257,7 +257,7 @@ func TestServer_ScreenSessionFlow(t *testing.T) {
 
 func TestServer_ScreenLaunchWatchAudit(t *testing.T) {
 	t.Parallel()
-	srv, store, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -285,27 +285,19 @@ func TestServer_ScreenLaunchWatchAudit(t *testing.T) {
 		return resp.StatusCode, m
 	}
 
-	// An agent's open: the owner is told an agent with the admin key asks.
+	// An agent's open is signed at once; the audit row words it as an agent
+	// with the admin key.
 	body := `{"endpoint_id":"win-agent","mode":"control","max_duration_seconds":1800}`
-	code, pending := call(apiKey, http.MethodPost, "/api/v1/screen/sessions", body)
-	if code != http.StatusAccepted {
-		t.Fatalf("agent open: %d %v", code, pending)
-	}
-	appID, _ := pending["approval_id"].(string)
-	view, err := auth.GetApproval(appID, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(view.Summary, "An agent (admin key) will see and control the screen on win-agent, up to 30 minutes") {
-		t.Fatalf("agent approval wording: %q", view.Summary)
-	}
-	resp := doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", body, apiKey)
+	resp := doAuthorized(t, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", body, apiKey)
 	var agentSum map[string]interface{}
 	_ = json.NewDecoder(resp.Body).Decode(&agentSum)
 	resp.Body.Close()
 	agentID, _ := agentSum["session_id"].(string)
 	if resp.StatusCode != http.StatusCreated || agentID == "" {
 		t.Fatalf("agent open: %d %v", resp.StatusCode, agentSum)
+	}
+	if !screenAuditHas(t, store, "ACTION_AUTHORIZED", "An agent (admin key) will see and control the screen on win-agent, up to 30 minutes") {
+		t.Fatal("the signed agent open left no ACTION_AUTHORIZED row naming the agent")
 	}
 
 	// The agent's offer names it as an agent, for the consent prompt.
@@ -354,7 +346,7 @@ func TestServer_ScreenLaunchWatchAudit(t *testing.T) {
 		}
 	}
 
-	// The owner watches along: the admin key gets a watch token.
+	// The person watches along: the admin key gets a watch token.
 	code, wt := call(apiKey, http.MethodPost, "/api/v1/screen/sessions/watch", `{"session_id":"`+agentID+`"}`)
 	if code != http.StatusOK || wt["mode"] != "view" || wt["token"] == "" || wt["host"] != "win-agent" || wt["expires_at"] == nil {
 		t.Fatalf("watch token: %d %v", code, wt)
@@ -375,7 +367,7 @@ func TestServer_ScreenLaunchWatchAudit(t *testing.T) {
 	}
 
 	// A console-opened session: the console gets launch codes, never a token.
-	resp = doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", `{"endpoint_id":"win-console"}`, console)
+	resp = doAuthorized(t, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", `{"endpoint_id":"win-console"}`, console)
 	var conSum map[string]interface{}
 	_ = json.NewDecoder(resp.Body).Decode(&conSum)
 	resp.Body.Close()
@@ -468,7 +460,7 @@ func TestServer_ScreenLaunchWatchAudit(t *testing.T) {
 
 func TestServer_ScreenAskFirst(t *testing.T) {
 	t.Parallel()
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -497,7 +489,7 @@ func TestServer_ScreenAskFirst(t *testing.T) {
 		t.Fatalf("default: %d %v", code, m)
 	}
 	// Turning it on applies at once.
-	if code, m := call(http.MethodPut, "/api/v1/screen/settings?endpoint_id=win-ask", `{"ask_first":true}`); code != 200 || m["changed"] != true || m["approval_id"] != nil {
+	if code, m := call(http.MethodPut, "/api/v1/screen/settings?endpoint_id=win-ask", `{"ask_first":true}`); code != 200 || m["changed"] != true {
 		t.Fatalf("on: %d %v", code, m)
 	}
 	if _, m := call(http.MethodGet, "/api/v1/screen/settings?endpoint_id=win-ask", ""); m["ask_first"] != true || m["source"] != "endpoint" {
@@ -507,23 +499,18 @@ func TestServer_ScreenAskFirst(t *testing.T) {
 		t.Fatalf("other endpoint: %v", m)
 	}
 
-	// The open: the owner is told, ask_first is digested (after mode and
+	// The open is signed at once: ask_first is digested (after mode and
 	// unattended) and in the offer with the operator's name.
 	body := `{"endpoint_id":"win-ask","mode":"control","unattended":true}`
-	code, pending := call(http.MethodPost, "/api/v1/screen/sessions", body)
-	if code != http.StatusAccepted {
-		t.Fatalf("open: %d %v", code, pending)
-	}
-	view, err := auth.GetApproval(pending["approval_id"].(string), "")
-	if err != nil || !strings.Contains(view.Summary, "; the person at the keyboard is asked to allow it first; if nobody is signed in") {
-		t.Fatalf("approval %v %+v", err, view)
-	}
-	resp := doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", body, bearer)
+	resp := doAuthorized(t, client, http.MethodPost, ts.URL+"/api/v1/screen/sessions", body, bearer)
 	var sum map[string]interface{}
 	_ = json.NewDecoder(resp.Body).Decode(&sum)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("open: %d %v", resp.StatusCode, sum)
+	}
+	if !screenAuditHas(t, store, "ACTION_AUTHORIZED", "; the person at the keyboard is asked to allow it first; if nobody is signed in") {
+		t.Fatal("the signed open left no ACTION_AUTHORIZED row with the ask-first wording")
 	}
 	live, _ := srv.terminalMgr.GetSession(sum["session_id"].(string))
 	canon := []byte(`{"mode":"control","unattended":true,"ask_first":true}`)
@@ -544,28 +531,19 @@ func TestServer_ScreenAskFirst(t *testing.T) {
 		t.Fatalf("offer %v", offer)
 	}
 
-	// Turning it off loosens: the owner's tap first, nothing saved until then.
+	// Turning it off loosens, so the authority signs it; it applies in the
+	// same request and the audit row says it was loosened.
 	code, m := call(http.MethodPut, "/api/v1/screen/settings?endpoint_id=win-ask", `{"ask_first":false}`)
-	if code != http.StatusAccepted || m["approval_id"] == nil {
+	if code != http.StatusOK || m["changed"] != true || srv.screenAskFirst("win-ask") {
 		t.Fatalf("off: %d %v", code, m)
 	}
-	view, _ = auth.GetApproval(m["approval_id"].(string), "")
-	if view.Action != "Stop asking before screen sessions" || view.Summary != "Screen sessions on endpoint win-ask open without asking the person at the keyboard first (was: asked first)" {
-		t.Fatalf("loosen approval %q %q", view.Action, view.Summary)
-	}
-	if srv.screenAskFirst("win-ask") != true {
-		t.Fatal("ask-first turned off before the owner approved")
-	}
-	resp = doApproved(t, srv, client, http.MethodPut, ts.URL+"/api/v1/screen/settings?endpoint_id=win-ask", `{"ask_first":false}`, bearer)
-	_ = json.NewDecoder(resp.Body).Decode(&m)
-	resp.Body.Close()
-	if resp.StatusCode != 200 || m["approval_id"] == nil || srv.screenAskFirst("win-ask") {
-		t.Fatalf("off approved: %d %v", resp.StatusCode, m)
+	if !screenAuditHas(t, store, "SCREEN_SETTINGS_CHANGED", "loosened") || !screenAuditHas(t, store, "ACTION_AUTHORIZED", "win-ask") {
+		t.Fatal("turning ask-first off left no signed, loosened audit rows")
 	}
 
 	// The fleet default: on at once, covers machines without their own
 	// setting; dropping an override to follow it is no loosening here.
-	if code, m := call(http.MethodPut, "/api/v1/screen/settings", `{"ask_first":true}`); code != 200 || m["approval_id"] != nil {
+	if code, m := call(http.MethodPut, "/api/v1/screen/settings", `{"ask_first":true}`); code != 200 || m["changed"] != true {
 		t.Fatalf("fleet on: %d %v", code, m)
 	}
 	if _, m := call(http.MethodGet, "/api/v1/screen/settings?endpoint_id=win-other", ""); m["ask_first"] != true || m["source"] != "fleet" {
@@ -574,8 +552,8 @@ func TestServer_ScreenAskFirst(t *testing.T) {
 	if code, m := call(http.MethodPut, "/api/v1/screen/settings?endpoint_id=win-ask", `{"reset":true}`); code != 200 || !srv.screenAskFirst("win-ask") {
 		t.Fatalf("reset to fleet: %d %v", code, m)
 	}
-	// Forgetting the fleet default (back to off) loosens.
-	if code, m := call(http.MethodPut, "/api/v1/screen/settings", `{"reset":true}`); code != http.StatusAccepted {
+	// Forgetting the fleet default (back to off) loosens: signed at once.
+	if code, m := call(http.MethodPut, "/api/v1/screen/settings", `{"reset":true}`); code != http.StatusOK || srv.screenAskFirst("win-other") {
 		t.Fatalf("fleet reset: %d %v", code, m)
 	}
 	if code, _ := call(http.MethodPut, "/api/v1/screen/settings", `{}`); code != http.StatusBadRequest {
@@ -590,28 +568,24 @@ func TestServer_ScreenAskFirst(t *testing.T) {
 	}
 }
 
-// The approval binds the session length, ask-first and the agent's
-// self-declared label: a second request under the same approval cannot
-// change any of them. The label is shown as a claim in the approval, the
-// endpoint's offer and the audit; the console never gets an operator token.
-func TestServer_ScreenApprovalBindings(t *testing.T) {
+// The agent's self-declared label is shown as a claim in the signed action's
+// audit row, the endpoint's offer and the session audit; a label that could
+// break the wording is refused; the console never gets an operator token.
+func TestServer_ScreenAgentLabel(t *testing.T) {
 	t.Parallel()
-	srv, store, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	seedScreenEndpoint(t, srv, "win-bind", `{"isolate":true,"screen":{"input":true}}`)
 	client := &http.Client{}
-	call := func(label, approval, body string) (int, map[string]interface{}) {
+	call := func(label, body string) (int, map[string]interface{}) {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/screen/sessions", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-API-Key", "test-admin-key-12345")
 		if label != "" {
 			req.Header.Set(agentLabelHeader, label)
-		}
-		if approval != "" {
-			req.Header.Set(approvalHeader, approval)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -623,34 +597,15 @@ func TestServer_ScreenApprovalBindings(t *testing.T) {
 		return resp.StatusCode, m
 	}
 	body := `{"endpoint_id":"win-bind","mode":"control","max_duration_seconds":1800}`
-	if code, m := call(`bad"label`, "", body); code != http.StatusBadRequest {
+	if code, m := call(`bad"label`, body); code != http.StatusBadRequest {
 		t.Fatalf("a label with a quote: %d %v", code, m)
 	}
-	code, pending := call("claude-ops", "", body)
-	if code != http.StatusAccepted {
-		t.Fatalf("open: %d %v", code, pending)
-	}
-	appID, _ := pending["approval_id"].(string)
-	view, err := auth.GetApproval(appID, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if view.Summary != `An agent calling itself "claude-ops" (admin key) will see and control the screen on win-bind, up to 30 minutes; it opens without asking the person at the keyboard` {
-		t.Fatalf("approval wording: %q", view.Summary)
-	}
-	ownerOf(t, srv).approve(t, appID)
-	for _, tc := range []struct{ name, label, body string }{
-		{"longer session", "claude-ops", `{"endpoint_id":"win-bind","mode":"control","max_duration_seconds":3600}`},
-		{"no label", "", body},
-		{"another label", "other-agent", body},
-	} {
-		if code, m := call(tc.label, appID, tc.body); code != http.StatusForbidden {
-			t.Fatalf("%s under the approval: %d %v", tc.name, code, m)
-		}
-	}
-	code, sum := call("claude-ops", appID, body)
+	code, sum := call("claude-ops", body)
 	if code != http.StatusCreated {
-		t.Fatalf("approved open: %d %v", code, sum)
+		t.Fatalf("open: %d %v", code, sum)
+	}
+	if !screenAuditHas(t, store, "ACTION_AUTHORIZED", `An agent calling itself "claude-ops" (admin key) will see and control the screen on win-bind, up to 30 minutes; it opens without asking the person at the keyboard`) {
+		t.Fatal("the signed open left no ACTION_AUTHORIZED row with the agent's label")
 	}
 	if tok, _ := sum["connect_token"].(string); tok == "" {
 		t.Fatalf("an admin-key agent gets the operator token: %v", sum)
@@ -708,7 +663,7 @@ func TestServer_ScreenApprovalBindings(t *testing.T) {
 	}
 }
 
-// TestServer_ScreenTrustPreflight: the owner is never asked for a session the
+// TestServer_ScreenTrustPreflight: the authority is never asked to sign a session the
 // endpoint's agent would drop without a word (the first live test: a manifest
 // signed before screen joined the respond profile).
 func TestServer_ScreenTrustPreflight(t *testing.T) {
@@ -754,8 +709,8 @@ func TestServer_ScreenTrustPreflight(t *testing.T) {
 		t.Fatalf("ceiling below screen: %d %q", code, msg)
 	}
 	report(m.Seq, "respond")
-	if code, msg := open(); code != http.StatusAccepted {
-		t.Fatalf("ready endpoint was not offered to the owner: %d %q", code, msg)
+	if code, msg := open(); code != http.StatusCreated {
+		t.Fatalf("ready endpoint was not signed and opened: %d %q", code, msg)
 	}
 
 	// Narrowed to monitor: no screen in the profile at all.
@@ -765,4 +720,19 @@ func TestServer_ScreenTrustPreflight(t *testing.T) {
 	if code, msg := open(); code != http.StatusConflict || !strings.Contains(msg, "profile (monitor) does not include the remote screen") {
 		t.Fatalf("monitor profile: %d %q", code, msg)
 	}
+}
+
+// screenAuditHas says whether an audit row of the action has details containing want.
+func screenAuditHas(t testing.TB, store *storage.Store, action, want string) bool {
+	t.Helper()
+	entries, err := store.ListAuditLogs("", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Action == action && strings.Contains(e.Details, want) {
+			return true
+		}
+	}
+	return false
 }

@@ -121,7 +121,6 @@
   --z-menu: 70;
   --z-palette: 80;
   --z-fab: 85;
-  --z-approval: 88;
   --z-toast: 90;
 
   /* Aliases for the names the post-core sections were written against. These
@@ -4821,57 +4820,7 @@ tfoot {
   }
 }
 
-/* ------------------------------------------------------ owner approval */
-
-/* Waiting for the owner's phone. Above sheets and the terminal (an approval
-   is often what the open sheet is waiting on), below toasts. */
-.approvals {
-  position: fixed;
-  top: var(--s-3);
-  right: var(--s-3);
-  z-index: var(--z-approval);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  width: min(380px, calc(100vw - 2 * var(--s-3)));
-}
-
-.approval-wait {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--info);
-  border-radius: var(--r-b);
-  padding: var(--s-2) var(--s-3);
-  box-shadow: var(--overlay);
-  color: var(--ink-2);
-  font-size: var(--t-3);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.approval-wait[data-state="approved"], .approval-wait[data-state="done"] { border-left-color: var(--ok); }
-.approval-wait[data-state="denied"], .approval-wait[data-state="failed"], .approval-wait[data-state="consumed"], .approval-wait[data-state="gone"] { border-left-color: var(--crit); }
-.approval-wait[data-state="expired"], .approval-wait[data-state="cancelled"] { border-left-color: var(--warn); }
-
-.approval-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink);
-}
-
-.approval-head .fill { flex: 1; }
-.approval-label { color: var(--ink); overflow-wrap: anywhere; }
-.approval-time { font-variant-numeric: tabular-nums; }
-.approval-actions { display: flex; justify-content: flex-end; }
-.approval-state { margin: 0; overflow-wrap: anywhere; }
-
 .term-recording, .term-limits { font-variant-numeric: tabular-nums; white-space: nowrap; }
-
-@media (max-width: 600px) {
-  .approvals { left: 8px; right: 8px; top: 8px; width: auto; }
-}
 
 .term-reconnect {
   flex: none;
@@ -5247,3 +5196,6 @@ td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywh
   .fbar-count { flex: none; }
   .fbar .btn { flex: none; }
 }
+
+/* Layout hooks written by the console; they only keep long text from forcing a row wider. */
+.access-remote, .maint-window-own, .maint-window-wrap, .win-next, .win-range, .win-ranges { min-width: 0; }

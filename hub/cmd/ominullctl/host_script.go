@@ -17,14 +17,14 @@ import (
 // ominullctl host-script run: a released package on a host-authority host
 // (docs/HOST_AUTHORITY.md). Runs where Nightshift's signer lives, never on the
 // hub: reserve a job for the package's payload, have Nightshift sign a V3
-// grant over it (an owner tap, or the always-on signer with --auto), submit
+// grant over it (the signer signs it itself), submit
 // it, then wait on the job like maint wait.
 
 // Exit codes beyond maint wait's (0 ok, 3 failed, 4 attention, 5 timeout).
 const (
 	exitHostLocked   = 6 // the endpoint's lock level or manifest refuses scripts, or it pins no host authority
 	exitHostLapsed   = 7 // the reservation lapsed or was used before the grant came back
-	exitHostRefused  = 8 // the signer refused (owner declined, no standing rule, signer closed)
+	exitHostRefused  = 8 // the signer refused (the signer refused or is closed)
 	exitHostRejected = 9 // the hub refused the signed grant
 )
 

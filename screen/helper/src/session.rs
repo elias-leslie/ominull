@@ -128,7 +128,7 @@ impl<B: ScreenBackend> Session<B> {
         let present = ds.signed_in && ds.name == "user";
         if !present {
             if unattended {
-                // The owner approved an unattended session; there is nobody to ask.
+                // The authority signed an unattended session; there is nobody to ask.
                 return Ok(true);
             }
             self.backend.release_all_keys();
@@ -582,7 +582,7 @@ mod tests {
             _ => panic!("expected bye"),
         }
 
-        // unattended -> proceeds without a prompt (owner approved it).
+        // unattended -> proceeds without a prompt (the authority signed it).
         let mut b2 = MockBackend::default();
         b2.ds_signed_in = Some(false);
         let mut s2 = Session::new(b2, Mode::Control);

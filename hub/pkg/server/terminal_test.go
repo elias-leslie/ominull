@@ -17,7 +17,7 @@ import (
 
 func TestServer_TerminalAPI(t *testing.T) {
 	t.Parallel()
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
 	handler := srv.Handler()
@@ -25,7 +25,6 @@ func TestServer_TerminalAPI(t *testing.T) {
 	endpointID := "ep-shell-node-1"
 	opID := "admin"
 
-	_ = auth
 	seedTerminalEndpoint(t, srv, tenantID, endpointID)
 	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/bash"})
 
@@ -38,33 +37,11 @@ func TestServer_TerminalAPI(t *testing.T) {
 		t.Fatalf("GenerateJWT failed: %v", err)
 	}
 
-	// The static API key alone only asks: it gets an approval, not a shell.
-	reqAPIKey := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", bytes.NewReader(createBody))
-	reqAPIKey.Header.Set("X-API-Key", "test-admin-key-12345")
-	reqAPIKey.Header.Set("Content-Type", "application/json")
-	wAPIKey := httptest.NewRecorder()
-	handler.ServeHTTP(wAPIKey, reqAPIKey)
-	if wAPIKey.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 (owner approval requested) for static API key, got %d: %s", wAPIKey.Code, wAPIKey.Body.String())
-	}
-	if srv.terminalMgr.ListSessions(tenantID) != nil && len(srv.terminalMgr.ListSessions(tenantID)) != 0 {
-		t.Fatal("a session exists before the owner approved")
-	}
-	// A made-up approval id is refused.
-	reqForged := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", bytes.NewReader(createBody))
-	reqForged.Header.Set("Authorization", "Bearer "+jwtToken)
-	reqForged.Header.Set(approvalHeader, "00000000000000000000000000000000")
-	wForged := httptest.NewRecorder()
-	handler.ServeHTTP(wForged, reqForged)
-	if wForged.Code != http.StatusForbidden {
-		t.Fatalf("forged approval id answered %d, want 403", wForged.Code)
-	}
-
-	// Authorized operator create request, approved by the owner
+	// Authorized operator create request, signed and opened in one request.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", bytes.NewReader(createBody))
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Content-Type", "application/json")
-	w := serveApproved(t, srv, handler, req, string(createBody))
+	w := serveAuthorized(t, handler, req)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create terminal session returned %d: %s", w.Code, w.Body.String())
@@ -183,7 +160,7 @@ func TestServer_TerminalAPI(t *testing.T) {
 
 func TestServer_TerminalWebSocketRelay(t *testing.T) {
 	t.Parallel()
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
 	ts := httptest.NewServer(srv.Handler())
@@ -193,7 +170,6 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 	endpointID := "ep-shell-relay-test"
 	opID := "admin"
 
-	_ = auth
 	seedTerminalEndpoint(t, srv, tenantID, endpointID)
 	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/bash"})
 
@@ -204,7 +180,7 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 	}, "test-admin-key-12345", time.Hour)
 
 	client := &http.Client{}
-	resp := doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtToken) })
+	resp := doAuthorized(t, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtToken) })
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
@@ -354,7 +330,7 @@ func TestServer_TerminalWebSocketRelay(t *testing.T) {
 
 func TestTerminalSession_DeleteClose(t *testing.T) {
 	t.Parallel()
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
 	ts := httptest.NewServer(srv.Handler())
@@ -364,7 +340,6 @@ func TestTerminalSession_DeleteClose(t *testing.T) {
 	tenantID := "default"
 	operatorID := "admin"
 
-	_ = auth
 	seedTerminalEndpoint(t, srv, tenantID, endpointID)
 	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/sh"})
 
@@ -375,7 +350,7 @@ func TestTerminalSession_DeleteClose(t *testing.T) {
 	}, "test-admin-key-12345", time.Hour)
 
 	client := &http.Client{}
-	resp := doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtToken) })
+	resp := doAuthorized(t, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtToken) })
 	defer resp.Body.Close()
 
 	var bodyMap map[string]interface{}
@@ -419,7 +394,7 @@ func TestTerminalSession_DeleteClose(t *testing.T) {
 
 func TestServer_TerminalSecurityGates(t *testing.T) {
 	t.Parallel()
-	srv, store, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
 	ts := httptest.NewServer(srv.Handler())
@@ -430,7 +405,6 @@ func TestServer_TerminalSecurityGates(t *testing.T) {
 	tenantB := "tenant-beta"
 	endpointID := "ep-sec-node-1"
 
-	_ = auth
 	seedTerminalEndpoint(t, srv, tenantA, endpointID)
 
 	jwtAdminA, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "adminA", Role: hubauth.RoleAdmin, TenantID: tenantA}, "test-admin-key-12345", time.Hour)
@@ -450,7 +424,7 @@ func TestServer_TerminalSecurityGates(t *testing.T) {
 
 	// 2. Create Session under Tenant A
 	createBody, _ := json.Marshal(map[string]interface{}{"endpoint_id": endpointID, "program": "/bin/sh"})
-	resp = doApproved(t, srv, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtAdminA) })
+	resp = doAuthorized(t, client, http.MethodPost, ts.URL+"/api/v1/terminal/sessions", string(createBody), func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwtAdminA) })
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create session A failed: code %d", resp.StatusCode)
 	}

@@ -3,7 +3,7 @@
 #
 #   scripts/deploy-hub.sh          send dist/ominull-hub_VERSION_amd64.deb, .sig and .release.sig
 #   scripts/deploy-hub.sh --check  ask the key which hub is installed (release.sh runs this before
-#                                  building, so a missing key never wastes a signing tap)
+#                                  building, so a missing key never wastes a signing run)
 #
 # The key (alias OMINULL_HUB_INSTALL_ALIAS, default ominull-hub-install; root installs it with
 # scripts/pve/install.sh) runs only scripts/pve/ominull-hub-install on Proxmox. That verifies both
@@ -20,8 +20,8 @@ ssh_opts=(-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o Serv
 
 : "${OMINULL_HUB_URL:?set OMINULL_HUB_URL (https://HUB:9443) for the post-install check}"
 : "${OMINULL_ADMIN_KEY:?set OMINULL_ADMIN_KEY for the post-install check}"
-# shellcheck source=owner-approval.sh
-. "${ROOT_DIR}/scripts/owner-approval.sh"
+# shellcheck source=hub-request.sh
+. "${ROOT_DIR}/scripts/hub-request.sh"
 hub_url_safe "${OMINULL_HUB_URL}" || exit 1
 HUB_CA="${OMINULL_HUB_CA:-/etc/ominull/ca.crt}"
 [ -f "${HUB_CA}" ] || { echo "[-] Hub CA ${HUB_CA} is missing; set OMINULL_HUB_CA." >&2; exit 1; }

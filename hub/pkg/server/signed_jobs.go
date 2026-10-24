@@ -134,7 +134,7 @@ func signedJobLockRefusal(rep *response.AgentTrustReport) string {
 		if p == "" {
 			p = "none"
 		}
-		return fmt.Sprintf("the endpoint's capability profile is %q, which carries no scripts; it needs engagement, or monitor-scripts on a monitor-only host (one owner approval), and its lock level then limits it", p)
+		return fmt.Sprintf("the endpoint's capability profile is %q, which carries no scripts; it needs engagement, or monitor-scripts on a monitor-only host (one authorization), and its lock level then limits it", p)
 	}
 	return ""
 }

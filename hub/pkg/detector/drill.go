@@ -67,7 +67,7 @@ func Drill(store *storage.Store, now time.Time) ([]DrillCase, error) {
 
 // DrillWith runs every floor case against a proposed policy: tuning, when not
 // nil, instead of the saved tuning, and exclusions, when not nil, instead of
-// the saved ones. An owner approval shows what a loosening change would blind
+// the saved ones. An authorization shows what a loosening change would blind
 // before it is applied.
 func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTuning, exclusions []storage.Exclusion) ([]DrillCase, error) {
 	if exclusions == nil {

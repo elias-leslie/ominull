@@ -14,13 +14,10 @@ import (
 )
 
 // limitsCall sends one remote shell limits request with the test admin key.
-func limitsCall(srv *Server, method, body, approval string) *httptest.ResponseRecorder {
+func limitsCall(srv *Server, method, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, "/api/v1/terminal/limits", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-API-Key", "test-admin-key-12345")
-	if approval != "" {
-		r.Header.Set(approvalHeader, approval)
-	}
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 	return w
@@ -59,7 +56,7 @@ func TestTerminalLimitsStartAtFourHoursAndRefuseUnsafeValues(t *testing.T) {
 	t.Parallel()
 	srv, _, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
-	v := mustLimits(t, limitsCall(srv, http.MethodGet, "", ""))
+	v := mustLimits(t, limitsCall(srv, http.MethodGet, ""))
 	want := terminalLimitsJSON{MaxDurationSeconds: 4 * 3600, IdleTimeoutSeconds: 15 * 60, MaxPerEndpoint: 3, MaxPerTenant: 8}
 	if v.Limits != want || v.Defaults != want || v.Saved {
 		t.Fatalf("fresh hub limits = %+v", v)
@@ -76,7 +73,7 @@ func TestTerminalLimitsStartAtFourHoursAndRefuseUnsafeValues(t *testing.T) {
 		`{"max_per_endpoint":5,"max_per_tenant":4}`,
 		`{"max_per_endpoint":"3"}`,
 	} {
-		if w := limitsCall(srv, http.MethodPut, body, ""); w.Code != http.StatusBadRequest {
+		if w := limitsCall(srv, http.MethodPut, body); w.Code != http.StatusBadRequest {
 			t.Errorf("%s answered %d %s, want 400", body, w.Code, w.Body.String())
 		}
 	}
@@ -106,7 +103,7 @@ func TestLoweringTerminalLimitsAppliesAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
-	v := mustLimits(t, limitsCall(srv, http.MethodPut, `{"max_duration_seconds":7200,"max_per_tenant":4}`, ""))
+	v := mustLimits(t, limitsCall(srv, http.MethodPut, `{"max_duration_seconds":7200,"max_per_tenant":4}`))
 	if !v.Changed || !v.Saved || v.Limits.MaxDurationSeconds != 7200 || v.Limits.MaxPerTenant != 4 || v.Limits.MaxPerEndpoint != 3 {
 		t.Fatalf("lowered limits = %+v", v)
 	}
@@ -123,82 +120,75 @@ func TestLoweringTerminalLimitsAppliesAtOnce(t *testing.T) {
 	if got.MaxDuration != 2*time.Hour || got.PerTenant != 4 {
 		t.Fatalf("after restart = %+v", got)
 	}
-	v = mustLimits(t, limitsCall(srv, http.MethodGet, "", ""))
+	v = mustLimits(t, limitsCall(srv, http.MethodGet, ""))
 	if v.Defaults.MaxDurationSeconds != 3*3600 || v.Defaults.IdleTimeoutSeconds != 1200 {
 		t.Fatalf("startup defaults = %+v", v.Defaults)
 	}
-	// Saving the same values again changes nothing and asks nobody.
-	if v := mustLimits(t, limitsCall(srv, http.MethodPut, `{"max_duration_seconds":7200}`, "")); v.Changed {
+	// Saving the same values again changes nothing and signs nothing.
+	if v := mustLimits(t, limitsCall(srv, http.MethodPut, `{"max_duration_seconds":7200}`)); v.Changed {
 		t.Fatal("an unchanged save counted as a change")
 	}
 }
 
-// Agents hold the admin key, so raising any limit waits for the owner's tap,
-// and the owner sees the change in plain words.
-func TestRaisingTerminalLimitsWaitsForTheOwner(t *testing.T) {
+// Raising a limit is signed at once and audited in plain words: the first
+// request applies it, with the authorization id and what changed.
+func TestRaisingTerminalLimitsIsAuthorizedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 	body := `{"max_duration_seconds":21600,"max_per_endpoint":2}`
-	p := mustPend(t, limitsCall(srv, http.MethodPut, body, ""))
-	if p.Action != "Raise remote shell limits" || p.Summary != "Remote shell: sessions run up to 6 hours (was 4 hours); 2 open per endpoint (was 3)" {
-		t.Fatalf("the owner would see %+v", p)
+	v := mustLimits(t, limitsCall(srv, http.MethodPut, body))
+	if v.ApprovalID == "" || v.Limits.MaxDurationSeconds != 21600 || srv.terminalMgr.MaxDuration() != 6*time.Hour {
+		t.Fatalf("raise = %+v", v)
 	}
-	if strings.Join(p.Loosens, ",") != "session length" || len(p.Targets) != 1 || p.Targets[0] != terminalLimitsTarget {
-		t.Fatalf("pending = %+v", p)
-	}
-	if srv.terminalMgr.MaxDuration() != 4*time.Hour || srv.terminalMgr.Limits().PerEndpoint != 3 {
-		t.Fatal("a raise applied before the owner approved it")
-	}
-	if w := limitsCall(srv, http.MethodPut, body, p.ApprovalID); w.Code != http.StatusForbidden {
-		t.Fatalf("unapproved retry = %d %s", w.Code, w.Body.String())
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	// The approval covers this change only.
-	if w := limitsCall(srv, http.MethodPut, `{"max_duration_seconds":86400}`, p.ApprovalID); w.Code != http.StatusForbidden {
-		t.Fatalf("another raise under the approval = %d", w.Code)
-	}
-	v := mustLimits(t, limitsCall(srv, http.MethodPut, body, p.ApprovalID))
-	if v.ApprovalID != p.ApprovalID || v.Limits.MaxDurationSeconds != 21600 || srv.terminalMgr.MaxDuration() != 6*time.Hour {
-		t.Fatalf("approved raise = %+v", v)
+	if !authorizedAuditHas(t, store, terminalLimitsTarget, v.ApprovalID, "Remote shell: sessions run up to 6 hours (was 4 hours); 2 open per endpoint (was 3)") {
+		t.Fatalf("no ACTION_AUTHORIZED row for the raise: %+v", authorizedAudit(t, store))
 	}
 	notes := limitNotes(t, store)
-	if len(notes) != 1 || !strings.Contains(notes[0].Details, "raised with owner approval "+p.ApprovalID) {
+	if len(notes) != 1 || !strings.Contains(notes[0].Details, "raised") || !strings.Contains(notes[0].Details, v.ApprovalID) {
 		t.Fatalf("notes = %+v", notes)
 	}
 	// Going back to the startup defaults shortens sessions but allows a third
-	// per endpoint again: any raise in a change waits for the owner.
-	p = mustPend(t, limitsCall(srv, http.MethodPut, `{"reset":true}`, ""))
-	if strings.Join(p.Loosens, ",") != "sessions per endpoint" {
-		t.Fatalf("reset pending = %+v", p)
-	}
-	ownerOf(t, srv).approve(t, p.ApprovalID)
-	v = mustLimits(t, limitsCall(srv, http.MethodPut, `{"reset":true}`, p.ApprovalID))
-	if v.Saved || v.Limits != limitsJSON(terminal.DefaultLimits()) {
+	// per endpoint again: a change with any raise is signed too.
+	v = mustLimits(t, limitsCall(srv, http.MethodPut, `{"reset":true}`))
+	if v.ApprovalID == "" || v.Saved || v.Limits != limitsJSON(terminal.DefaultLimits()) {
 		t.Fatalf("reset = %+v", v)
+	}
+	if got := len(authorizedAudit(t, store)); got != 2 {
+		t.Fatalf("authorizations = %d, want 2", got)
 	}
 }
 
-// A terminal request may ask for less than the hub's maximum, never more;
-// the owner's ask says how long, and the signed payload stays the program
+// A terminal request may ask for less than the hub's maximum, never more; the
+// authorization says how long, and the signed payload stays the program
 // alone, which is all agents check a terminal grant against.
-func TestTerminalApprovalShowsTheSessionLength(t *testing.T) {
+func TestTerminalAuthorizationShowsTheSessionLength(t *testing.T) {
 	t.Parallel()
-	srv, _, _, cleanup := setupTestServerWithResponse(t)
-	defer cleanup()
-	seedTerminalEndpoint(t, srv, "default", "ep-long")
 	for _, tc := range []struct {
 		body string
 		want string
 		d    time.Duration
 	}{
 		{`{"endpoint_id":"ep-long","program":"/bin/sh"}`, "up to 4 hours,", 4 * time.Hour},
-		{`{"endpoint_id":"ep-long","program":"/bin/sh","max_duration_seconds":5400}`, "up to 1 hour 30 minutes,", 90 * time.Minute},
+		{`{"endpoint_id":"ep-long","program":"/bin/sh","max_duration_seconds":5400}`, "up to 90 minutes,", 90 * time.Minute},
 		{`{"endpoint_id":"ep-long","program":"/bin/sh","max_duration_seconds":999999}`, "up to 4 hours,", 4 * time.Hour},
 	} {
-		p := mustPend(t, limitsLikePost(srv, tc.body))
-		if !strings.Contains(p.Summary, "Interactive /bin/sh on ep-long, recorded, "+tc.want) {
-			t.Errorf("%s: owner sees %q", tc.body, p.Summary)
+		srv, store, _, cleanup := setupTestServerWithResponse(t)
+		seedTerminalEndpoint(t, srv, "default", "ep-long")
+		w := limitsLikePost(srv, tc.body)
+		if w.Code != http.StatusCreated && w.Code != http.StatusOK {
+			cleanup()
+			t.Fatalf("%s: session = %d %s", tc.body, w.Code, w.Body.String())
+		}
+		if !authorizedAuditHas(t, store, "Interactive /bin/sh on ep-long, recorded, "+tc.want) {
+			t.Errorf("%s: authorization audit = %+v", tc.body, authorizedAudit(t, store))
+		}
+		var s struct {
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &s)
+		if left := time.Until(s.ExpiresAt); left < tc.d-time.Minute || left > tc.d {
+			t.Errorf("%s: session expires in %s, want %s", tc.body, left, tc.d)
 		}
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", strings.NewReader(tc.body))
 		r.Header.Set("X-Role", "admin")
@@ -206,26 +196,7 @@ func TestTerminalApprovalShowsTheSessionLength(t *testing.T) {
 		if !ok || string(plan.Payload) != `{"program":"/bin/sh"}` || plan.SessionSeconds != int64(tc.d/time.Second) {
 			t.Errorf("%s: plan payload %s, %d s", tc.body, plan.Payload, plan.SessionSeconds)
 		}
-	}
-	// The approved session ends when it asked to (a fresh hub: the asks above
-	// are still pending and the authority bounds how many may wait).
-	srv, _, _, cleanup2 := setupTestServerWithResponse(t)
-	defer cleanup2()
-	seedTerminalEndpoint(t, srv, "default", "ep-long")
-	body := `{"endpoint_id":"ep-long","program":"/bin/sh","max_duration_seconds":5400}`
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/terminal/sessions", strings.NewReader(body))
-	r.Header.Set("X-API-Key", "test-admin-key-12345")
-	r.Header.Set("Content-Type", "application/json")
-	w := serveApproved(t, srv, srv.Handler(), r, body)
-	if w.Code != http.StatusCreated && w.Code != http.StatusOK {
-		t.Fatalf("approved session = %d %s", w.Code, w.Body.String())
-	}
-	var s struct {
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	_ = json.Unmarshal(w.Body.Bytes(), &s)
-	if left := time.Until(s.ExpiresAt); left < 89*time.Minute || left > 90*time.Minute {
-		t.Fatalf("session expires in %s, want 90m", left)
+		cleanup()
 	}
 }
 

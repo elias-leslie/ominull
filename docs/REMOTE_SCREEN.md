@@ -1,7 +1,7 @@
 # Ominull Remote Screen Control
 
 Status: design for v1 (Windows first, Linux designed, built after). This note is
-the contract the three build tracks (Windows agent helper, hub relay/approval +
+the contract the three build tracks (Windows agent helper, hub relay/authorization +
 ominullctl, native Rust viewer) work against in parallel. Keep it short and current; code is the
 source of truth once it lands.
 
@@ -10,14 +10,14 @@ source of truth once it lands.
 See and control the screen of an enrolled endpoint in a **native desktop viewer**
 (owner decision: no in-browser viewer; the website only has a launch button),
 or drive it from `ominullctl` for agents acting on the owner's request, the same
-way the terminal already works: the owner taps one approval on their
-phone, a session opens over the existing hub relay, it is audited, and it ends
-at the hub's session limits. No new listening port on the endpoint (the agent
+way the terminal already works: the hub has the response authority sign the
+grant on the first request (nobody is asked, no phone tap), a session opens over
+the existing hub relay, it is audited, and it ends at the hub's session limits. No new listening port on the endpoint (the agent
 dials out), no third-party remote tool, no second control channel. A new action
 kind `screen_session` reuses the terminal machinery; it does not fork it.
 
 The endpoint shows an always-on, topmost banner while a session is live, so the
-person at the keyboard always knows. Input is accepted only while an approved
+person at the keyboard always knows. Input is accepted only while an authorized
 session is live.
 
 ## 2. Reuse map (do not fork)
@@ -26,7 +26,7 @@ session is live.
 |---|---|---|
 | Action kind | `terminal_session` | add `screen_session` beside it in `response/dto.go`, `response/trust.go` (CapScreen), authority routing |
 | Capability | `terminal` in profile caps / agent caps JSON | add `screen` cap; agent reports `"screen":{...}` in response capabilities |
-| Grant + approval | `resolveTerminal` / `ownerApproved` / signed EndpointGrant V2 | `resolveScreen`, same grant path, digest over `{"mode":"control|view"}` |
+| Grant + authorization | `resolveTerminal` / `authorized` / signed EndpointGrant V2 | `resolveScreen`, same grant path, digest over `{"mode":"control|view"}` |
 | Relay | `hub/pkg/terminal` PairedRelay, operator WS + agent WS | `hub/pkg/screen` wraps/generalizes the same pairing; see §5 |
 | Session store/limits | `terminal.Manager`, `terminal.Limits` (1.8.77) | screen sessions share the same Limits and per-endpoint/tenant caps |
 | Offer to agent | durable response job, heartbeat delivery | same; payload `{"session_id","mode","connect_token"}` |
@@ -43,19 +43,22 @@ screen-specific (§4).
 
 1. Operator (console button or `ominullctl`) POSTs `/api/v1/screen/sessions`
    `{endpoint_id, mode}` where `mode` is `control` (default) or `view`.
-2. Hub `resolveScreen` builds the approval and returns 202 until the owner taps.
-   Approval text, plain owner words, includes duration and mode:
+2. Hub `resolveScreen` describes the request and `authorized` calls the response
+   authority (`POST /v1/authorize`) at once; there is no 202 and no wait. The
+   authority refuses with the reason (HTTP error, audit `ACTION_REFUSED`) if the
+   payload is invalid or breaks the steward-run rules. The audit statement
+   (`ACTION_AUTHORIZED`) includes duration and mode:
    - control: `See and control the screen on <label>, up to <duration>, for <operator>`
    - view: `Watch the screen on <label> (no control), up to <duration>, for <operator>`
    - api-key caller (an agent via ominullctl): `An agent (admin key) will see
      and control the screen on <label>, up to <duration>` (view: `...will see
-     the screen...`), so the owner always knows who controls it.
+     the screen...`), so the audit always shows who controls it.
    - if "ask the person first" is on for the machine: append
      `the person at the keyboard is asked to allow it first`.
-3. On tap the authority signs an EndpointGrant V2, kind `screen_session`,
+3. The authority signs an EndpointGrant V2, kind `screen_session`,
    action digest over the canonical payload `{"mode":"control"}` (exactly what
-   the agent re-digests; the session length is the hub's to enforce and is shown
-   to the owner only, mirroring terminal).
+   the agent re-digests; the session length is the hub's to enforce and is
+   audited only, mirroring terminal). The agent still verifies the grant itself.
 4. Hub creates the session in the shared manager (own token for the agent, own
    operator token minted apart), writes a durable response job with payload
    `{"session_id","mode","connect_token"}`. There is **no cookie**. The operator
@@ -266,7 +269,7 @@ length-prefix framing** (§6.5).
   access or downloads**.
 - The helper binary is **signed and digest-pinned in the agent release** exactly
   like the agent binary (add it to the release artifact set and the version /
-  digest sites; signing is an owner-tap step via Nightshift).
+  digest sites; signing goes through Nightshift's release signer, which signs without asking anyone).
 - **Lay the capture + input backend behind a trait** (e.g. `ScreenBackend`:
   `monitors()`, `capture_tiles(dirty) -> Vec<Tile>`, `inject(input)`,
   `follow_input_desktop()`) with a Windows DXGI/GDI implementation now, so the
@@ -404,8 +407,10 @@ endpoint at a time.
 
 ## 7. Safety
 
-- **One owner tap per session.** No standing grant. Each open is its own
-  approval with its own signed grant, consumed once (replay cache).
+- **One grant per session.** No standing grant. Each open is its own
+  authorization with its own signed grant, consumed once (replay cache). Nobody
+  is asked; the safety is the signed grant the agent verifies, the capability
+  manifest and lock level, the banner, and the audit.
 - **Always-on banner on the endpoint.** While a session is live the helper shows
   a topmost, click-through-disabled, not-hideable-by-viewer banner:
   `This screen is being viewed remotely (OmniNull)`. It is a separate top-most
@@ -420,9 +425,8 @@ endpoint at a time.
   (NetGetJoinInformation); the owner can override per machine.
 - **"Ask the person first" with nobody signed in or at the lock screen:** there
   is no one to ask, so the session is **declined** with a plain reason
-  ("nobody is signed in on <machine> to allow this") — UNLESS the owner's
-  approval explicitly carried "nobody at the keyboard" wording (a distinct
-  approval text and grant mode). This stops a silent unattended takeover being
+  ("nobody is signed in on <machine> to allow this") — UNLESS the request explicitly asked for it (`unattended`: a distinct
+  audit text and grant payload). This stops a silent unattended takeover being
   the default behavior of the consent setting.
 - **No browser on the operator socket.** Operator auth is a one-use header
   token, never a cookie, and the hub rejects any operator WS upgrade carrying an
@@ -430,7 +434,7 @@ endpoint at a time.
   reachable unauthenticated (ScreenConnect CVE-2024-1709 class); the launch-code
   redeem is authenticated by the code itself (§9.2).
 - **Agent control is visible and audited.** The banner shows for agent control
-  too; the approval names the agent; the owner can watch live; the hub audits
+  too; the audit names the agent; the owner can watch live; the hub audits
   each agent input (kind + coordinates; typed text by length only, never content;
   mouse moves not logged individually).
 - **View-only mode.** `mode=view` grant; hub drops operator input; agent ignores
@@ -440,7 +444,7 @@ endpoint at a time.
   setting `record_screen` (default off) can enable capped recording later; v1
   ships the setting off and may defer the recording writer. Audit always records
   who/when/how long/mode regardless.
-- **Input only while live.** The helper injects input only while an approved
+- **Input only while live.** The helper injects input only while an authorized
   session is active and paired; on detach/pause it stops both capture and input.
 - No new listening port: the agent/helper always dials out to the hub.
 - **Remote access off (per machine).** `PUT /api/v1/remote-access/settings`
@@ -448,9 +452,9 @@ endpoint at a time.
   screen session on that machine, for everyone (owner, agents, steward); it is
   stored as data (settings row `remote_access.off`), never derived from a
   hostname. Switching it off applies at once and closes the machine's open
-  sessions; switching it back on needs the owner's tap ("Allow remote terminal
-  and screen again"). Requests for that machine are refused with 403 before any
-  approval is asked for. An unreadable settings row refuses everywhere until it
+  sessions; switching it back on is a loosening that the authority authorizes on the same
+  request and the audit records ("Allow remote terminal and screen again").
+  Requests for that machine are refused with 403 before the authority is asked. An unreadable settings row refuses everywhere until it
   is rewritten. `GET /api/v1/remote-access/settings[?endpoint_id=]` reads it.
   The agent-side lock levels (docs/HOST_AUTHORITY.md) refuse terminal and screen
   too; this setting is the hub-side half, for any agent version.
@@ -459,8 +463,8 @@ endpoint at a time.
 
 ### 8.1 Owner viewing
 
-`ominullctl screen open ENDPOINT [--view] [--ttl DUR] [--viewer PATH] [--agent LABEL]` asks for
-the owner tap (202 until approved, like `shell open`), creates the session, then
+`ominullctl screen open ENDPOINT [--view] [--ttl DUR] [--viewer PATH] [--agent LABEL]` opens a session
+(authorized on the first request, like `shell open`), creates it, then
 starts `ominull-screen` (`--viewer`, else next to ominullctl, else PATH) and
 writes **one JSON line on its stdin**:
 `{"hub_url","ca_pem","session_id","token","mode","host"}`. The token never goes
@@ -470,12 +474,12 @@ session so it does not hold a slot.
 ### 8.2 Agent control (held session)
 
 For agents acting when the owner asks ("show me", "click this"). Same held-
-session model as `shell open`: one owner tap, reused for the session's life, and
+session model as `shell open`: one session, reused for its life, and
 the same `.ended` marker semantics, so a session that ended makes the next
-command fail with "open a new one" instead of silently filing a new ask.
+command fail with "open a new one" instead of silently opening a new one.
 
 ```
-ominullctl screen hold ENDPOINT [--view] [--ttl DUR] [--agent LABEL]   # one tap; approval names the agent
+ominullctl screen hold ENDPOINT [--view] [--ttl DUR] [--agent LABEL]   # opens the session; the audit names the agent
 ominullctl screen info  ENDPOINT                        # monitors, sizes, desktop (user/secure/lock)
 ominullctl screen shot  ENDPOINT [--monitor N] -o file.png   # one full frame, cursor composited
 ominullctl screen click ENDPOINT X Y [--button left|right|middle] [--double]
@@ -501,7 +505,7 @@ scancode down/up sequences. Each command rotates the operator token (`/attach`),
 spawns `ominull-screen ctl <action>` with the handshake on stdin, which connects,
 waits for a keyframe when it needs one, performs the action, and detaches (the
 session stays live between commands; the agent pauses capture while nothing is
-attached). The wire schema lives only in Rust; ominullctl does approval, held
+attached). The wire schema lives only in Rust; ominullctl does held
 state, markers and process plumbing. `ominullctl help screen` carries this usage
 for agents.
 
@@ -517,12 +521,12 @@ request and, from the held state, on every later request for that session.
 key, so the hub cannot tell agents apart; `X-Ominull-Agent` is only what the
 caller says it is. The hub reads it only from an admin-key request (1 to 64
 printable ASCII characters, no `"` or `\`, no leading/trailing space; anything
-else is a 400) and always shows it as a claim: the owner's approval reads
+else is a 400) and always shows it as a claim: the audit statement reads
 `An agent calling itself "claude-ops" (admin key) will ...`, the endpoint's
 consent prompt and banner get operator `agent "claude-ops" (admin key)`, and
 the audit names `admin (agent calling itself "claude-ops", admin key)`. The
-label is bound to the approval (as are the session length and ask-first), so
-the request that spends it must carry the same label. Per-agent hub keys are
+label is part of the authorization (as are the session length and ask-first) and
+the audit. Per-agent hub keys are
 the real fix and would replace the claim with an identity.
 
 ## 9. Native viewer (`screen/viewer`, binary `ominull-screen`)
@@ -546,7 +550,7 @@ rustls with the hub CA pinned. Linux x86_64 first (X11 and Wayland), Windows too
 ### 9.2 Console launch (the only screen UI in the website)
 
 The asset card has a **"Remote screen"** button (when the endpoint reports the
-screen capability). It runs the normal owner approval, then asks the hub for a
+screen capability). It runs the normal authorization, then asks the hub for a
 **launch code**: high-entropy, **one use, 60 s expiry, bound to the session and
 the operator**. The console opens
 `ominull-screen://open?hub=<hub origin>&session=<id>&code=<launch code>`.
@@ -615,12 +619,12 @@ This is the Linux equivalent of DXGI-as-SYSTEM.
   but does not reach the greeter — a convenience path, not the primary one.
 - The capture/input backend is behind the `ScreenBackend` trait (§6.0), so DRM/
   uinput, portals, and X11 are three implementations under the same wire
-  protocol, grant/approval, and banner.
+  protocol, grant/authorization, and banner.
 
 ## 11. Threat notes
 
 - The grant is per-session, signed, replay-protected, bound to endpoint + kind +
-  mode digest. A stolen operator token only attaches to an already-approved
+  mode digest. A stolen operator token only attaches to an already-authorized
   session and expires with it; the agent token is separate and single-dial.
 - The hub never exposes relay tokens to logs (terminal's zero-exposure invariant
   applies). The operator token never appears in a URL, argv or env: ominullctl
@@ -628,7 +632,7 @@ This is the Linux equivalent of DXGI-as-SYSTEM.
   launch code, redeemed once over TLS (a second redeem fails and is audited).
 - The viewer only connects to hubs in its own config (installed with the hub's
   CA), so a crafted `ominull-screen://` link cannot point it at another server.
-- Input injection is the sharp edge: it is gated by (1) a live approved grant,
+- Input injection is the sharp edge: it is gated by (1) a live authorized grant,
   (2) mode=control, (3) the helper only running during a paired session, (4) the
   visible banner. There is no API to inject input outside a session.
 - The helper runs as SYSTEM in the user session (needed for the secure desktop).
@@ -639,27 +643,27 @@ This is the Linux equivalent of DXGI-as-SYSTEM.
   but not a video the owner must then protect. That is deliberate for a home
   machine.
 
-## 12. The steward (pre-approved, bound to a stuck run)
+## 12. The steward (bound to a stuck run)
 
-Nightshift's steward can open a screen session without a per-session tap when
-the owner has raised a steward screen rule for that machine:
+Nightshift's steward can open a screen session for a stuck maintenance run. It
+needs no tap and no stored rule: the hub checks the run, the authority signs
+the grant on the first request like any screen session, and the audit says who
+asked and why.
 
 - **Key:** `POST /api/v1/integrations/steward/key` (administrator) returns the
-  key once; `DELETE` revokes it. The steward reaches only its route list.
-- **Raising the rule (one tap):** `POST /api/v1/screen/steward`
-  (administrator, console) or `POST /api/v1/integrations/nightshift/steward-screen`
-  (Nightshift relay) with `{endpoint_id, mode, max_minutes (5-240, default 30),
-  ask_first (default true), only_in_window (default true)}`. After the tap the
-  reply carries `rule_token` and `rule`; `GET ?approval_id=` returns them again.
-  Nightshift stores the token; lowering the rule is Nightshift's narrowing and
-  needs no tap.
+  key once; `DELETE` revokes it. The steward reaches only its route list
+  (maintenance wait/escalate/list and the screen session routes).
+- **No rule:** the per-machine steward rule, its token, `POST
+  /api/v1/screen/steward` and `/api/v1/integrations/nightshift/steward-screen`
+  are removed, as are `rule_token` and `narrow` on a session request.
 - **Opening:** the steward sends `POST /api/v1/screen/sessions` with
-  `steward_run` (a maintenance job on that machine in needs_hands or stalled),
-  `rule_token`, and optional `narrow {mode, max_seconds, ask_first,
-  only_in_window}`. Covered requests are approved by the rule (method `rule`);
-  anything else asks the owner, naming the steward and the run.
-- **Ending:** the hub checks bound sessions every 15 s and closes one when its
-  run is no longer stuck, or when the rule's time runs out.
-- Windows machines with the screen in their signed profile only; host-locked
-  machines refuse.
-
+  `steward_run` (a maintenance job on that machine in needs_hands or stalled).
+  The hub opens it only inside the machine's maintenance window, never
+  unattended, for at most 30 minutes, and never on a host-locked machine;
+  otherwise it refuses with the reason and the steward escalates the run. The
+  audit statement names the steward and the run.
+- **Ending:** the hub checks bound sessions every 15 s and closes one (audited
+  `SCREEN_SESSION_CLOSED`, `steward_run_resolved`) when its run is no longer
+  stuck, or at the session's time limit.
+- The endpoint must report the screen capability in its signed profile, and
+  host-locked machines refuse.

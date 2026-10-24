@@ -699,7 +699,7 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
         if (IsIPLiteralAny(allow[i])) memmove(allow[kept++], allow[i], PEER_ADDR_LEN);
     allowCount = kept;
 
-    /* An isolation's exceptions are the ones bound into it (the owner approved
+    /* An isolation's exceptions are the ones bound into it (the authority signed
      * them with the isolation; agent_trust.h keeps them in the authorized
      * state). The heartbeat's baseline never opens a hole. */
     OMINULL_BASELINE_RULE baseline[OMINULL_MAX_BASELINE_RULES];

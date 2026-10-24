@@ -18,8 +18,7 @@ import (
 )
 
 // One-off scripts: an agent or the operator submits a script (PowerShell,
-// bash or sh) to run once on named machines. It is a real run: the owner taps
-// once for it (never a baseline, never offered as a rule), the authority signs
+// bash or sh) to run once on named machines. It is a real run: the authority signs
 // a grant bound to the exact script, the agent runs it under the same
 // supervisor, result contract and audit as a package, and the run record keeps
 // the script text (the job's signed payload) with its name, reason and
@@ -63,7 +62,7 @@ type oneOffRequest struct {
 
 // oneOffRun is the record of one one-off script run.
 type oneOffRun struct {
-	RunID     string    `json:"run_id"` // the owner's approval
+	RunID     string    `json:"run_id"` // the authorization id
 	Tenant    string    `json:"tenant"`
 	Name      string    `json:"name"`
 	Reason    string    `json:"reason"`
@@ -131,7 +130,7 @@ func (s *Server) oneOffPlan(tenantID string, body []byte) (*oneOffRequest, strin
 	return &req, string(raw), payload, nil
 }
 
-func (s *Server) resolveOneOffScript(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+func (s *Server) resolveOneOffScript(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	if s.responseStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "response engine not initialized")
 		return nil, false
@@ -144,7 +143,7 @@ func (s *Server) resolveOneOffScript(w http.ResponseWriter, r *http.Request, bod
 	if _, ok := s.scopedEndpointIDs(w, r, req.EndpointIDs); !ok || s.refuseLocked(w, "script", req.EndpointIDs...) {
 		return nil, false
 	}
-	return &approvalPlan{
+	return &actionPlan{
 		Kind:    response.ActionKindScriptExec,
 		Action:  "Run a one-off script",
 		Summary: fmt.Sprintf("One-off script %q on %s: %s", req.Name, s.endpointLabels(req.EndpointIDs), req.Reason),
@@ -153,7 +152,7 @@ func (s *Server) resolveOneOffScript(w http.ResponseWriter, r *http.Request, bod
 	}, true
 }
 
-// handleOneOffScript runs once the owner approved: one job per machine.
+// handleOneOffScript runs once the authority has authorized it: one job per machine.
 func (s *Server) handleOneOffScript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -172,7 +171,7 @@ func (s *Server) handleOneOffScript(w http.ResponseWriter, r *http.Request) {
 	}
 	grants := approvalGrants(r)
 	if len(grants) == 0 {
-		writeJSONError(w, http.StatusForbidden, "a one-off script needs the owner's approval")
+		writeJSONError(w, http.StatusForbidden, "a one-off script was not authorized")
 		return
 	}
 	requestedBy := s.operatorFromRequest(r)
@@ -202,7 +201,7 @@ func (s *Server) handleOneOffScript(w http.ResponseWriter, r *http.Request) {
 		}
 		jobs = append(jobs, packageRunJob{JobID: job.ID, EndpointID: g.EndpointID, Package: req.Name, Version: 1})
 		rec.Jobs = append(rec.Jobs, job.ID)
-		s.audit(r, "SCRIPT_RUN_DISPATCHED", job.ID, fmt.Sprintf("Dispatched one-off script %q (sha256 %s, %s) to %s under owner approval: %s",
+		s.audit(r, "SCRIPT_RUN_DISPATCHED", job.ID, fmt.Sprintf("Dispatched one-off script %q (sha256 %s, %s) to %s authorized by the response authority: %s",
 			req.Name, p.ScriptDigest[:12], req.Shell, g.EndpointID, req.Reason))
 	}
 	if err := s.saveOneOffRun(rec); err != nil {
@@ -299,7 +298,7 @@ func (s *Server) handleOneOffScripts(w http.ResponseWriter, r *http.Request) {
 // handlePromoteScript turns a script into a library package: {"job_id"} (a
 // one-off run's script) or {"source"}. The script must carry a valid package
 // header and its name must be new to the library. A promoted package is not
-// a released one, so its runs ask the owner every time until a hub release
+// a released one, so each run is authorized one by one until a hub release
 // ships it.
 func (s *Server) handlePromoteScript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -367,13 +366,13 @@ func (s *Server) handlePromoteScript(w http.ResponseWriter, r *http.Request) {
 			_ = s.saveOneOffRun(*rec)
 		}
 	}
-	s.audit(r, "SCRIPT_PROMOTED", sc.ID, fmt.Sprintf("Promoted a script to package %s v%d (digest %s); not a released package, so every run asks the owner", h.Name, sv.Version, sv.DigestSHA256))
+	s.audit(r, "SCRIPT_PROMOTED", sc.ID, fmt.Sprintf("Promoted a script to package %s v%d (digest %s); not a released package, so each run is authorized one by one", h.Name, sv.Version, sv.DigestSHA256))
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"package": h.Name, "script_id": sc.ID, "version": sv.Version, "digest": sv.DigestSHA256})
 }
 
 // handleOneOffScriptRoute: GET lists runs; POST asks for and starts one.
 func (s *Server) handleOneOffScriptRoute() http.HandlerFunc {
-	run := requireAdmin(s.ownerApproved(s.resolveOneOffScript, s.handleOneOffScript))
+	run := requireAdmin(s.authorized(s.resolveOneOffScript, s.handleOneOffScript))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.handleOneOffScripts(w, r)

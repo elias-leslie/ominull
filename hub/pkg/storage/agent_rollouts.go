@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Staged agent rollouts: one owner approval covers a release, which installs
+// Staged agent rollouts: one authorization covers a release, which installs
 // on the canary endpoints first. The other approved endpoints are held here,
 // with no update job, until the canaries run the version with a clean
 // provenance check; then they are queued. A canary that fails or does not

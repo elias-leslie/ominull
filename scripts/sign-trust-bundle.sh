@@ -32,8 +32,8 @@ case "${TENANT}" in
 esac
 
 # The admin key travels only over TLS checked against the hub CA.
-# shellcheck source=scripts/owner-approval.sh
-. "${SCRIPT_DIR}/owner-approval.sh"
+# shellcheck source=scripts/hub-request.sh
+. "${SCRIPT_DIR}/hub-request.sh"
 hub_url_safe "${HUB_URL}" || exit 1
 
 # shellcheck source=lib/signing-backend.sh

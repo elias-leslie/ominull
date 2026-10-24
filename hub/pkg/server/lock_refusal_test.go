@@ -50,10 +50,10 @@ func TestLockRefusalTable(t *testing.T) {
 }
 
 // A request to a machine whose lock refuses it is refused at once with the
-// reason, and no owner approval is asked for; other machines still ask.
-func TestLockedMachineRefusedBeforeAsking(t *testing.T) {
+// reason and nothing is signed; an unlocked machine is authorized at once.
+func TestLockedMachineRefusedBeforeSigning(t *testing.T) {
 	t.Parallel()
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -81,8 +81,15 @@ func TestLockedMachineRefusedBeforeAsking(t *testing.T) {
 		_ = json.NewDecoder(resp.Body).Decode(&m)
 		return resp.StatusCode, m
 	}
-	pending := func() int {
-		return len(auth.PendingApprovals())
+	authorizedActions := func() int {
+		n := 0
+		logs, _ := store.ListAuditLogs("", 200)
+		for _, l := range logs {
+			if l.Action == "ACTION_AUTHORIZED" {
+				n++
+			}
+		}
+		return n
 	}
 
 	for _, tc := range []struct{ path, body, want string }{
@@ -96,14 +103,14 @@ func TestLockedMachineRefusedBeforeAsking(t *testing.T) {
 			t.Fatalf("%s %s: %d %v", tc.path, tc.body, code, m)
 		}
 	}
-	if n := pending(); n != 0 {
-		t.Fatalf("a locked machine cost the owner %d approval asks", n)
+	if n := authorizedActions(); n != 0 {
+		t.Fatalf("a locked machine was authorized %d times", n)
 	}
-	// Unlocked machines still ask the owner.
-	if code, m := call("/api/v1/maintenance/script", `{"endpoint_ids":["win-free"],"shell":"powershell","source":"Write-Output 1","name":"t","reason":"test"}`); code != http.StatusAccepted {
+	// An unlocked machine is authorized on the first request.
+	if code, m := call("/api/v1/maintenance/script", `{"endpoint_ids":["win-free"],"shell":"powershell","source":"Write-Output 1","name":"t","reason":"test"}`); code != http.StatusCreated {
 		t.Fatalf("free machine: %d %v", code, m)
 	}
-	if n := pending(); n != 1 {
-		t.Fatalf("pending after the free machine: %d", n)
+	if n := authorizedActions(); n != 1 {
+		t.Fatalf("authorizations after the free machine: %d", n)
 	}
 }

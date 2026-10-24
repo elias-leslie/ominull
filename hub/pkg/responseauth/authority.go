@@ -25,7 +25,6 @@ type Config struct {
 	SignerPartition   string        // e.g. "portable-local" or "hsm-partition-1"
 	DefaultSessionTTL time.Duration // e.g. 8h
 	DefaultIdleTTL    time.Duration // e.g. 30m
-	ApproversPath     string        // root-pinned owner approver keys; default DefaultApproversPath
 	// TrustEpochFloor is the lowest trust bundle epoch this authority hands
 	// out, set by root on the authority host (never by the hub). After a
 	// rotation that lost the authority's state, set it above every epoch ever
@@ -56,15 +55,10 @@ type Authority struct {
 	tenantKeys  map[string]ed25519.PrivateKey // tenant_id -> cached in-memory signing key
 	masterKey   []byte                        // 32-byte master key for encrypting secrets at rest
 	webauthn    *WebAuthnManager              // WebAuthn registration and assertion coordinator
-	approvals   *approvalBook                 // owner approvals (push + passkey tap)
 	autoIso     *autoIsolateBook              // the detector's isolation budget
 	manifests   *manifestBook                 // capability manifests, one per endpoint
 	enfClock    *enforcementClock             // strictly ordered enforcement grant times
 	trustEpochs *trustEpochs                  // trust bundle epoch per tenant
-	rollouts    *rolloutRules                 // approve-all rules for owner-signed rollouts
-	packages    *packageRules                 // approve-all rules for maintenance package runs
-	rows        *approvalRowsBook             // the owner's Approvals rows, pushed by Nightshift
-	learned     *learnedBook                  // job shapes the owner approved often enough to stop asking
 	releaseKey  []byte                        // release public key PEM override (tests)
 	startedAt   time.Time
 }
@@ -137,15 +131,10 @@ func NewAuthorityWithStore(cfg Config, store Store) (*Authority, error) {
 			},
 		}),
 		startedAt:   time.Now(),
-		approvals:   newApprovalBook(cfg.ApproversPath),
 		autoIso:     &autoIsolateBook{byTenant: map[string][]time.Time{}, byEndpoint: map[string]time.Time{}},
 		manifests:   newManifestBook(cfg.StateDir),
 		enfClock:    newEnforcementClock(cfg.StateDir),
 		trustEpochs: newTrustEpochs(cfg.StateDir, cfg.TrustEpochFloor),
-		rollouts:    newRolloutRules(cfg.StateDir),
-		packages:    newPackageRules(cfg.StateDir),
-		rows:        newApprovalRowsBook(cfg.StateDir),
-		learned:     newLearnedBook(cfg.StateDir),
 	}
 
 	// 1. Load keys from durable store
@@ -852,14 +841,13 @@ func (a *Authority) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, e
 		return nil, fmt.Errorf("action kind %q not permitted by response session", req.ActionKind)
 	}
 
-	// Action kind verification. A terminal session is not signed from a
-	// response session: each one takes its own owner approval (push + passkey
-	// tap), see ConsumeApproval.
+	// Action kind verification. A terminal or screen session is not signed
+	// from a response session: each one is authorized on its own, see Authorize.
 	switch req.ActionKind {
 	case response.ActionKindTerminalSession:
-		return nil, errors.New("terminal sessions need an owner approval, not a response session")
+		return nil, errors.New("terminal sessions are authorized one by one, not from a response session")
 	case response.ActionKindScreenSession:
-		return nil, errors.New("screen sessions need an owner approval, not a response session")
+		return nil, errors.New("screen sessions are authorized one by one, not from a response session")
 	case response.ActionKindForensicCollect, response.ActionKindScriptExec:
 		// valid
 	default:
@@ -1176,10 +1164,7 @@ func (a *Authority) Status(tenantID string) ResponseAuthorityStatus {
 		}
 	}
 
-	approvers, approverNote := a.ApproverStatus()
 	return ResponseAuthorityStatus{
-		OwnerApprovers:      approvers,
-		OwnerApproverNote:   approverNote,
 		Healthy:             true,
 		SignerPartition:     a.cfg.SignerPartition,
 		TenantKeyID:         keyID,

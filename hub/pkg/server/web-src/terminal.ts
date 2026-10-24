@@ -1,19 +1,17 @@
 /* The terminal page's script (pages/terminal.tmpl). Two parts: the "Open a
-   terminal" form, which waits for the owner's approval, and the session view,
+   terminal" form, which posts once and goes to the session, and the session view,
    one xterm pane on the hub's relay socket. Built into web/terminal.js by
    web-build/build.cjs. */
 
-import {
-  APPROVAL_POLL_WAIT_S,
-  APPROVAL_TEXT,
-  ApprovalError,
-  ApprovalInfo,
-  approvalCountdown,
-  approvalFlow,
-  PostResult,
-  termCtrlChar,
-  termKeyBytes,
-} from "./approval";
+import { termCtrlChar, termKeyBytes } from "./keys";
+
+interface PostResult {
+  status: number;
+  body: any;
+}
+
+/* A hub call that has not answered by now is given up on. */
+const API_TIMEOUT_MS = 20000;
 
 declare global {
   interface Window {
@@ -31,10 +29,10 @@ interface HubError extends Error {
 }
 
 /* Every call carries the console session cookie; the page never holds a key. */
-function api(path: string, method = "GET", body?: unknown, extra: Record<string, string> = {}): Promise<PostResult> {
+function api(path: string, method = "GET", body?: unknown): Promise<PostResult> {
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), (APPROVAL_POLL_WAIT_S + 8) * 1000);
-  const headers: Record<string, string> = { "Content-Type": "application/json", ...extra };
+  const deadline = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   return fetch(path, {
     method,
     headers,
@@ -89,10 +87,6 @@ function openForm(form: HTMLFormElement) {
   const runsAs = $("term-runs-as")!;
   const problem = $("term-open-problem")!;
   const button = $("term-open-btn") as HTMLButtonElement;
-  const panel = $("term-approval")!;
-  const stateEl = $("term-approval-state")!;
-  const timeEl = $("term-approval-time")!;
-  const stop = $("term-approval-stop") as HTMLButtonElement;
   if (!host) return;
 
   const showProblem = (text: string) => {
@@ -117,16 +111,6 @@ function openForm(form: HTMLFormElement) {
   choose();
 
   let busy = false;
-  let cancelled = false;
-  let wake: (() => void) | null = null;
-  let ticker = 0;
-  stop.addEventListener("click", () => {
-    cancelled = true;
-    wake?.();
-  });
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") wake?.();
-  });
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -134,66 +118,21 @@ function openForm(form: HTMLFormElement) {
     const opt = host.selectedOptions[0];
     if (!opt || !program.value) return;
     busy = true;
-    cancelled = false;
     button.disabled = true;
-    button.textContent = "Sending to your phone…";
+    button.textContent = "Opening…";
     showProblem("");
-    const body = { endpoint_id: host.value, program: program.value };
-    let info: ApprovalInfo | null = null;
-    const render = (next: ApprovalInfo) => {
-      info = next;
-      panel.hidden = false;
-      panel.dataset.state = next.state;
-      if (next.state === "pending") {
-        button.textContent = "Waiting for approval…";
-        stateEl.textContent = "Sent to your phone. Open the notification and confirm with your passkey.";
-        timeEl.textContent = approvalCountdown(next.expires_at, Date.now());
-      } else if (next.state === "approved") {
-        stateEl.textContent = "Approved. Opening the terminal.";
-        timeEl.textContent = "";
-      } else if (next.state === "done") {
-        stateEl.textContent = "Approved.";
-      } else {
-        stateEl.textContent = APPROVAL_TEXT[next.state] || next.state;
-        timeEl.textContent = "";
-      }
-    };
-    ticker = window.setInterval(() => {
-      if (info && info.state === "pending") timeEl.textContent = approvalCountdown(info.expires_at, Date.now());
-    }, 1000);
-    approvalFlow({
-      post: (headers) => api("/api/v1/terminal/sessions", "POST", body, headers),
-      poll: (id) => api("/api/v1/approvals?id=" + encodeURIComponent(id) + "&wait=" + APPROVAL_POLL_WAIT_S).then((r) => r.body),
-      sleep: (ms) =>
-        new Promise<void>((resolve) => {
-          const t = setTimeout(() => {
-            wake = null;
-            resolve();
-          }, ms);
-          wake = () => {
-            clearTimeout(t);
-            wake = null;
-            resolve();
-          };
-        }),
-      now: () => Date.now(),
-      cancelled: () => cancelled,
-      onState: render,
-    })
-      .then((summary) => {
+    api("/api/v1/terminal/sessions", "POST", { endpoint_id: host.value, program: program.value })
+      .then((res) => {
+        const summary = res.body;
         if (!summary || !summary.session_id) throw new Error("The hub did not return a session.");
         location.assign("/console/terminal?session=" + encodeURIComponent(summary.session_id) + "&new=1");
       })
-      .catch((err: ApprovalError) => {
+      .catch((err: Error) => {
         busy = false;
         button.disabled = false;
-        button.textContent = "Ask for approval";
-        if (!err || !err.approvalState) {
-          panel.hidden = true;
-          showProblem((err && err.message) || "The hub refused the terminal.");
-        }
-      })
-      .finally(() => clearInterval(ticker));
+        button.textContent = "Open terminal";
+        showProblem((err && err.message) || "The hub refused the terminal.");
+      });
   });
 }
 

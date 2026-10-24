@@ -207,8 +207,8 @@ Terminal sessions follow a strict single-direction state machine:
 ### 3.6 Resource Limits & Throttling (Contract Caps)
 The session limits are hub settings (`GET`/`PUT /api/v1/terminal/limits`, the
 console's **Remote shell limits** sheet). Startup flags or environment give the
-defaults; saved values win. Lowering applies at once; raising needs the owner's
-approval. Every value must sit inside the safety bounds below
+defaults; saved values win. Lowering applies at once; raising is authorized by
+the response authority on the same request and audited. Every value must sit inside the safety bounds below
 (`terminal.LimitBounds`); a new session takes the limits in force when it
 starts.
 1. **Per-Endpoint Concurrency:** default **3** active sessions per endpoint (bounds 1-10).

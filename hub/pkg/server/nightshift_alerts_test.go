@@ -378,7 +378,7 @@ func TestAgentEgressDigestIsInformationalAndNamed(t *testing.T) {
 	}
 }
 
-// One owner answer on Nightshift confirms the listed alerts benign; the relay
+// One verdict from Nightshift confirms the listed alerts benign; the relay
 // key cannot confirm anything else.
 func TestRelayAlertVerdict(t *testing.T) {
 	t.Parallel()
@@ -398,7 +398,7 @@ func TestRelayAlertVerdict(t *testing.T) {
 	add("low", "LATERAL_PORT_SWEEP", "MEDIUM", hour, "")
 	add("intel", "THREAT_INTEL_MATCH", "CRITICAL", hour, "")
 	add("beacon", "C2_BEACONING", "HIGH", hour, "")
-	issue := adminPost(srv, "/api/v1/integrations/nightshift/approval-key", ``, "")
+	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}
@@ -433,11 +433,11 @@ func TestRelayAlertVerdict(t *testing.T) {
 	// It names the relay key that closed it, not an unknown credential.
 	f := feedNote(t, srv, "ominull.detection.changes")
 	if !strings.HasPrefix(f.Message, "1 finding acknowledged (1 HIGH or CRITICAL)") {
-		t.Fatalf("note after the owner's answer = %q", f.Message)
+		t.Fatalf("note after the verdict = %q", f.Message)
 	}
 	dismissed, _ := f.Unmapped["dismissed"].([]map[string]any)
 	if len(dismissed) != 1 || !strings.Contains(dismissed[0]["change"].(string), "credential relay-key (unverified)") {
-		t.Fatalf("dismissed after the owner's answer = %v", dismissed)
+		t.Fatalf("dismissed after the verdict = %v", dismissed)
 	}
 	// The relay key was issued in the window by an admin-key holder, so the
 	// note says so beside the closure it made.
@@ -445,8 +445,8 @@ func TestRelayAlertVerdict(t *testing.T) {
 	if len(issued) != 1 || !strings.Contains(issued[0]["change"].(string), "credential api-key (unverified)") {
 		t.Fatalf("relay key issuance on the note = %v", f.Unmapped["relay_key_issued"])
 	}
-	if !strings.Contains(f.Message, "the Nightshift approval relay key was issued 1 time in the last 24 h") ||
-		!strings.Contains(f.Message, "need not be the owner's answer") {
+	if !strings.Contains(f.Message, "the Nightshift relay key was issued 1 time in the last 24 h") ||
+		!strings.Contains(f.Message, "need not be Nightshift's own verdict") {
 		t.Fatalf("note does not name the relay key issuance: %q", f.Message)
 	}
 	if last, _ := f.Unmapped["relay_key_last_issued"].(map[string]any); last["at"] != issued[0]["at"] {
@@ -469,7 +469,7 @@ func TestRelayKeyIssuanceOnTheDetectionPolicyNote(t *testing.T) {
 
 	// An issuance before the window, then a relay-key closure in it.
 	if err := store.RecordAudit(storage.AuditEntry{ID: "old-issue", Username: "admin", Action: relayKeyIssuedAudit,
-		Resource: "nightshift", Details: "Issued the Nightshift approval relay key", Timestamp: now.Add(-72 * time.Hour)}); err != nil {
+		Resource: "nightshift", Details: "Issued the Nightshift relay key", Timestamp: now.Add(-72 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RecordAudit(storage.AuditEntry{ID: "relay-close", Username: "nightshift-relay", Action: findingsAcknowledgedAudit,
@@ -505,13 +505,13 @@ func TestRelayKeyIssuanceOnTheDetectionPolicyNote(t *testing.T) {
 	// Reissuing with no closure at all still makes the note new and says who.
 	srv3, store3 := setupTestServer(t)
 	defer store3.Close()
-	if w := adminPost(srv3, "/api/v1/integrations/nightshift/approval-key", ``, ""); w.Code != http.StatusOK {
+	if w := postAdmin(srv3, "/api/v1/integrations/nightshift/approval-key", ``); w.Code != http.StatusOK {
 		t.Fatalf("issue = %d %s", w.Code, w.Body.String())
 	}
 	f = feedNote(t, srv3, "ominull.detection.changes")
 	issued, _ := f.Unmapped["relay_key_issued"].([]map[string]any)
 	if f.StatusID != ocsfStatusNew || len(issued) != 1 ||
-		!strings.HasPrefix(f.Message, "the Nightshift approval relay key was issued 1 time in the last 24 h, last by ") {
+		!strings.HasPrefix(f.Message, "the Nightshift relay key was issued 1 time in the last 24 h, last by ") {
 		t.Fatalf("note after a reissue = %d %q %v", f.StatusID, f.Message, issued)
 	}
 	if f.Unmapped["relay_key_last_issued"] != nil {
@@ -530,7 +530,7 @@ func TestRelayKeyIssuanceListIsCapped(t *testing.T) {
 	total := feedDismissedListShown + 7
 	for i := 0; i < total; i++ {
 		if err := store.RecordAudit(storage.AuditEntry{ID: fmt.Sprintf("issue-%03d", i), Username: "admin", Action: relayKeyIssuedAudit,
-			Resource: "nightshift", Details: "Issued the Nightshift approval relay key",
+			Resource: "nightshift", Details: "Issued the Nightshift relay key",
 			Timestamp: now.Add(-time.Duration(total-i) * time.Minute)}); err != nil {
 			t.Fatal(err)
 		}

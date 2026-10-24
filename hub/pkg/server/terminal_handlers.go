@@ -71,7 +71,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if r.Method == http.MethodPost {
-		// ownerApproved (resolveTerminal) has already checked the request,
+		// authorized (resolveTerminal) has already checked the request,
 		// asked the owner and spent the approval; the grant it produced is
 		// the only authority this session runs under.
 		var req struct {
@@ -99,7 +99,7 @@ func (s *Server) handleTerminalSessions(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		if grant == nil {
-			writeJSONError(w, http.StatusForbidden, "a terminal session needs an owner approval")
+			writeJSONError(w, http.StatusForbidden, "a terminal session was not authorized")
 			return
 		}
 
@@ -457,7 +457,7 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
 		return
 	}
-	// The owner approved a shell for one person. Another operator in the same
+	// The authority authorized a shell for one person. Another operator in the same
 	// tenant does not inherit it by reattaching.
 	if sess.OperatorID != s.operatorFromRequest(r) {
 		writeJSONError(w, http.StatusForbidden, "only the operator who opened this terminal can reattach to it")
@@ -607,9 +607,9 @@ func (s *Server) terminalProgram(w http.ResponseWriter, endpointID, program stri
 	return program, nil, true
 }
 
-// resolveTerminal describes a terminal request for the owner's approval. The
+// resolveTerminal describes a terminal request for the authority. The
 // digested payload is exactly the grant payload the agent verifies.
-func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []byte) (*approvalPlan, bool) {
+func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	role := r.Header.Get("X-Role")
 	if role != "admin" && role != "operator" {
 		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to open a terminal")
@@ -637,7 +637,7 @@ func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return nil, false
 	}
-	return &approvalPlan{
+	return &actionPlan{
 		Kind: response.ActionKindTerminalSession, Action: "Open terminal",
 		Summary: "Interactive " + program + " on " + s.endpointLabels([]string{req.EndpointID}) + ", recorded, up to " + humanDuration(d) + ", for " + s.operatorFromRequest(r),
 		Targets: []string{req.EndpointID}, Payload: payload, SessionSeconds: int64(d / time.Second),

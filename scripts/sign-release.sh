@@ -11,11 +11,11 @@
 #            writes one); the passphrase is asked once on the terminal, or read
 #            from OMINULL_SIGNING_PASSFILE, and reaches openssl only through a
 #            pipe, never argv, the environment or a file.
-#   command  OMINULL_SIGNING_COMMAND is an executable for a token, HSM or an
-#            approval signer: "CMD pubkey" prints the PEM public key, "CMD sign
+#   command  OMINULL_SIGNING_COMMAND is an executable for a token, HSM or a
+#            signing service: "CMD pubkey" prints the PEM public key, "CMD sign
 #            FILE" prints the DER ECDSA-SHA256 signature over FILE. The key never
-#            leaves it. Nightshift's nightshift-release-signer asks the owner
-#            once for the whole release (begin/end in lib/signing-backend.sh).
+#            leaves it. Nightshift's nightshift-release-signer signs the whole
+#            release in one session (begin/end in lib/signing-backend.sh).
 # The private key is never in this repo, on the hub, or in CI.
 set -euo pipefail
 
@@ -34,7 +34,7 @@ for pkg in "${packages[@]}"; do
     [ -f "${pkg}" ] || { echo "[-] Missing $(basename "${pkg}"); run scripts/build-packages.sh first." >&2; exit 1; }
 done
 
-# One approval for the whole release: the endpoint packages by digest, the hub
+# One signing session for the whole release: the endpoint packages by digest, the hub
 # by name (it is rebuilt below with the endpoint signatures inside).
 signing_begin release "${VERSION}" \
     "$(basename "${agent_deb}")=$(sha256sum "${agent_deb}" | awk '{print $1}')" \

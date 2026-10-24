@@ -277,7 +277,7 @@ func windowsInterpreter(interp string) bool {
 // maintenanceFindings is the Nightshift feed's maintenance record. A package
 // whose latest run on a host failed or never answered needs the owner: that
 // is the one finding raised to critical (Nightshift pushes it). A schedule
-// waiting for an approve-all tap is a medium finding on the board; reboots
+// blocked by an authority refusal is a medium finding on the board; reboots
 // needed and changes waiting in audit runs are counts in the resolved record.
 func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 	const uid, title = "ominull.maintenance", "Maintenance packages"
@@ -365,7 +365,7 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 	}
 	if blocks := s.maintBlocks.list(); len(blocks) > 0 {
 		out = append(out, s.feedFinding(now, schedUID, schedTitle, ocsfSevMedium, ocsfStatusNew,
-			plural(len(blocks), "scheduled package run is", "scheduled package runs are")+" waiting (approval or a declined ask)", nil, map[string]any{"waiting": blocks}))
+			plural(len(blocks), "scheduled package run is", "scheduled package runs are")+" blocked (see the reason on each)", nil, map[string]any{"waiting": blocks}))
 	} else {
 		out = append(out, s.feedFinding(now, schedUID, schedTitle, ocsfSevInformational, ocsfStatusResolved, "No scheduled package is waiting", nil, nil))
 	}

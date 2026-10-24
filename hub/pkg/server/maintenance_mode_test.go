@@ -59,8 +59,8 @@ func TestMaintenanceModeState(t *testing.T) {
 		t.Fatalf("windows host: %+v", m)
 	}
 
-	// A default audit of a safe released package runs without a tap, on Linux too.
-	w := adminPost(srv, "/api/v1/maintenance/run", `{"endpoint_ids":["ep-srv"],"packages":["linux-maintenance-mode"],"mode":"audit"}`, "")
+	// A default audit of a safe released package is signed and runs at once, on Linux too.
+	w := postAdmin(srv, "/api/v1/maintenance/run", `{"endpoint_ids":["ep-srv"],"packages":["linux-maintenance-mode"],"mode":"audit"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("linux audit: %d %s", w.Code, w.Body.String())
 	}

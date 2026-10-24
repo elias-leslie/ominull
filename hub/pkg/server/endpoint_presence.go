@@ -14,8 +14,8 @@ import (
 // guest that is off unless in use; "lab" is still accepted for parked).
 // Administrator only. It decides whether a host going dark is reported at all,
 // so it goes through the detection-policy choke point: watching a host less
-// closely waits for the owner's tap; watching it more closely applies at once
-// with a note.
+// closely is authorized by the authority and audited; watching it more closely
+// applies at once with a note.
 func (s *Server) handleEndpointPresence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -65,7 +65,7 @@ func (s *Server) handleEndpointPresence(w http.ResponseWriter, r *http.Request) 
 	if presenceRank(req.Presence) > presenceRank(before.Presence) {
 		change.loosens = []string{"presence"}
 	}
-	approvalID, ok := s.policyApproved(w, r, change)
+	approvalID, ok := s.policyAuthorized(w, r, change)
 	if !ok {
 		return
 	}

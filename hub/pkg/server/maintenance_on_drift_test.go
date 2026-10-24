@@ -2,12 +2,10 @@ package server
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
 )
 
@@ -29,15 +27,15 @@ func finishJobsWith(t *testing.T, srv *Server, ep, stdout string) int {
 }
 
 // Audit-then-enforce: a safe package set to on_drift enforce keeps auditing;
-// a scheduled audit that finds drift makes the next pass ask for one enforce
-// run there, dispatched once approved, and nothing more until the next audit.
+// a scheduled audit that finds drift makes the next pass run one enforce run
+// there (signed and dispatched at once), and nothing more until the next audit.
 // Careful packages and categories cannot take the setting.
 func TestAuditThenEnforce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.responseEnabled = true
-	owner := ownerOf(t, srv)
+	authorityOf(t, srv)
 	now := time.Now().UTC()
 	online := func(at time.Time) {
 		if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: at}); err != nil {
@@ -74,24 +72,17 @@ func TestAuditThenEnforce(t *testing.T) {
 	later := now.Add(10 * time.Minute)
 	online(later)
 	srv.runMaintenanceSchedules(later)
-	pending := owner.auth.PendingApprovals()
-	if len(jobs()) != 1 || len(pending) != 1 || !strings.Contains(pending[0].Summary, "enforce") {
-		t.Fatalf("drift should ask once for enforce: %d jobs %+v", len(jobs()), pending)
+	list := jobs()
+	if len(list) != 2 {
+		t.Fatalf("drift should dispatch one enforce run at once: %d jobs", len(list))
 	}
 	online(later.Add(time.Minute))
 	srv.runMaintenanceSchedules(later.Add(time.Minute))
-	if p := owner.auth.PendingApprovals(); len(p) != 1 {
-		t.Fatalf("asked twice: %d", len(p))
+	if n := len(jobs()); n != 2 {
+		t.Fatalf("enforce was dispatched twice: %d jobs", n)
 	}
-	ask := pending[0]
-	if _, err := owner.auth.AnswerApproval(&responseauth.ApprovalAnswer{ID: ask.ID, Decision: "approve", Assertion: owner.approver.Assert(ask.Challenge, "approve")}); err != nil {
-		t.Fatal(err)
-	}
-	online(later.Add(2 * time.Minute))
-	srv.runMaintenanceSchedules(later.Add(2 * time.Minute))
-	list := jobs()
-	if len(list) != 2 {
-		t.Fatalf("the approved enforce run was not dispatched: %d", len(list))
+	for _, blk := range srv.maintBlocks.list() {
+		t.Fatalf("an authorized run left a block: %+v", blk)
 	}
 	if run := derivePackageRun(list[0], later); run.Mode != "enforce" {
 		t.Fatalf("newest job is %q, want enforce", run.Mode)
@@ -99,8 +90,8 @@ func TestAuditThenEnforce(t *testing.T) {
 	finishJobsWith(t, srv, "ep-lap", `{"v":1,"state":"fixed","reboot":false,"changed":["temp"]}`)
 	online(later.Add(3 * time.Minute))
 	srv.runMaintenanceSchedules(later.Add(3 * time.Minute))
-	if len(jobs()) != 2 || len(owner.auth.PendingApprovals()) != 0 {
-		t.Fatalf("a fixed host ran or asked again: %d", len(jobs()))
+	if len(jobs()) != 2 {
+		t.Fatalf("a fixed host ran again: %d", len(jobs()))
 	}
 
 	// Only a scheduled audit's drift counts.

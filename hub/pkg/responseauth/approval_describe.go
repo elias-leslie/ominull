@@ -14,7 +14,7 @@ import (
 	"ominull/hub/pkg/response"
 )
 
-// The owner approves what the authority says, not what the hub says. The hub
+// The authority words what it signs; the hub does not. The hub
 // sends a typed payload (the route it will run, the canonical body and the
 // targets, or the terminal's own action payload); the authority works out the
 // action name and the summary from that payload alone, so a compromised hub
@@ -307,7 +307,7 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 	}
 	spec, ok := approvalRoutes[p.Route]
 	if !ok {
-		return "", "", fmt.Errorf("route %q is not an owner-approved action", cleanText(p.Route, 80))
+		return "", "", fmt.Errorf("route %q is not an authority-signed action", cleanText(p.Route, 80))
 	}
 	if spec.kind != kind {
 		return "", "", fmt.Errorf("route %s does not match kind %s", p.Route, kind)
@@ -845,14 +845,10 @@ func fitLead(lead, short string, parts, labels []string) (string, error) {
 	return fitParts(append([]string{lead}, parts...), labels)
 }
 
-// ErrApprovalTooLong refuses a detection-policy change whose changes do not
-// all fit the owner's statement: the owner's tap is the only human check, so
-// nothing the change does may be cut to "and N more".
-var ErrApprovalTooLong = errors.New("this change is too large to show the owner in full")
-
-// fitParts joins every change in full inside the statement's summary cap, or
-// refuses. Labels (a name, a reason) follow in whatever room is left,
-// shortened if they must be: they explain the change and match nothing.
+// fitParts joins every change inside the summary cap; what does not fit is cut
+// to an ellipsis (the payload, not the summary, is what the grant is bound
+// to). Labels (a name, a reason) follow in whatever room is left, shortened if
+// they must be: they explain the change and match nothing.
 func fitParts(parts, labels []string) (string, error) {
 	out := ""
 	for _, p := range parts {
@@ -862,7 +858,7 @@ func fitParts(parts, labels []string) (string, error) {
 		out += cleanText(p, approvalMaxSummary+1)
 	}
 	if n := len([]rune(out)); n > approvalMaxSummary {
-		return "", fmt.Errorf("%w (%d characters, at most %d fit): make it as several smaller changes", ErrApprovalTooLong, n, approvalMaxSummary)
+		return string([]rune(out)[:approvalMaxSummary-1]) + "…", nil
 	}
 	for _, l := range labels {
 		l = cleanText(l, approvalMaxSummary)

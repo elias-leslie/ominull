@@ -289,7 +289,7 @@ func (s *Server) timelineRelatedIDs(host *storage.Endpoint) map[string]bool {
 }
 
 // auditConcerns reports whether an audit entry is about this host: it names
-// the host, or one of the host's sessions, jobs or bundles. Owner approvals
+// the host, or one of the host's sessions, jobs or bundles. Authorized actions
 // name their targets as a comma-separated list.
 func auditConcerns(e storage.AuditEntry, endpointID string, related map[string]bool) bool {
 	if e.Resource == "" {
@@ -347,7 +347,8 @@ var auditKinds = []struct{ prefix, kind, tone string }{
 	{"UNISOLATE", "Containment", "ok"},
 	{"MESH_", "Containment", "warn"},
 	{"TERMINAL_", "Terminal", "info"},
-	{"OWNER_APPROVAL_", "Approval", "info"},
+	{"ACTION_", "Authorization", "info"},
+	{"OWNER_APPROVAL_", "Authorization", "info"}, // rows written before approvals were retired
 	{"EVIDENCE_", "Evidence", "info"},
 	{"RESPONSE_", "Response", "info"},
 	{"SCRIPT_", "Response", "info"},

@@ -52,7 +52,7 @@ func TestComplianceFindings(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.responseEnabled = true
-	owner := ownerOf(t, srv)
+	authorityOf(t, srv)
 	now := time.Now().UTC()
 	for id, status := range map[string]string{"windows-lap": "online", "windows-old": "online", "windows-quiet": "online"} {
 		if err := store.UpsertEndpoint(storage.Endpoint{ID: id, TenantID: "default", Hostname: strings.TrimPrefix(id, "windows-"), OS: "Windows 11 Home", Status: status, LastSeenAt: now}); err != nil {
@@ -64,12 +64,7 @@ func TestComplianceFindings(t *testing.T) {
 	run := func(eps string) {
 		t.Helper()
 		body := `{"endpoint_ids":[` + eps + `],"packages":["windows-audit","windows-privacy"],"mode":"audit"}`
-		w := adminPost(srv, "/api/v1/maintenance/run", body, "")
-		if w.Code == http.StatusAccepted {
-			id := pendingID(t, w)
-			owner.approve(t, id)
-			w = adminPost(srv, "/api/v1/maintenance/run", body, id)
-		}
+		w := postAdmin(srv, "/api/v1/maintenance/run", body)
 		if w.Code != http.StatusCreated {
 			t.Fatalf("run: %d %s", w.Code, w.Body.String())
 		}

@@ -156,7 +156,7 @@
  });
  await check('access and lock: card, chips, filters, remote access switch and release keys', async () => {
   const until = async (fn, what, n) => { for (let i = 0; i < (n||100); i++) { if (fn()) return; await new Promise(r => setTimeout(r, 50)); } throw new Error('Timed out waiting for ' + what); };
-  const saved = {tab:a.state.routeTab,key:a.state.routeTabKey,sec:a.state.section,f:a.state.filters,r:a.state.remoteOff,hold:a.state.demoApprovalHold};
+  const saved = {tab:a.state.routeTab,key:a.state.routeTabKey,sec:a.state.section,f:a.state.filters,r:a.state.remoteOff};
   const asset = id => a.state.assets.find(x=>x.endpoint && x.endpoint.id===id);
   const cardText = () => { const c=[...document.querySelectorAll('.card')].find(x=>/^Access and lock/i.test(x.textContent)); return c ? c.textContent : ''; };
   const head = () => (document.querySelector('.route-chips')||{}).textContent||'';
@@ -167,17 +167,16 @@
   await until(() => /Signed scripts/.test(cardText()), 'the db-01 lock card');
   const t = cardText();
   assert(/Host-locked/.test(t) && /Only scripts Nightshift signed run here/.test(t),'Host lock missing: '+t);
-  assert(/2 packages run without asking: btrfs-scrub, cleanup/.test(t),'Standing approvals missing: '+t);
+  assert(/2 packages are allowed to run on this machine: btrfs-scrub, cleanup/.test(t),'Always allowed packages missing: '+t);
   assert(/the lock level does not allow it/.test(t),'Last refusal missing: '+t);
   assert(/Lock: Signed scripts/.test(head()) && /Host-locked/.test(head()) && /Remote access off/.test(head()),'Head chips missing: '+head());
-  /* Remote access: db-01 is off, so the button asks to switch back on, which waits for the phone. */
-  a.state.demoApprovalHold = false;
+  /* Remote access: db-01 is off, so the button switches it back on, and the hub applies it at once. */
   const sw = () => [...document.querySelectorAll('.access-remote button')][0];
   assert(/Switch back on/.test(sw().textContent),'Switch back on button missing');
   sw().click(); await wait();
-  assert(/tap on your phone/.test((document.querySelector('.sheet')||{}).textContent||''),'Switch back on does not say it needs a phone tap');
-  [...document.querySelectorAll('.sheet button')].find(b=>/Ask on my phone/.test(b.textContent)).click();
-  await until(() => !a.state.remoteOff['linux-prod-db-01'], 'remote access to come back on after the tap', 200);
+  assert(!/phone/.test((document.querySelector('.sheet')||{}).textContent||''),'Switch back on still mentions a phone');
+  [...document.querySelectorAll('.sheet button')].find(b=>/^Switch back on$/.test(b.textContent)).click();
+  await until(() => !a.state.remoteOff['linux-prod-db-01'], 'remote access to come back on', 200);
   await until(() => /Switch off/.test((sw()||{}).textContent||''), 'the button to read Switch off');
   assert(!/Remote access off/.test(head()),'Remote access off chip stays after switching on');
   sw().click(); await wait();
@@ -211,7 +210,7 @@
   const v = document.getElementById('view').textContent;
   assert(/routine-2026-10/.test(v) && /epoch 3/.test(v),'Routine keys missing');
   assert(/Retired/.test(v) && /1\.0\.0/.test(v) && /machines? still run/.test(v),'Retired releases missing');
-  a.state.remoteOff=saved.r; a.state.demoApprovalHold=saved.hold; a.state.filters=saved.f; a.state.routeTab=saved.tab; a.state.routeTabKey=saved.key; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
+  a.state.remoteOff=saved.r; a.state.filters=saved.f; a.state.routeTab=saved.tab; a.state.routeTabKey=saved.key; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
  });
  await check('navigation links never contain sentinel credential', () => {
   a.openAccountPop(); assert(![...document.querySelectorAll('a')].some(x=>x.href.includes('AUDIT_SENTINEL')), 'Credential in navigation URL'); a.closeAccountPop();
@@ -286,26 +285,19 @@
    let rejected=false; try { await a.request('/api/v1/fixture-error-'+status+'-'+type); } catch { rejected=true; } assert(rejected,'Invalid API response accepted');
   } } finally {window.fetch=original;a.state.demo=true;}
  });
- await check('gated action waits for owner approval and retries with the approval id', async () => {
+ await check('a gated-looking action completes on the first request', async () => {
   const original=window.fetch;a.state.demo=false;const calls=[];
   const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
-  let decide;const decided=new Promise(r=>decide=r);
-  window.fetch=async(url,opts={})=>{const u=String(url);const hdr=new Headers(opts.headers||{});calls.push({u,method:opts.method||'GET',approval:hdr.get('X-Approval-ID'),body:opts.body});
-   if(u.startsWith('/api/v1/approvals')){await decided;return json({id:'ap1',state:'approved',summary:'Isolate fixture-host',expires_at:new Date(Date.now()+60000).toISOString()});}
-   if(hdr.get('X-Approval-ID')==='ap1')return json({ok:true});
-   return json({approval_id:'ap1',state:'pending',summary:'Isolate fixture-host',expires_at:new Date(Date.now()+300000).toISOString()},202);};
+  window.fetch=async(url,opts={})=>{calls.push({u:String(url),method:opts.method||'GET',body:opts.body,headers:new Headers(opts.headers||{})});return json({ok:true});};
   try {
-   const done=a.ownerApproved('/api/v1/endpoints/isolate-bulk',{scope:'ids',ids:['e1']},{label:'Isolate fixture-host'});
-   await wait();await wait();
-   const panel=document.querySelector('.approval-wait');
-   assert(panel&&panel.getAttribute('data-state')==='pending','No pending approval panel');
-   assert(panel.textContent.includes('Approve on your phone'),'Pending panel does not say where to approve');
-   decide();const result=await done;
+   const result=await a.request('/api/v1/endpoints/isolate-bulk','POST',{scope:'ids',ids:['e1']});
    const posts=calls.filter(c=>c.method==='POST');
-   assert(posts.length===2&&!posts[0].approval&&posts[1].approval==='ap1','Retry did not carry X-Approval-ID');
-   assert(posts[0].body===posts[1].body&&JSON.parse(posts[1].body).scope==='ids','Retry body changed or lost scope');
-   assert(result&&result.ok,'Approved result not returned');
-  } finally {window.fetch=original;a.state.demo=true;document.querySelectorAll('.approvals').forEach(n=>n.remove());}
+   assert(posts.length===1&&JSON.parse(posts[0].body).scope==='ids','The request was not sent exactly once with its scope');
+   assert(!posts[0].headers.get('X-Approval-ID'),'The request carried an approval id');
+   assert(!calls.some(c=>c.u.startsWith('/api/v1/approvals')),'The console polled for an approval');
+   assert(!document.querySelector('.approval-wait'),'An approval panel appeared');
+   assert(result&&result.ok,'Result not returned');
+  } finally {window.fetch=original;a.state.demo=true;}
  });
  a.state.section='assets';a.render();
  return results;

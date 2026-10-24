@@ -1,16 +1,22 @@
-# Blast table: what each ask is classed as
+# Blast table: how far each action reaches
 
-For Nightshift's approvals model. The hub signs `{class, verdict, why}` into
-every ask (`hub/pkg/responseauth/approval_blast.go`, `blastFor` and
-`blastForRun`; tests in `approval_model_test.go`). Verdicts: **safe** changes
-nothing that matters, **undoable** can be put back, **dangerous** cannot easily
-be, **core** is the protected core that asks the owner whatever the rows or the
-session say. Packages are the ones in `packages/` (header line 1 gives risk and
-the careful params). No hostnames or addresses appear here.
+A reference for how much each admin action can change. Since 2026-10-24 OmniNull
+does not ask the owner about any of them: the response authority authorizes every
+action on the first request (docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md
+section 2.4), so no class below needs a tap, an ask or an approval row. The code
+that computed and signed `{class, verdict, why}` into each ask
+(`approval_blast.go`) is gone; this table is the classing it used, kept as a
+guide for reviewing audit rows and for choosing which actions deserve a lock
+level or a host authority. Verdicts: **safe** changes nothing that matters,
+**undoable** can be put back, **dangerous** cannot easily be, **core** changes
+what the hub itself is allowed to do (trust, locks, capabilities, access limits,
+self-enrolment) or is something the authority cannot read, so it is refused.
+Packages are the ones in `packages/` (header line 1 gives risk and the careful
+params). No hostnames or addresses appear here.
 
 ## 1. Package runs
 
-Rule for a package run (`blastForRun`), per item, in this order:
+Rule for a package run (the removed `blastForRun`), per item, in this order:
 
 1. Mode `audit` on every item: **safe** ("audit only: changes nothing").
 2. Otherwise any of these makes the run **dangerous**: header `risk: careful`
@@ -58,34 +64,39 @@ Notes:
    disabled Snap revisions. Old journal entries do not come back; the caches
    and revisions are regenerable. It stays safe, as windows-cleanup does (note 1).
 
-## 2. Non-script asks
+## 2. Non-script actions
 
-| Ask | Class | Verdict | Why |
+All of these are authorized automatically, except where the last column says the
+authority refuses.
+
+| Action | Class | Verdict | Why |
 |---|---|---|---|
-| Agent update, owner-signed release inside the rollout rule | agent_update | undoable | canaries first; agents can be rolled back (retire, then roll forward) |
-| Agent update signed in the owner's session (routine key) | agent_update | undoable | same, signed in the owner's session |
-| Agent update outside any rollout rule | agent_update | dangerous | not an owner-signed release |
+| Agent update, release signed with the release key | agent_update | undoable | agents can be rolled back (retire, then roll forward); staged rollouts hold the rest until canaries are healthy |
+| Agent update, release signed with a routine key | agent_update | undoable | same; a rollout to more than one endpoint without named canaries is refused |
+| Agent update whose release the authority cannot verify | agent_update | dangerous | signed anyway (agents check the package signature themselves); the audit says "release signature not verified by the authority" |
 | Terminal session | remote | dangerous (lab machine: undoable) | a person's machine |
 | Remote screen session | remote | dangerous (lab machine: undoable) | a person's machine |
 | Isolate a machine | isolation | undoable | the hub can release it |
 | Isolate a host-locked machine | isolation | **core** | could cut off access to it |
-| Allow-isolation route | capability | **core** | lets the hub isolate what it could not before |
+| Allow-isolation route | capability | **core** | lets the hub isolate what it could not before; authorized and audited |
 | Capability change | capability | **core** | loosens what the hub may do on a machine |
-| Detection policy: enrolment window | enrol | **core** | opens LAN self-enrolment |
-| Detection policy: terminal limits, screen ask-first, remote access | capability | **core** | loosens remote access limits |
+| Detection policy: enrolment window | enrol | **core** | opens LAN self-enrolment; authorized and audited |
+| Detection policy: terminal limits, screen ask-first, remote access | capability | **core** | loosens remote access limits; authorized and audited |
 | Detection policy: software catalog | capability | undoable | saving the old list undoes it |
-| Detection policy with a drill that blinds a floor case | detection | dangerous | the floor case or its drill could not run |
+| Detection policy with a drill that blinds a floor case | detection | dangerous | the floor case or its drill could not run; the audit statement lists them, the save is not blocked |
 | Any other detection policy change | detection | undoable | saving the previous policy undoes it |
-| Detection change the hub cannot read | detection | **core** | unreadable |
-| Unreadable package run | package | **core** | unreadable |
+| Detection change the authority cannot read | detection | **core** | refused (invalid or oversized payload) |
+| Unreadable package run | package | **core** | refused (the authority signs only what it can read) |
 | Anything not classed | other | dangerous | default |
 
 ## 3. Scripts that are not released packages
 
-| Ask | Class | Verdict |
+Authorized on the first request, like the rest. The authority signs for at most 50 targets per request.
+
+| Action | Class | Verdict |
 |---|---|---|
 | One-off script | script | dangerous (lab machine: undoable) |
 | Script item without a package header | script | dangerous (lab machine: undoable) |
 
-The "approval_rules ask" (changing the approval rows themselves) is classed
-core in Nightshift's own model, outside this table.
+Approval rows, learned rules and the "approval_rules ask" no longer exist, so
+there is nothing left to class for them.

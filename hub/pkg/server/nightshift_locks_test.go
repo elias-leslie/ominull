@@ -20,7 +20,7 @@ func TestNightshiftLocks(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	for _, id := range []string{"ep-gem", "ep-ws", "ep-lap"} {
-		seedPlain(t, store, id)
+		seedPlainEndpoints(t, store, id)
 	}
 	srv.trust.mu.Lock()
 	srv.trust.init()
@@ -30,7 +30,7 @@ func TestNightshiftLocks(t *testing.T) {
 	srv.trust.reports["ep-lap"] = trustReportSeen{at: time.Now(), report: response.AgentTrustReport{V: 1, Profile: "respond"}}
 	srv.trust.mu.Unlock()
 
-	issue := adminPost(srv, "/api/v1/integrations/nightshift/approval-key", ``, "")
+	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}
