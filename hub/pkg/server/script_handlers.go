@@ -237,6 +237,9 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing script_id, version, or endpoint_id")
 		return
 	}
+	if s.refuseLocked(w, "script", req.EndpointID) {
+		return
+	}
 
 	// Retrieve script and verify tenant ownership & non-retired status
 	sc, err := s.scriptsStore.GetScript(tenantID, req.ScriptID)

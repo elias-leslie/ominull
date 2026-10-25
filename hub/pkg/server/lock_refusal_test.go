@@ -96,6 +96,9 @@ func TestLockedMachineRefusedBeforeSigning(t *testing.T) {
 		{"/api/v1/terminal/sessions", `{"endpoint_id":"win-locked","program":"powershell.exe"}`, "win-locked is locked to signed-scripts on the machine itself; a terminal is not allowed there"},
 		{"/api/v1/maintenance/script", `{"endpoint_ids":["win-free","win-ha"],"shell":"powershell","source":"Write-Output 1","name":"t","reason":"test"}`, "takes only Nightshift-signed scripts"},
 		{"/api/v1/maintenance/script", `{"endpoint_ids":["win-locked"],"shell":"powershell","source":"Write-Output 1","name":"t","reason":"test"}`, "has no host authority pinned"},
+		// The console's one-script run, not only maintenance: queued, the agent
+		// refuses every offer and the job fails 30 offers later as never taken.
+		{"/api/v1/scripts/run", `{"script_id":"s","version":1,"endpoint_id":"win-ha"}`, "takes only Nightshift-signed scripts"},
 	} {
 		code, m := call(tc.path, tc.body)
 		msg, _ := m["error"].(string)
