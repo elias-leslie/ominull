@@ -8,6 +8,9 @@
 #include <features.h>
 #undef __GLIBC_USE_C2X_STRTOL
 #define __GLIBC_USE_C2X_STRTOL 0
+/* glibc 2.40+ names the same switch C23_STRTOL. */
+#undef __GLIBC_USE_C23_STRTOL
+#define __GLIBC_USE_C23_STRTOL 0
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
