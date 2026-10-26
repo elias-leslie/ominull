@@ -101,8 +101,12 @@ alternative kernel I/O path without a native fixture.
 Build Linux with `clang`, `bpftool`, `libbpf-dev`, `libelf-dev`, `pkg-config` and the
 existing native dependencies. `scripts/build-bpf.sh` generates ignored skeleton
 artifacts under `build/bpf`; it uses `/sys/kernel/btf/vmlinux`, or an explicit
-`OMINULL_VMLINUX_BTF` file. `BPFTOOL` can name the tool binary. Build and package
-scripts invoke it automatically. The Linux package requires `libbpf1`.
+`OMINULL_VMLINUX_BTF` file. `BPFTOOL` can name the tool binary. Host builds like this serve the tests only.
+The shipped agent is built by `scripts/build-linux-agent.sh` in a pinned Ubuntu 24.04
+container (`OMINULL_AGENT_BUILD_IMAGE` overrides it), because the skeleton compiled
+into the agent must come from the oldest supported libbpf headers; a newer build host
+makes an agent that crashes on older hosts. `scripts/check-agent-libbpf.sh` enforces
+that. The Linux package requires `libbpf1`.
 
 `scripts/test-native-telemetry.sh` checks bounded retention and full-batch JSON,
 and cross-compiles the Windows native probes. Kernel/ETW live fixtures require an

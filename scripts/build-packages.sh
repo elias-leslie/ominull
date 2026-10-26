@@ -18,7 +18,7 @@ if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-for tool in gcc x86_64-w64-mingw32-gcc go cargo dpkg-deb wixl objdump; do
+for tool in x86_64-w64-mingw32-gcc go cargo dpkg-deb wixl objdump; do
     command -v "${tool}" >/dev/null || {
         echo "[-] Required build tool is missing: ${tool}" >&2
         exit 1
@@ -39,10 +39,8 @@ trap 'find "${WORK_DIR}" -depth -delete' EXIT
 
 echo "[*] Building retained Ominull packages v${VERSION}."
 
-bash "${ROOT_DIR}/scripts/build-bpf.sh"
-echo "[*] Building Linux agent."
-gcc -Wall -Wextra -Wformat=2 -O2 -I"${ROOT_DIR}/agent/include" \
-    "${ROOT_DIR}/agent/linux/main.c" -lbpf -lcurl -lutil -o "${BUILD_DIR}/ominulld"
+echo "[*] Building Linux agent in the baseline container."
+bash "${ROOT_DIR}/scripts/build-linux-agent.sh" "${BUILD_DIR}"
 
 echo "[*] Building hub and response authority."
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
