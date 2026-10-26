@@ -173,6 +173,11 @@ func TestScreenPolicyRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			sess, op, agent := h.open("win-x", response.ScreenModeControl)
+			// A dial returns once the upgrade is accepted, before the hub owns
+			// both sockets. A frame sent now can end the session with nobody
+			// to tell, so wait until one passes through the relay first.
+			send(t, op, websocket.TextMessage, `{"type":"quality","fps":1,"jpeg_q":50}`)
+			read(t, agent)
 			c, other := op, agent
 			if tc.side == "agent" {
 				c, other = agent, op
