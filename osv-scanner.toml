@@ -1,0 +1,7 @@
+# golang.org/x/crypto/openpgp is unmaintained and has no fixed release; the advisory covers
+# the whole module version. The hub imports only x/crypto/bcrypt (hub/pkg/auth); nothing
+# imports openpgp. Revisit when the advisory gains a fixed version or the module drops it.
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-01-07T00:00:00Z
+reason = "Not reachable: no code imports golang.org/x/crypto/openpgp (hub uses only bcrypt); no fixed release yet"

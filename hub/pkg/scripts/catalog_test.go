@@ -58,6 +58,11 @@ func TestCatalogEntryRules(t *testing.T) {
 	if d := reg.Describe(); !strings.Contains(d, "the program's own uninstaller /VERYSILENT /NORESTART") || !strings.Contains(d, "game_addons") {
 		t.Fatal(d)
 	}
+	quoted := reg
+	quoted.Match, quoted.Publisher = "Bob's App*", "O'Neil"
+	if d := quoted.Describe(); !strings.Contains(d, "matches 'Bob\u2019s App*' by 'O\u2019Neil'") {
+		t.Fatal(d)
+	}
 }
 
 func TestCatalogWire(t *testing.T) {

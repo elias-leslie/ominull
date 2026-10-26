@@ -961,6 +961,7 @@
   }
 
   var DEMO_CACHE = null;
+  var demoScreenSeq = 0;
 
   /* The same merge rule the hub applies, so a demo correction visibly wins
      the field the way a live one would. */
@@ -1450,7 +1451,7 @@
     };
     /* Remote screen in the demo: the session and the launch code are made up;
        the viewer link goes nowhere without the native viewer installed. */
-    if (base === "/api/v1/screen/sessions" && method === "POST") return { session_id: "demo-screen-" + Math.random().toString(16).slice(2, 8), mode: body.mode, kind: "screen" };
+    if (base === "/api/v1/screen/sessions" && method === "POST") return { session_id: "demo-screen-" + (++demoScreenSeq).toString(16).padStart(6, "0"), mode: body.mode, kind: "screen" };
     if (base === "/api/v1/screen/sessions/launch") return { code: "demo-launch-code-not-valid", expires_in: 60 };
     if (base === "/api/v1/screen/sessions" && method === "DELETE") return { status: "closed" };
     if (base === "/api/v1/terminal/limits") {

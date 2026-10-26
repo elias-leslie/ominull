@@ -222,15 +222,22 @@ func ParseCatalogWire(v string) (Catalog, error) {
 	return c, nil
 }
 
+// describeQuoted wraps a catalog value in single quotes for the owner-facing
+// description. Apostrophes inside the value become typographic ones so the
+// value cannot end the quoting early.
+func describeQuoted(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", "\u2019") + "'"
+}
+
 // Describe says what an entry is for the owner, e.g. "Epic Games Launcher
 // (games; matches 'Epic Games Launcher*'; Windows Installer)".
 func (e *CatalogEntry) Describe() string {
-	what := "matches '" + e.Match + "'"
+	what := "matches " + describeQuoted(e.Match)
 	if e.Kind == "appx" {
-		what = "Store app '" + e.Match + "'"
+		what = "Store app " + describeQuoted(e.Match)
 	}
 	if e.Publisher != "" {
-		what += " by '" + e.Publisher + "'"
+		what += " by " + describeQuoted(e.Publisher)
 	}
 	how := CatalogMethods[e.Kind][e.Method]
 	if e.Flag != "" {
