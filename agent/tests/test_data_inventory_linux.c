@@ -209,7 +209,8 @@ static void put(const char* rel, const char* content, mode_t mode) {
 static char g_aws[64], g_pw[64], g_urlpw[64];
 
 static void make_tree(void) {
-    snprintf(g_root, sizeof(g_root), "/tmp/ominull-di-test-XXXXXX");
+    // /var/tmp, not /tmp: the inventory walks local disk filesystems only, and /tmp is tmpfs on many hosts (Ubuntu 26.04).
+    snprintf(g_root, sizeof(g_root), "/var/tmp/ominull-di-test-XXXXXX");
     assert(mkdtemp(g_root));
     join(g_aws, sizeof(g_aws), "AKIA", "QZXCVBNMASDFGHJK");
     join(g_pw, sizeof(g_pw), "Xk9mQ2vL7p", "R4zWt8Yb");
