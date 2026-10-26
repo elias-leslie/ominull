@@ -55,6 +55,15 @@ echo "[*] Building hub and response authority."
 # MSI, and its SHA-256 is compiled into the agent, which refuses to launch any
 # other file as SYSTEM in the console session.
 echo "[*] Building the Windows remote screen helper."
+# A fresh CI checkout has no vendor directory (it is ignored by git): fetch the
+# crates pinned in Cargo.lock there. Local builds keep the explicit step.
+if [ ! -d "${ROOT_DIR}/screen/helper/vendor" ] && [ "${CI:-}" = "true" ]; then
+    echo "[*] CI checkout: vendoring the screen crates pinned in Cargo.lock."
+    "${ROOT_DIR}/screen/vendor.sh"
+    if command -v rustup >/dev/null; then
+        rustup target add x86_64-pc-windows-gnu
+    fi
+fi
 [ -d "${ROOT_DIR}/screen/helper/vendor" ] || {
     echo "[-] screen/helper/vendor is missing; run screen/vendor.sh (it fetches the crates pinned in Cargo.lock)." >&2
     exit 1
