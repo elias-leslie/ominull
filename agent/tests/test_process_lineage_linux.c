@@ -659,7 +659,8 @@ static void test_path_names_running(void) {
 
     // The real kernel: a copied program, started and then deleted, keeps its path.
     char sleeper[512];
-    mock_path(sleeper, sizeof(sleeper), "bin/sleeper");
+    // The copy keeps the name "sleep": a multi-call coreutils (uutils, Ubuntu 26.04) picks the tool by its file name.
+    mock_path(sleeper, sizeof(sleeper), "bin/sleep");
     int in = open("/bin/sleep", O_RDONLY), out = open(sleeper, O_WRONLY | O_CREAT | O_TRUNC, 0755);
     char buf[65536];
     ssize_t got;
@@ -670,7 +671,6 @@ static void test_path_names_running(void) {
     if (out >= 0) close(out);
     pid_t child = fork();
     if (child == 0) {
-        // argv[0] stays "sleep": a multi-call coreutils (uutils, Ubuntu 26.04) picks the tool by argv[0].
         execl(sleeper, "sleep", "5", (char*)NULL);
         _exit(127);
     }
