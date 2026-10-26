@@ -40,10 +40,14 @@ func Install() (cleanup func()) {
 		shim(name, deny)
 	}
 	realCtl, _ := exec.LookPath("systemctl")
-	pass := ""
+	// Without a real systemctl (a minimal PATH, a container) a read-only verb
+	// answers "inactive" (exit 3) instead of counting as a privileged call.
+	const verbs = "is-active|is-enabled|show|status|list-units|list-unit-files|list-timers|--version"
+	pass := "exit 3"
 	if realCtl != "" {
-		pass = fmt.Sprintf("verb=\"$1\"\nfor a in \"$@\"; do case \"$a\" in -*) ;; *) verb=\"$a\"; break ;; esac; done\ncase \"$verb\" in is-active|is-enabled|show|status|list-units|list-unit-files|list-timers|--version) exec %q \"$@\" ;; esac\n", realCtl)
+		pass = fmt.Sprintf("exec %q \"$@\"", realCtl)
 	}
+	pass = "verb=\"$1\"\nfor a in \"$@\"; do case \"$a\" in -*) ;; *) verb=\"$a\"; break ;; esac; done\ncase \"$verb\" in " + verbs + ") " + pass + " ;; esac\n"
 	shim("systemctl", pass+deny)
 	_ = os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return func() { _ = os.RemoveAll(dir) }
