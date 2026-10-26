@@ -670,7 +670,8 @@ static void test_path_names_running(void) {
     if (out >= 0) close(out);
     pid_t child = fork();
     if (child == 0) {
-        execl(sleeper, "sleeper", "5", (char*)NULL);
+        // argv[0] stays "sleep": a multi-call coreutils (uutils, Ubuntu 26.04) picks the tool by argv[0].
+        execl(sleeper, "sleep", "5", (char*)NULL);
         _exit(127);
     }
     char exeLink[64], exe[PATH_MAX];
