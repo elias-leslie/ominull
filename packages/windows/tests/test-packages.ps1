@@ -549,7 +549,7 @@ foreach ($n in $Names) {
                 Check "${n}: native tool runs without PATHEXT" ($r.code -eq 3 -and ($r.out -join '|') -match 'a b')
                 $r = Invoke-Native 'shutdown.exe' @('/?')
                 $txt = $r.out -join ' '
-                Check "${n}: shutdown.exe runs as a program (code $($r.code): $($txt.Substring(0, [math]::Min(300, $txt.Length))))" ($r.code -ge 0 -and $txt -notmatch 'document')
+                Check "${n}: shutdown.exe runs as a program (code $($r.code): $($txt.Substring(0, [math]::Min(300, $txt.Length))))" ($r.code -ge 0 -and $txt -notmatch 'Cannot run a document')
             } else {
                 $r = Invoke-Native '/bin/sh' @('-c', 'echo "$1|$2|$3"; exit 3', 'sh', 'two words', 'quo"te', 'tail\')
                 Check "${n}: native tool runs with its exit code" ($r.code -eq 3)

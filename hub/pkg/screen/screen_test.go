@@ -61,7 +61,11 @@ func (h *harness) dial(path string, q url.Values) *websocket.Conn {
 	return c
 }
 
-// open creates a session and attaches both sides.
+// open creates a session and attaches both sides. A dial returns once the
+// upgrade is accepted, before the hub owns the socket, and a frame that crosses
+// in that gap has nobody to go to (or ends the session with nobody to tell). So
+// open sends an ack through the relay and waits for the agent to receive it,
+// which happens only after the hub owns both sockets.
 func (h *harness) open(endpoint, mode string) (*terminal.TerminalSession, *websocket.Conn, *websocket.Conn) {
 	h.t.Helper()
 	sess, err := CreateSession(h.mgr, "t1", endpoint, "alice", mode, screenGrant(endpoint), 0)
@@ -71,6 +75,8 @@ func (h *harness) open(endpoint, mode string) (*terminal.TerminalSession, *webso
 	agent := h.dial("/agent", url.Values{"session_id": {sess.SessionID}, "endpoint_id": {endpoint}, "token": {sess.ConnectToken}})
 	op := h.dial("/op", url.Values{"session_id": {sess.SessionID}, "token": {sess.OperatorToken}})
 	h.t.Cleanup(func() { _ = agent.Close(); _ = op.Close() })
+	send(h.t, op, websocket.TextMessage, `{"type":"ack","frame":0}`)
+	read(h.t, agent)
 	return sess, op, agent
 }
 
@@ -173,11 +179,6 @@ func TestScreenPolicyRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			sess, op, agent := h.open("win-x", response.ScreenModeControl)
-			// A dial returns once the upgrade is accepted, before the hub owns
-			// both sockets. A frame sent now can end the session with nobody
-			// to tell, so wait until one passes through the relay first.
-			send(t, op, websocket.TextMessage, `{"type":"quality","fps":1,"jpeg_q":50}`)
-			read(t, agent)
 			c, other := op, agent
 			if tc.side == "agent" {
 				c, other = agent, op
