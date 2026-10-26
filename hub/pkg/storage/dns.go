@@ -39,10 +39,12 @@ type DNSEventFilter struct {
 	Offset   int
 }
 
-// dnsEventsSchema: an integer key, minute aggregation (count), and two
-// indexes (time, client and time). The old text uuid key, its autoindex and a
-// domain index no query could use (the filter is a substring match) were
-// 40% of each row.
+// dnsEventsSchema: an integer key, minute aggregation (count), and one index
+// (time: retention pruning and the data report's client-day count). The old
+// text uuid key, its autoindex and a domain index no query could use (the
+// filter is a substring match) were 40% of each row. A (client, time) index
+// followed; it was a sixth of the router's stored bytes, and the only reader
+// of dns_events by client, ListDNSEvents, has no caller outside tests.
 const dnsEventsSchema = `
 	CREATE TABLE IF NOT EXISTS dns_events (
 		id INTEGER PRIMARY KEY,
@@ -61,7 +63,6 @@ const dnsEventsSchema = `
 		count INTEGER NOT NULL DEFAULT 1
 	);
 	CREATE INDEX IF NOT EXISTS idx_dns_events_time ON dns_events(timestamp);
-	CREATE INDEX IF NOT EXISTS idx_dns_events_client_time ON dns_events(client_ip, timestamp);
 `
 
 func (s *Store) initDNSSchema() error {
@@ -76,7 +77,11 @@ func (s *Store) initDNSSchema() error {
 	if exists > 0 && hasCount == 0 {
 		return s.rebuildDNSEvents()
 	}
-	_, err := s.db.Exec(dnsEventsSchema)
+	if _, err := s.db.Exec(dnsEventsSchema); err != nil {
+		return err
+	}
+	// Hubs older than the single-index shape still carry the client index.
+	_, err := s.db.Exec("DROP INDEX IF EXISTS idx_dns_events_client_time")
 	return err
 }
 

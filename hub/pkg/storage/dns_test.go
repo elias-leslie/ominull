@@ -46,3 +46,20 @@ func TestDNSStorage(t *testing.T) {
 	}
 
 }
+
+func TestDNSSchemaDropsTheClientIndexOnOlderHubs(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec("CREATE INDEX idx_dns_events_client_time ON dns_events(client_ip, timestamp)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.initDNSSchema(); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'dns_events' AND name LIKE 'idx_dns_events_%'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("dns_events has %d named indexes, want only the time index", n)
+	}
+}
