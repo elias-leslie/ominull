@@ -22,7 +22,7 @@ GOTOOLCHAIN = "local"
 GOFLAGS = "-mod=readonly"
 
 [native.tools]
-go = "/srv/scratch/cache/home/go--pkg--mod/golang.org/toolchain@v0.0.1-go1.26.9.linux-amd64/bin/go"
+go = "/srv/scratch/cache/home/go--pkg--mod/golang.org/toolchain@v0.0.1-go1.26.10.linux-amd64/bin/go"
 python3 = "/usr/bin/python3.12"
 gcc = "/usr/bin/gcc"
 as = "/usr/bin/as"
