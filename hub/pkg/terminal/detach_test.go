@@ -117,6 +117,30 @@ func (h *detachHarness) waitState(sess *TerminalSession, want SessionState) {
 	h.t.Fatalf("session did not reach state %q within 3s (still %q)", want, got)
 }
 
+// waitOperatorSocket waits until the hub owns the attached operator socket.
+// The state turns active before the upgrade finishes, so a second attach that
+// races the first finds an operator that is connected but has no socket to
+// detach yet and is refused.
+func (h *detachHarness) waitOperatorSocket(sess *TerminalSession) {
+	h.t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		sess.mu.RLock()
+		relay := sess.relay
+		sess.mu.RUnlock()
+		if relay != nil {
+			relay.mu.Lock()
+			attached := relay.opConn != nil
+			relay.mu.Unlock()
+			if attached {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	h.t.Fatalf("the hub never took ownership of the operator socket within 3s")
+}
+
 func (h *detachHarness) attachOperator(sess *TerminalSession) *websocket.Conn {
 	h.t.Helper()
 	token, err := h.mgr.RotateOperatorToken(sess.SessionID)
@@ -499,6 +523,7 @@ func TestReattachTakesOverAHalfOpenSocket(t *testing.T) {
 	defer agentWS.Close()
 	oldWS := h.attachOperator(sess)
 	h.waitState(sess, StateActive)
+	h.waitOperatorSocket(sess)
 
 	newWS := h.attachOperator(sess) // old socket still open
 	defer newWS.Close()

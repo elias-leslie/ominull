@@ -53,7 +53,7 @@ foreach ($n in $Names) {
     Check "$n size < 32768 bytes ($($bytes.Length))" ($bytes.Length -lt 32768)
     Check "$n is ASCII without BOM" (-not ($bytes | Where-Object { $_ -gt 127 }))
     $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-    $lines = $text -split "`n"
+    $lines = $text -split "`r?`n" # Windows checkouts convert line endings to CRLF
     $meta = $null
     if ($lines[0] -match '^# ominull-package: (\{.*\})$') { try { $meta = $matches[1] | ConvertFrom-Json } catch {} }
     Check "$n header line is JSON" ($null -ne $meta)
@@ -548,7 +548,8 @@ foreach ($n in $Names) {
                 $r = Invoke-Native 'cmd.exe' @('/d', '/c', 'echo a b& exit 3')
                 Check "${n}: native tool runs without PATHEXT" ($r.code -eq 3 -and ($r.out -join '|') -match 'a b')
                 $r = Invoke-Native 'shutdown.exe' @('/?')
-                Check "${n}: shutdown.exe runs as a program" ($r.code -ge 0 -and ($r.out -join ' ') -notmatch 'document')
+                $txt = $r.out -join ' '
+                Check "${n}: shutdown.exe runs as a program (code $($r.code): $($txt.Substring(0, [math]::Min(300, $txt.Length))))" ($r.code -ge 0 -and $txt -notmatch 'document')
             } else {
                 $r = Invoke-Native '/bin/sh' @('-c', 'echo "$1|$2|$3"; exit 3', 'sh', 'two words', 'quo"te', 'tail\')
                 Check "${n}: native tool runs with its exit code" ($r.code -eq 3)
