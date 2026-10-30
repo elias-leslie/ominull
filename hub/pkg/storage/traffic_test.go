@@ -2,6 +2,7 @@ package storage
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -254,5 +255,156 @@ func TestOverviewReportsHowFarBackTelemetryGoes(t *testing.T) {
 	if !overview.RetainedFrom.After(overview.WindowStart) {
 		t.Errorf("a floor inside the window must read as later than the window start; floor %s, window from %s",
 			overview.RetainedFrom, overview.WindowStart)
+	}
+}
+
+// TestTrafficFlowListAndDetailAgree pins that the flow list and the flow
+// detail read the same columns into the same item, including the derived
+// process name and protocol name, so a column added to one cannot be missed
+// by the other.
+func TestTrafficFlowListAndDetailAgree(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "traffic_agree.db"))
+	if err != nil {
+		t.Fatalf("storage.New() failed: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	observed := now.Add(-2 * time.Second)
+	first := now.Add(-50 * time.Second)
+	events := []Event{
+		{
+			TenantID:                "default",
+			Timestamp:               now.Add(-3 * time.Minute),
+			EndpointID:              "ep-win",
+			Layer:                   "windows-wfp-v1",
+			Action:                  "PERMIT",
+			Direction:               "OUTBOUND",
+			Protocol:                17,
+			SrcIP:                   "10.0.0.31",
+			DstIP:                   "192.0.2.53",
+			SrcPort:                 51000,
+			DstPort:                 53,
+			ProcessPath:             `C:\Program Files\Example\example.exe`,
+			ProcessID:               4321,
+			Domain:                  "example.invalid",
+			Country:                 "US",
+			BytesIn:                 512,
+			BytesOut:                128,
+			ProcessInstanceID:       "boot-1:4321:1",
+			ParentPID:               700,
+			ParentProcessInstanceID: "boot-1:700:1",
+			CommandLine:             `"C:\Program Files\Example\example.exe" --sync`,
+			UserIdentity:            `EXAMPLE\user`,
+			ExecutableSHA256:        "b8f88636e08c48a73a6e975ff8f407b0cf9fe7ebae665e8a69e3805bfde960c1",
+			AttributionStatus:       "authoritative",
+			ObservedAt:              &observed,
+			Observation:             FlowObservation{Incomplete: true, Source: "udp-observed", Count: 3, FirstAt: &first, Lost: 1},
+		},
+		{
+			TenantID:    "default",
+			Timestamp:   now.Add(-2 * time.Minute),
+			EndpointID:  "ep-lin",
+			Layer:       "linux-socket-v1",
+			Action:      "BLOCK",
+			Direction:   "INBOUND",
+			Protocol:    6,
+			SrcIP:       "198.51.100.7",
+			DstIP:       "10.0.0.32",
+			SrcPort:     40000,
+			DstPort:     22,
+			ProcessPath: "",
+			Country:     "NL",
+		},
+		{
+			TenantID:    "default",
+			Timestamp:   now.Add(-1 * time.Minute),
+			EndpointID:  "ep-lin",
+			Layer:       "linux-socket-v1",
+			Action:      "PERMIT",
+			Direction:   "OUTBOUND",
+			Protocol:    6,
+			SrcIP:       "10.0.0.32",
+			DstIP:       "203.0.113.9",
+			SrcPort:     40001,
+			DstPort:     443,
+			ProcessPath: "/usr/bin/curl",
+			ProcessID:   99,
+			BytesIn:     2048,
+			BytesOut:    300,
+		},
+		{
+			TenantID:    "default",
+			Timestamp:   now.Add(-30 * time.Second),
+			EndpointID:  "ep-lin",
+			Layer:       "linux-socket-v1",
+			Action:      "PERMIT",
+			Direction:   "OUTBOUND",
+			Protocol:    1,
+			SrcIP:       "10.0.0.32",
+			DstIP:       "203.0.113.10",
+			ProcessPath: "/opt/app/",
+		},
+	}
+	if err := store.InsertEventsBatch(events); err != nil {
+		t.Fatalf("InsertEventsBatch failed: %v", err)
+	}
+
+	res, err := store.QueryTrafficFlows(TrafficFilter{TenantID: "default", Range: "1h", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryTrafficFlows failed: %v", err)
+	}
+	if len(res.Flows) != len(events) {
+		t.Fatalf("expected %d flows, got %d", len(events), len(res.Flows))
+	}
+
+	names := map[string]string{}
+	for _, listed := range res.Flows {
+		detail, err := store.GetTrafficFlowByID(listed.ID, "default")
+		if err != nil || detail == nil {
+			t.Fatalf("GetTrafficFlowByID(%s) = %v, %v", listed.ID, detail, err)
+		}
+		if !reflect.DeepEqual(listed, *detail) {
+			t.Errorf("list and detail differ for flow %s:\nlist   %+v\ndetail %+v", listed.ID, listed, *detail)
+		}
+		names[listed.EndpointID+"|"+listed.DstIP] = listed.ProcessName + "|" + listed.ProtoName
+
+		if other, err := store.GetTrafficFlowByID(listed.ID, "other-tenant"); err != nil || other != nil {
+			t.Errorf("flow %s visible to another tenant: %v, %v", listed.ID, other, err)
+		}
+	}
+
+	want := map[string]string{
+		"ep-win|192.0.2.53":   "example.exe|UDP",
+		"ep-lin|10.0.0.32":    "unknown|TCP",
+		"ep-lin|203.0.113.9":  "curl|TCP",
+		"ep-lin|203.0.113.10": "unknown|ICMP",
+	}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("process|protocol names = %v, want %v", names, want)
+	}
+
+	var win TrafficFlowItem
+	for _, f := range res.Flows {
+		if f.EndpointID == "ep-win" {
+			win = f
+		}
+	}
+	if win.ObservedAt == nil || !win.ObservedAt.Equal(observed) || win.ObservedAt.Location() != time.UTC {
+		t.Errorf("ObservedAt = %v, want %v in UTC", win.ObservedAt, observed)
+	}
+	if win.ProcessID != 4321 || win.ParentPID != 700 || win.CommandLine == "" || win.UserIdentity == "" ||
+		win.ExecutableSHA256 == "" || win.AttributionStatus != "authoritative" || win.ParentProcessInstanceID == "" {
+		t.Errorf("lineage fields not read back: %+v", win)
+	}
+	if !win.Observation.Incomplete || win.Observation.Source != "udp-observed" || win.Observation.Count != 3 {
+		t.Errorf("observation not read back: %+v", win.Observation)
+	}
+
+	if missing, err := store.GetTrafficFlowByID("999999", "default"); err != nil || missing != nil {
+		t.Errorf("missing flow = %v, %v; want nil, nil", missing, err)
+	}
+	if _, err := store.GetTrafficFlowByID("not-a-number", "default"); err == nil {
+		t.Error("non-numeric flow id accepted")
 	}
 }

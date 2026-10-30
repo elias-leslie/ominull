@@ -811,38 +811,7 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 	}
 
 	// 2. Fetch page (limit + 1 to check next page)
-	query := fmt.Sprintf(`
-		SELECT
-			id,
-			tenant_id,
-			timestamp,
-			endpoint_id,
-			layer,
-			action,
-			direction,
-			protocol,
-			src_ip,
-			dst_ip,
-			src_port,
-			dst_port,
-			process_path,
-			domain,
-			country,
-			bytes_in,
-			bytes_out,
-			COALESCE(process_instance_id, ''),
-			COALESCE(parent_pid, 0),
-			COALESCE(parent_process_instance_id, ''),
-			COALESCE(command_line, ''),
-			COALESCE(user_identity, ''),
-			COALESCE(executable_sha256, ''),
-			COALESCE(attribution_status, ''),
-			observed_at, COALESCE(observation_json, '{}'), process_id
-		FROM events
-		%s
-		ORDER BY timestamp DESC, id DESC
-		LIMIT ? OFFSET ?
-	`, whereClause)
+	query := "SELECT " + trafficFlowColumns + " FROM events" + whereClause + " ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?"
 
 	pageArgs := append(args, limit+1, offset)
 	rows, err := s.db.Query(query, pageArgs...)
@@ -859,87 +828,11 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 			hasNext = true
 			break
 		}
-		var (
-			rowID       int64
-			tenantID    string
-			timestamp   time.Time
-			endpointID  string
-			layer       string
-			action      string
-			direction   string
-			protocol    int
-			srcIP       string
-			dstIP       string
-			srcPort     int
-			dstPort     int
-			processPath string
-			domain      string
-			country     string
-			bytesIn     int64
-			bytesOut    int64
-			procInstID  string
-			pPID        uint32
-			pProcInst   string
-			cmdLine     string
-			userIdent   string
-			exeSHA      string
-			attrStat    string
-			obsAtNull   sql.NullTime
-			observation FlowObservation
-			processID   uint32
-		)
-		if err := rows.Scan(&rowID, &tenantID, &timestamp, &endpointID, &layer, &action, &direction,
-			&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut,
-			&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull, &observation, &processID); err != nil {
+		flow, err := scanTrafficFlow(rows)
+		if err != nil {
 			return nil, err
 		}
-
-		var obsAt *time.Time
-		if obsAtNull.Valid {
-			t := obsAtNull.Time.UTC()
-			obsAt = &t
-		}
-
-		protoName := ProtocolName(protocol)
-
-		cleanPath := strings.ReplaceAll(processPath, "\\", "/")
-		parts := strings.Split(cleanPath, "/")
-		procName := parts[len(parts)-1]
-		if procName == "" || procName == "." {
-			procName = "unknown"
-		}
-
-		flows = append(flows, TrafficFlowItem{
-			ID:                      strconv.FormatInt(rowID, 10),
-			TenantID:                tenantID,
-			Timestamp:               timestamp,
-			EndpointID:              endpointID,
-			Layer:                   layer,
-			Action:                  action,
-			Direction:               direction,
-			Protocol:                protocol,
-			ProtoName:               protoName,
-			SrcIP:                   srcIP,
-			DstIP:                   dstIP,
-			SrcPort:                 srcPort,
-			DstPort:                 dstPort,
-			ProcessPath:             processPath,
-			ProcessName:             procName,
-			Domain:                  domain,
-			Country:                 country,
-			BytesIn:                 bytesIn,
-			BytesOut:                bytesOut,
-			ProcessInstanceID:       procInstID,
-			ParentPID:               pPID,
-			ParentProcessInstanceID: pProcInst,
-			CommandLine:             cmdLine,
-			UserIdentity:            userIdent,
-			ExecutableSHA256:        exeSHA,
-			AttributionStatus:       attrStat,
-			ObservedAt:              obsAt,
-			Observation:             observation,
-			ProcessID:               processID,
-		})
+		flows = append(flows, flow)
 	}
 
 	nextCursor := ""
@@ -953,6 +846,41 @@ func (s *Store) QueryTrafficFlows(filter TrafficFilter) (*TrafficFlowsResult, er
 
 	res := TrafficFlowResultWithAnomalies(s, flows, nextCursor, total, activeFilters)
 	return &res, nil
+}
+
+// trafficFlowColumns is what the flow list and the flow detail select from
+// events; scanTrafficFlow reads them in this order.
+const trafficFlowColumns = `id, tenant_id, timestamp, endpoint_id, layer, action, direction, protocol,
+	src_ip, dst_ip, src_port, dst_port, process_path, domain, country, bytes_in, bytes_out,
+	COALESCE(process_instance_id, ''), COALESCE(parent_pid, 0), COALESCE(parent_process_instance_id, ''),
+	COALESCE(command_line, ''), COALESCE(user_identity, ''), COALESCE(executable_sha256, ''),
+	COALESCE(attribution_status, ''), observed_at, COALESCE(observation_json, '{}'), process_id`
+
+func scanTrafficFlow(row interface{ Scan(...any) error }) (TrafficFlowItem, error) {
+	var (
+		f         TrafficFlowItem
+		rowID     int64
+		obsAtNull sql.NullTime
+	)
+	if err := row.Scan(&rowID, &f.TenantID, &f.Timestamp, &f.EndpointID, &f.Layer, &f.Action, &f.Direction,
+		&f.Protocol, &f.SrcIP, &f.DstIP, &f.SrcPort, &f.DstPort, &f.ProcessPath, &f.Domain, &f.Country, &f.BytesIn, &f.BytesOut,
+		&f.ProcessInstanceID, &f.ParentPID, &f.ParentProcessInstanceID, &f.CommandLine, &f.UserIdentity, &f.ExecutableSHA256,
+		&f.AttributionStatus, &obsAtNull, &f.Observation, &f.ProcessID); err != nil {
+		return TrafficFlowItem{}, err
+	}
+	f.ID = strconv.FormatInt(rowID, 10)
+	if obsAtNull.Valid {
+		t := obsAtNull.Time.UTC()
+		f.ObservedAt = &t
+	}
+	f.ProtoName = ProtocolName(f.Protocol)
+
+	parts := strings.Split(strings.ReplaceAll(f.ProcessPath, "\\", "/"), "/")
+	f.ProcessName = parts[len(parts)-1]
+	if f.ProcessName == "" || f.ProcessName == "." {
+		f.ProcessName = "unknown"
+	}
+	return f, nil
 }
 
 func TrafficFlowResultWithAnomalies(s *Store, flows []TrafficFlowItem, nextCursor string, total int64, activeFilters map[string]interface{}) TrafficFlowsResult {
@@ -974,68 +902,7 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `
-		SELECT
-			id,
-			tenant_id,
-			timestamp,
-			endpoint_id,
-			layer,
-			action,
-			direction,
-			protocol,
-			src_ip,
-			dst_ip,
-			src_port,
-			dst_port,
-			process_path,
-			domain,
-			country,
-			bytes_in,
-			bytes_out,
-			COALESCE(process_instance_id, ''),
-			COALESCE(parent_pid, 0),
-			COALESCE(parent_process_instance_id, ''),
-			COALESCE(command_line, ''),
-			COALESCE(user_identity, ''),
-			COALESCE(executable_sha256, ''),
-			COALESCE(attribution_status, ''),
-			observed_at, COALESCE(observation_json, '{}'), process_id
-		FROM events
-		WHERE id = ?
-	`
-	var (
-		tID         string
-		timestamp   time.Time
-		endpointID  string
-		layer       string
-		action      string
-		direction   string
-		protocol    int
-		srcIP       string
-		dstIP       string
-		srcPort     int
-		dstPort     int
-		processPath string
-		domain      string
-		country     string
-		bytesIn     int64
-		bytesOut    int64
-		procInstID  string
-		pPID        uint32
-		pProcInst   string
-		cmdLine     string
-		userIdent   string
-		exeSHA      string
-		attrStat    string
-		obsAtNull   sql.NullTime
-		observation FlowObservation
-		processID   uint32
-	)
-
-	err = s.db.QueryRow(query, rowID).Scan(&rowID, &tID, &timestamp, &endpointID, &layer, &action, &direction,
-		&protocol, &srcIP, &dstIP, &srcPort, &dstPort, &processPath, &domain, &country, &bytesIn, &bytesOut,
-		&procInstID, &pPID, &pProcInst, &cmdLine, &userIdent, &exeSHA, &attrStat, &obsAtNull, &observation, &processID)
+	flow, err := scanTrafficFlow(s.db.QueryRow("SELECT "+trafficFlowColumns+" FROM events WHERE id = ?", rowID))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1043,54 +910,8 @@ func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlow
 		return nil, err
 	}
 
-	if tenantID != "" && tID != tenantID {
+	if tenantID != "" && flow.TenantID != tenantID {
 		return nil, nil
 	}
-
-	var obsAt *time.Time
-	if obsAtNull.Valid {
-		t := obsAtNull.Time.UTC()
-		obsAt = &t
-	}
-
-	protoName := ProtocolName(protocol)
-
-	cleanPath := strings.ReplaceAll(processPath, "\\", "/")
-	parts := strings.Split(cleanPath, "/")
-	procName := parts[len(parts)-1]
-	if procName == "" || procName == "." {
-		procName = "unknown"
-	}
-
-	return &TrafficFlowItem{
-		ID:                      strconv.FormatInt(rowID, 10),
-		TenantID:                tID,
-		Timestamp:               timestamp,
-		EndpointID:              endpointID,
-		Layer:                   layer,
-		Action:                  action,
-		Direction:               direction,
-		Protocol:                protocol,
-		ProtoName:               protoName,
-		SrcIP:                   srcIP,
-		DstIP:                   dstIP,
-		SrcPort:                 srcPort,
-		DstPort:                 dstPort,
-		ProcessPath:             processPath,
-		ProcessName:             procName,
-		Domain:                  domain,
-		Country:                 country,
-		BytesIn:                 bytesIn,
-		BytesOut:                bytesOut,
-		ProcessInstanceID:       procInstID,
-		ParentPID:               pPID,
-		ParentProcessInstanceID: pProcInst,
-		CommandLine:             cmdLine,
-		UserIdentity:            userIdent,
-		ExecutableSHA256:        exeSHA,
-		AttributionStatus:       attrStat,
-		ObservedAt:              obsAt,
-		Observation:             observation,
-		ProcessID:               processID,
-	}, nil
+	return &flow, nil
 }
