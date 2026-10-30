@@ -276,7 +276,9 @@ func windowsInterpreter(interp string) bool {
 
 // maintenanceFindings is the Nightshift feed's maintenance record. A package
 // whose latest run on a host failed or never answered needs the owner: that
-// is the one finding raised to critical (Nightshift pushes it). A schedule
+// is the one finding raised to critical (Nightshift pushes it). On a host
+// that is off now nothing can repeat the run until it is back, so its failure
+// is listed as waiting on the host, a low finding, not critical. A schedule
 // blocked by an authority refusal is a medium finding on the board; reboots
 // needed and changes waiting in audit runs are counts in the resolved record.
 func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
@@ -295,9 +297,10 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 		State    string    `json:"state"`
 		Reason   string    `json:"reason,omitempty"`
 		At       time.Time `json:"at"`
+		OffSince time.Time `json:"off_since,omitzero"`
 	}
-	var failures []failure
-	var failed []feedResource
+	var failures, waiting []failure
+	var failed, away []feedResource
 	reboot := []string{}
 	drift, runs := 0, 0
 	compliance := map[string]map[string]int{} // category -> pass/fail
@@ -318,7 +321,8 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 		if err != nil {
 			return nil, err
 		}
-		hostFailed := false
+		hostFailed, hostWaiting := false, false
+		off := now.Sub(ep.LastSeenAt) >= feedOnlineWindow
 		for _, sc := range list {
 			job := latest[sc.ID]
 			if sc.Package() == nil || job == nil {
@@ -329,8 +333,15 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 			runs++
 			switch run.State {
 			case "failed", "no_result":
-				failures = append(failures, failure{Endpoint: ep.Hostname, Package: sc.Name, State: run.State, Reason: run.Reason, At: job.RequestedAt})
-				hostFailed = true
+				f := failure{Endpoint: ep.Hostname, Package: sc.Name, State: run.State, Reason: run.Reason, At: job.RequestedAt}
+				if off {
+					f.OffSince = ep.LastSeenAt.UTC()
+					waiting = append(waiting, f)
+					hostWaiting = true
+				} else {
+					failures = append(failures, f)
+					hostFailed = true
+				}
 			case "drift":
 				drift++
 			}
@@ -349,9 +360,15 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 		if hostFailed {
 			failed = append(failed, feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID})
 		}
+		if hostWaiting {
+			away = append(away, feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID})
+		}
 	}
 	unmapped := map[string]any{"latest_runs": runs, "needs_changes": drift, "reboot_needed": reboot, "compliance": compliance}
 	var out []feedFinding
+	if len(waiting) > 0 {
+		unmapped["waiting"] = waiting[:min(len(waiting), 20)]
+	}
 	if len(failures) > 0 {
 		if len(failures) > 20 {
 			failures = failures[:20]
@@ -359,6 +376,9 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 		unmapped["failures"] = failures
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevCritical, ocsfStatusNew,
 			fmt.Sprintf("%s failed on %s", plural(len(failures), "maintenance package run", "maintenance package runs"), plural(len(failed), "host", "hosts")), failed, unmapped))
+	} else if len(waiting) > 0 {
+		out = append(out, s.feedFinding(now, uid, title, ocsfSevLow, ocsfStatusNew, waitingMessage(waiting[0].Package, waiting[0].Endpoint,
+			waiting[0].Reason, waiting[0].OffSince, len(waiting), len(away)), away, unmapped))
 	} else {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			fmt.Sprintf("No failed maintenance runs (%d latest, %d need a reboot)", runs, len(reboot)), nil, unmapped))
@@ -370,6 +390,20 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 		out = append(out, s.feedFinding(now, schedUID, schedTitle, ocsfSevInformational, ocsfStatusResolved, "No scheduled package is waiting", nil, nil))
 	}
 	return out, nil
+}
+
+// waitingMessage says why a failed run waits on its host: the machine is off
+// and the run needs repeating when it is back.
+func waitingMessage(pkg, host, reason string, offSince time.Time, runs, hosts int) string {
+	if runs > 1 {
+		return fmt.Sprintf("%s failed on %s off now; each needs repeating when its machine is back",
+			plural(runs, "maintenance package run", "maintenance package runs"), plural(hosts, "host", "hosts"))
+	}
+	msg := pkg + " failed on " + host
+	if reason != "" {
+		msg += " (" + reason + ")"
+	}
+	return msg + "; the machine has been off since " + offSince.Format("2006-01-02 15:04Z") + ", so the run needs repeating when it is back"
 }
 
 // packageCategory reads a package's category; packages synced before

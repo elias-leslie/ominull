@@ -16,6 +16,8 @@ dist/*.zip
 dist/*.sig
 dist/*.sha256
 dist/*.exe
+# Signed public routine-key list each release writes for the hub installer.
+dist/routine-keys.json
 dist/deb-build/
 dist/win-build/
 dist/mac-build/

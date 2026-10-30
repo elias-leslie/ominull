@@ -7,6 +7,8 @@ package server
 // neediest first). A record that clears (a later run succeeded, the job
 // ended) reads resolved for runResolvedFor, then drops; the raised set is a
 // settings row so a hub restart does not leave Nightshift holding stale ones.
+// A failed run that ages out (runFailedFor) closes the same way but says so:
+// nothing fixed it, nobody has repeated it yet.
 
 import (
 	"encoding/json"
@@ -70,16 +72,19 @@ func runNextMove(state, jobID string) string {
 	return "read the run's output (ominullctl maint wait " + jobID + "), then fix the cause or run it again"
 }
 
-func (s *Server) runAttentionItems(now time.Time) ([]runAttentionItem, error) {
+// runAttentionItems returns the open run records, and the uids of failed runs
+// that are still the latest but older than runFailedFor.
+func (s *Server) runAttentionItems(now time.Time) ([]runAttentionItem, map[string]bool, error) {
 	if s.scriptsStore == nil || s.responseStore == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	eps, err := s.store.ListEndpoints("")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	libraries := map[string][]*scripts.Script{}
 	var out []runAttentionItem
+	aged := map[string]bool{}
 	for _, ep := range eps {
 		if ep.Status == "retired" {
 			continue
@@ -87,13 +92,13 @@ func (s *Server) runAttentionItems(now time.Time) ([]runAttentionItem, error) {
 		list, ok := libraries[ep.TenantID]
 		if !ok {
 			if list, err = s.scriptsStore.ListScripts(ep.TenantID); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			libraries[ep.TenantID] = list
 		}
 		latest, err := s.responseStore.LatestScriptJobs(ep.TenantID, ep.ID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, sc := range list {
 			job := latest[sc.ID]
@@ -113,6 +118,7 @@ func (s *Server) runAttentionItems(now time.Time) ([]runAttentionItem, error) {
 				it.rank, it.severity = 1, ocsfSevLow
 			case "failed":
 				if run.CompletedAt == nil || now.Sub(*run.CompletedAt) > runFailedFor {
+					aged[it.uid] = true
 					continue
 				}
 				it.rank, it.severity, it.since = 2, ocsfSevMedium, *run.CompletedAt
@@ -156,12 +162,12 @@ func (s *Server) runAttentionItems(now time.Time) ([]runAttentionItem, error) {
 	if len(out) > runRecordsMax {
 		out = out[:runRecordsMax]
 	}
-	return out, nil
+	return out, aged, nil
 }
 
 // runFindings: the open run records, plus resolved ones for a day.
 func (s *Server) runFindings(now time.Time) ([]feedFinding, error) {
-	items, err := s.runAttentionItems(now)
+	items, aged, err := s.runAttentionItems(now)
 	if err != nil {
 		return nil, err
 	}
@@ -204,8 +210,11 @@ func (s *Server) runFindings(now time.Time) ([]feedFinding, error) {
 			changed = true
 			continue
 		}
-		out = append(out, s.feedFinding(now, uid, "Maintenance run needs attention", ocsfSevInformational, ocsfStatusResolved,
-			"Resolved: "+r.Title, nil, nil))
+		msg := "Resolved: " + r.Title
+		if aged[uid] {
+			msg = "Over a day old, not repeated yet: " + r.Title
+		}
+		out = append(out, s.feedFinding(now, uid, "Maintenance run needs attention", ocsfSevInformational, ocsfStatusResolved, msg, nil, nil))
 	}
 	if changed {
 		raw, _ := json.Marshal(seen)
