@@ -233,7 +233,8 @@ func TestDescribeAgentEgressNamesFactsAndExplainsOurs(t *testing.T) {
 	claude := describeAlert(storage.AnomalyAlert{ID: "n", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "workstation-1",
 		ProcessPath: "/home/u/.local/share/claude/versions/2.1.301", DstIP: "198.51.100.10", DstPort: 443,
 		Evidence: `{"domain":"api.anthropic.com"}`}, storage.DefaultDetectionTuning())
-	if claude.Expected != "" || claude.Cause != "Probably claude itself: api.anthropic.com is Anthropic's own service" {
+	if claude.Expected != "" || claude.Cause != "Probably claude itself: api.anthropic.com is Anthropic's own service" ||
+		claude.Process != "claude" || !strings.HasPrefix(claude.What, "claude on workstation-1 reached api.anthropic.com") {
 		t.Fatalf("native claude = %+v", claude)
 	}
 

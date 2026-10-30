@@ -130,6 +130,11 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	if p := strings.ReplaceAll(a.ProcessPath, "\\", "/"); p != "" && p != "unknown" {
 		proc = filepath.Base(p)
 	}
+	// Claude Code's native build runs as its version number, so a configured
+	// agent runtime is named by the tuning's agent_runtimes, not the base name.
+	if runtime := tuning.AgentRuntimeOf(a.ProcessPath); runtime != "" {
+		proc = runtime
+	}
 	host := a.Hostname
 	if host == "" {
 		host = a.EndpointID
@@ -206,16 +211,10 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	case "AGENT_NEW_DESTINATION":
 		name := firstName(ev.SNI, ev.Domain, titleDestination(a.Title))
 		out.What = fmt.Sprintf("%s on %s reached %s for the first time", who, host, destPhrase(name, a.DstIP, a.DstPort, ev.Owner))
-		// Claude Code's native build runs as its version number, so the
-		// runtime comes from the tuning's agent_runtimes, not the base name.
-		runtime := tuning.AgentRuntimeOf(a.ProcessPath)
-		if runtime == "" {
-			runtime = proc
-		}
-		if vendor := tuning.RuntimeVendor(runtime, name); vendor != "" {
+		if vendor := tuning.RuntimeVendor(proc, name); vendor != "" {
 			// A cause, not an explanation: on a shared CDN address the name
 			// can be any other site's.
-			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", runtime, name, vendor)
+			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", proc, name, vendor)
 		}
 	case "AGENT_UPLOAD_VOLUME":
 		out.What = fmt.Sprintf("%s on %s uploaded much more than in an ordinary hour", who, host)
