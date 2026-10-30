@@ -525,3 +525,21 @@ func TestNothingIsInventedOnTheWayIn(t *testing.T) {
 		}
 	}
 }
+
+// The startup sweep on production lost a lock race ("pruning anomaly_alerts:
+// database is locked") and returned before measuring, so the data size report
+// stayed pending for the hour and the Nightshift storage finding disappeared.
+func TestAFailedPruneStillRefreshesTheDataReport(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.db.Exec(`DROP TABLE anomaly_alerts`); err != nil {
+		t.Fatal(err)
+	}
+	policy := RetentionPolicy{AnomalyAlerts: 90 * 24 * time.Hour}
+	if _, err := store.PruneOldData(policy); err == nil {
+		t.Fatal("pruning without the anomaly table succeeded; the fixture does not make the sweep fail")
+	}
+	store.retentionSweep(policy)
+	if store.DataReport() == nil {
+		t.Error("the data size report is still pending after a failed sweep")
+	}
+}

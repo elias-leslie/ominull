@@ -334,6 +334,31 @@ func (s *Store) releaseFreePages() {
 	}
 }
 
+// retentionSweep prunes, then measures. The data size report is refreshed even
+// when pruning fails: a sweep that lost a lock race at startup left it pending
+// for the hour, and the Nightshift storage finding vanished with it.
+func (s *Store) retentionSweep(policy RetentionPolicy) {
+	start := time.Now()
+	removed, err := s.PruneOldData(policy)
+	if err != nil {
+		log.Printf("[!] Retention sweep failed: %v", err)
+	}
+	total := int64(0)
+	for k, n := range removed {
+		if k != "events" {
+			total += n
+		}
+	}
+	if total > 0 {
+		log.Printf("[*] Retention: removed %d rows in %s (flows %d, local counters %d, comm_profiles %d, anomalies %d, audit %d)",
+			total, time.Since(start).Round(time.Millisecond),
+			removed["flows"], removed["flow_local_hourly"], removed["comm_profiles"], removed["anomaly_alerts"], removed["audit_logs"])
+	}
+	if err := s.RefreshDataReport(policy); err != nil {
+		log.Printf("[!] Data size report failed: %v", err)
+	}
+}
+
 // StartRetention prunes once at startup and then on a ticker, and returns a
 // function that stops it. Startup matters: a hub that has been running without
 // retention has the whole backlog to clear. It also starts the background
@@ -345,38 +370,15 @@ func (s *Store) StartRetention(policy RetentionPolicy, every time.Duration) func
 	stop := make(chan struct{})
 	s.coldDir = policy.ColdDir
 
-	run := func() {
-		start := time.Now()
-		removed, err := s.PruneOldData(policy)
-		if err != nil {
-			log.Printf("[!] Retention sweep failed: %v", err)
-			return
-		}
-		total := int64(0)
-		for k, n := range removed {
-			if k != "events" {
-				total += n
-			}
-		}
-		if total > 0 {
-			log.Printf("[*] Retention: removed %d rows in %s (flows %d, local counters %d, comm_profiles %d, anomalies %d, audit %d)",
-				total, time.Since(start).Round(time.Millisecond),
-				removed["flows"], removed["flow_local_hourly"], removed["comm_profiles"], removed["anomaly_alerts"], removed["audit_logs"])
-		}
-		if err := s.RefreshDataReport(policy); err != nil {
-			log.Printf("[!] Data size report failed: %v", err)
-		}
-	}
-
 	go func() {
 		s.migrateLegacyEvents(policy, stop)
-		run()
+		s.retentionSweep(policy)
 		ticker := time.NewTicker(every)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				run()
+				s.retentionSweep(policy)
 			case <-stop:
 				return
 			}
