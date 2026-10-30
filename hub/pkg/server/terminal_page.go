@@ -77,14 +77,6 @@ type terminalPageBody struct {
 	Off bool
 }
 
-func terminalSessionLive(state terminal.SessionState) bool {
-	switch state {
-	case terminal.StateActive, terminal.StateDetached, terminal.StateConnecting, terminal.StateWaiting:
-		return true
-	}
-	return false
-}
-
 func terminalIdentity(os string) string {
 	if strings.Contains(strings.ToLower(os), "windows") {
 		return "LocalSystem"
@@ -166,7 +158,7 @@ func (s *Server) buildTerminalPage(viewer accessOperator, q map[string][]string)
 	for _, ts := range sessions {
 		sum := ts.Summary()
 		st, _ := sum["state"].(string)
-		if !terminalSessionLive(terminal.SessionState(st)) {
+		if !terminal.SessionState(st).Live() {
 			continue
 		}
 		id, _ := sum["session_id"].(string)
@@ -212,7 +204,7 @@ func (s *Server) buildTerminalPage(viewer accessOperator, q map[string][]string)
 			}
 			body.View.Program, _ = sum["program"].(string)
 			body.View.Identity = terminalIdentity(oses[ep])
-			if !terminalSessionLive(terminal.SessionState(st)) {
+			if !terminal.SessionState(st).Live() {
 				body.Gone = "This terminal has ended. Its recording is sealed into evidence."
 				break
 			}

@@ -323,3 +323,62 @@ func TestStore_StartupDaemonRestartRecovery(t *testing.T) {
 		t.Errorf("sess-closed close_reason altered to daemon_restarted")
 	}
 }
+
+// TestLiveStatesAgreeInSQLAndGo: the caps, sweeper and recovery queries and
+// IsLive must count the same states, or a session can hold a slot nothing
+// will ever end (or be attachable while not counted against the cap).
+func TestLiveStatesAgreeInSQLAndGo(t *testing.T) {
+	mgr := NewManager(nil, nil, 30*time.Minute, 10*time.Minute)
+	defer mgr.Close()
+
+	all := []SessionState{StateClosed, StateWaiting, StateConnecting, StateActive,
+		StateClosing, StateFailed, StateExpired, StateDetached}
+	want := map[SessionState]bool{StateWaiting: true, StateConnecting: true, StateActive: true, StateDetached: true}
+	// The in-memory database is shared by every manager in this process.
+	forget := func() { _, _ = mgr.db.Exec(`DELETE FROM terminal_sessions WHERE tenant_id = 'tenant-live-states'`) }
+	forget()
+	t.Cleanup(forget)
+	now := time.Now()
+	live := 0
+	for i, st := range all {
+		if st.Live() != want[st] {
+			t.Fatalf("%s.Live() = %v", st, st.Live())
+		}
+		if (&TerminalSession{State: st}).IsLive() != want[st] {
+			t.Fatalf("IsLive for %s disagrees with Live", st)
+		}
+		if st.Live() {
+			live++
+		}
+		_, err := mgr.db.Exec(`INSERT INTO terminal_sessions (session_id, tenant_id, endpoint_id, operator_id,
+			program, state, token_hash, created_at, expires_at, idle_expires_at)
+			VALUES (?, 'tenant-live-states', 'ep-live-states', 'op', '/bin/sh', ?, 'h', ?, ?, ?)`,
+			fmt.Sprintf("live-states-%d", i), string(st), now, now.Add(time.Hour), now.Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	tenant, endpoint, err := mgr.countActiveSessions("tenant-live-states", "ep-live-states", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tenant != live || endpoint != live {
+		t.Fatalf("caps count %d tenant / %d endpoint sessions, Live() says %d", tenant, endpoint, live)
+	}
+	if n, err := mgr.countLiveKind("ep-live-states", "/bin", now); err != nil || n != live {
+		t.Fatalf("countLiveKind = %d, %v; Live() says %d", n, err, live)
+	}
+	expired, err := mgr.sweepExpiredSessions(now.Add(2*time.Hour), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swept := map[string]bool{}
+	for _, e := range expired {
+		if e.Reason == "max_duration_exceeded" && strings.HasPrefix(e.SessionID, "live-states-") {
+			swept[e.SessionID] = true
+		}
+	}
+	if len(swept) != live {
+		t.Fatalf("max-duration sweep ended %d sessions, Live() says %d", len(swept), live)
+	}
+}

@@ -68,7 +68,7 @@ func (m *Manager) initStore() error {
 	recoveryQuery := `
 	UPDATE terminal_sessions
 	SET state = 'failed', closed_at = CURRENT_TIMESTAMP, close_reason = 'daemon_restarted'
-	WHERE state IN ('waiting', 'connecting', 'active', 'detached');
+	WHERE state IN (` + liveStatesSQL + `);
 	`
 	if _, err := m.db.Exec(recoveryQuery); err != nil {
 		return fmt.Errorf("terminal startup recovery failed: %w", err)
@@ -135,7 +135,7 @@ func (m *Manager) countActiveSessions(tenantID, endpointID string, now time.Time
 	// through and the operator could never get back to the first one.
 	row := m.db.QueryRow(`
 		SELECT COUNT(*) FROM terminal_sessions
-		WHERE tenant_id = ? AND state IN ('waiting', 'connecting', 'active', 'detached') AND expires_at > ?;
+		WHERE tenant_id = ? AND state IN (`+liveStatesSQL+`) AND expires_at > ?;
 	`, tenantID, now)
 	if err := row.Scan(&activeTenant); err != nil {
 		return 0, 0, err
@@ -144,7 +144,7 @@ func (m *Manager) countActiveSessions(tenantID, endpointID string, now time.Time
 	// Endpoint count
 	row = m.db.QueryRow(`
 		SELECT COUNT(*) FROM terminal_sessions
-		WHERE endpoint_id = ? AND state IN ('waiting', 'connecting', 'active', 'detached') AND expires_at > ?;
+		WHERE endpoint_id = ? AND state IN (`+liveStatesSQL+`) AND expires_at > ?;
 	`, endpointID, now)
 	if err := row.Scan(&activeEndpoint); err != nil {
 		return 0, 0, err
@@ -208,7 +208,7 @@ func (m *Manager) sweepExpiredSessions(now time.Time, connectTimeout time.Durati
 	// 3. Any active/connecting/waiting session exceeding max duration (expires_at)
 	rows, err = m.db.Query(`
 		SELECT session_id FROM terminal_sessions
-		WHERE state IN ('waiting', 'connecting', 'active', 'detached') AND expires_at < ?;
+		WHERE state IN (`+liveStatesSQL+`) AND expires_at < ?;
 	`, now)
 	if err != nil {
 		return nil, err
@@ -230,7 +230,7 @@ func (m *Manager) sweepExpiredSessions(now time.Time, connectTimeout time.Durati
 		_, _ = m.db.Exec(`
 			UPDATE terminal_sessions
 			SET state = ?, closed_at = ?, close_reason = ?
-			WHERE session_id = ? AND state IN ('waiting', 'connecting', 'active', 'detached');
+			WHERE session_id = ? AND state IN (`+liveStatesSQL+`);
 		`, string(item.NewState), now, item.Reason, item.SessionID)
 	}
 

@@ -157,7 +157,7 @@ func (m *Manager) countLiveKind(endpointID, prefix string, now time.Time) (int, 
 	err := m.db.QueryRow(`
 		SELECT COUNT(*) FROM terminal_sessions
 		WHERE endpoint_id = ? AND substr(program, 1, ?) = ?
-		  AND state IN ('waiting', 'connecting', 'active', 'detached') AND expires_at > ?;
+		  AND state IN (`+liveStatesSQL+`) AND expires_at > ?;
 	`, endpointID, len(prefix), prefix, now).Scan(&n)
 	return n, err
 }

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +47,26 @@ const (
 	// other live session. Only `closed` seals the recording.
 	StateDetached SessionState = "detached"
 )
+
+// liveStates are the states in which a session holds a slot and its relay may
+// still be running: the caps count them, the sweeper and startup recovery end
+// them, and only they can be attached to. One list, so a new state cannot be
+// added to the caps and forgotten in the sweeper.
+var liveStates = []SessionState{StateWaiting, StateConnecting, StateActive, StateDetached}
+
+// liveStatesSQL is liveStates as the body of an SQL IN list.
+var liveStatesSQL = func() string {
+	quoted := make([]string, len(liveStates))
+	for i, st := range liveStates {
+		quoted[i] = "'" + string(st) + "'"
+	}
+	return strings.Join(quoted, ", ")
+}()
+
+// Live reports whether a session in this state holds a slot.
+func (st SessionState) Live() bool {
+	return slices.Contains(liveStates, st)
+}
 
 // FrameType specifies the type of data frame exchanged over terminal relay.
 type FrameType string
@@ -877,11 +899,7 @@ func (m *Manager) DetachSession(sessionID, reason string) error {
 func (s *TerminalSession) IsLive() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	switch s.State {
-	case StateWaiting, StateConnecting, StateActive, StateDetached:
-		return true
-	}
-	return false
+	return s.State.Live()
 }
 
 // flushDirty writes the recording counters and idle deadline of every session
