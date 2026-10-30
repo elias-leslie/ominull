@@ -235,25 +235,6 @@ func TestPackageRunTooLongToShowIsCut(t *testing.T) {
 	}
 }
 
-// otherValue returns a param name and a valid non-default value for it.
-func otherValue(t *testing.T, h *scripts.PackageHeader) []string {
-	t.Helper()
-	for _, p := range h.Params {
-		switch p.Type {
-		case "int":
-			v := fmt.Sprint(*p.Min)
-			if v == p.DefaultValue() {
-				v = fmt.Sprint(*p.Max)
-			}
-			return []string{p.Name, v}
-		case "bool":
-			return []string{p.Name, map[string]string{"true": "false", "false": "true"}[p.DefaultValue()]}
-		}
-	}
-	t.Fatalf("%s has no int or bool setting", h.Name)
-	return nil
-}
-
 // Turning on a careful step makes a safe package's run careful, and the
 // audit words name the step.
 func TestCarefulStepsAreNamed(t *testing.T) {

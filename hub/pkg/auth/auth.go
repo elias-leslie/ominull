@@ -72,13 +72,6 @@ func CheckPassword(password, hash, salt string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
-// NeedsRehash reports whether a stored verifier is in the superseded format, so
-// an importer can require a password reset instead of authenticating a legacy
-// fast-hash verifier. CheckPassword deliberately rejects those verifiers.
-func NeedsRehash(hash string) bool {
-	return !strings.HasPrefix(hash, "$2a$") && !strings.HasPrefix(hash, "$2b$") && !strings.HasPrefix(hash, "$2y$")
-}
-
 func GenerateJWT(claims Claims, secret string, ttl time.Duration) (string, error) {
 	claims.ExpiresAt = time.Now().Add(ttl).Unix()
 

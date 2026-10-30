@@ -273,15 +273,3 @@ func ResolveGeoIP(ipStr string) GeoRecord {
 	geoCacheMu.Unlock()
 	return result
 }
-
-// ResolveCountry returns a 2-letter ISO country code, or "UNKNOWN".
-func ResolveCountry(ipStr string) string {
-	return ResolveGeoIP(ipStr).Country
-}
-
-// ResolveASN returns the ASN and organisation for an address. Both are empty
-// when the address is not attributable.
-func ResolveASN(ipStr string) (string, string) {
-	rec := ResolveGeoIP(ipStr)
-	return rec.ASN, rec.Org
-}

@@ -46,13 +46,6 @@ const (
 	StateDetached SessionState = "detached"
 )
 
-// LiveStates are the states in which a session holds a slot and its relay may
-// still be running. Kept in one place so a new state cannot be added to the
-// caps and forgotten in the sweeper.
-func LiveStates() []SessionState {
-	return []SessionState{StateWaiting, StateConnecting, StateActive, StateDetached}
-}
-
 // FrameType specifies the type of data frame exchanged over terminal relay.
 type FrameType string
 

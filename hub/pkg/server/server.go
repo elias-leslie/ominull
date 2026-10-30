@@ -628,11 +628,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Write(doc)
 }
 
-func (s *Server) consoleGate() []byte {
-	issuer, _ := s.store.GetSetting("oidc.issuer")
-	return consoleGateDocument(strings.TrimSpace(issuer) != "", "", s.agentVersion)
-}
-
 // consoleGateFor writes the gate with a nonce, so the pre-paint theme script in
 // its head is allowed to run and the lock screen matches the console behind it.
 func (s *Server) consoleGateFor(w http.ResponseWriter) []byte {

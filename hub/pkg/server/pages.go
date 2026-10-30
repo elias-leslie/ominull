@@ -6,7 +6,6 @@ import (
 	"html/template"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -94,14 +93,6 @@ func (s *Server) requirePageViewer(w http.ResponseWriter, r *http.Request) (acce
 		return accessOperator{}, false
 	}
 	return viewer, true
-}
-
-// pageURL builds a page link with its query, for templates.
-func pageURL(path string, query url.Values) string {
-	if len(query) == 0 {
-		return path
-	}
-	return path + "?" + query.Encode()
 }
 
 // pageStamp is a time as pages print it: the clock alone today, the date and

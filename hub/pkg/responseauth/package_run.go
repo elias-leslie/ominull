@@ -303,13 +303,6 @@ func parsePackageItem(raw string) (PackageItem, error) {
 	return it, nil
 }
 
-// ParsePackageRun reads a package run payload; targets is the approval's
-// sorted, de-duplicated target list.
-func ParsePackageRun(payload []byte, targets []string) ([]PackageItem, error) {
-	items, _, err := parsePackageRunPayload(payload, targets)
-	return items, err
-}
-
 // parsePackageRunPayload also returns the playbook part, if any.
 func parsePackageRunPayload(payload []byte, targets []string) ([]PackageItem, *PlaybookRun, error) {
 	if err := plainKeys(payload); err != nil {
