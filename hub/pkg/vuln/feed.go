@@ -154,17 +154,27 @@ type FeedSyncOptions struct {
 	MaxNVDResults int
 }
 
-// FetchCISAKEV retrieves and parses the CISA KEV feed from the given URL.
-func FetchCISAKEV(ctx context.Context, client *http.Client, url string) ([]CISAKEVItem, error) {
+// feedClient applies the feed trust rule: without a configured client only
+// defaultURL is fetched, through a client that does not follow redirects. An
+// empty url means defaultURL.
+func feedClient(client *http.Client, url, defaultURL string) (*http.Client, string, error) {
 	if client == nil {
-		if url != "" && url != DefaultCISAKEVURL {
-			return nil, errors.New("custom feed URL requires a trusted configured client")
+		if url != "" && url != defaultURL {
+			return nil, "", errors.New("custom feed URL requires a trusted configured client")
 		}
-		url = DefaultCISAKEVURL
-		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		return &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, defaultURL, nil
 	}
 	if url == "" {
-		url = DefaultCISAKEVURL
+		url = defaultURL
+	}
+	return client, url, nil
+}
+
+// FetchCISAKEV retrieves and parses the CISA KEV feed from the given URL.
+func FetchCISAKEV(ctx context.Context, client *http.Client, url string) ([]CISAKEVItem, error) {
+	client, url, err := feedClient(client, url, DefaultCISAKEVURL)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -191,15 +201,9 @@ func FetchCISAKEV(ctx context.Context, client *http.Client, url string) ([]CISAK
 
 // FetchEPSS retrieves and parses the EPSS feed from the given URL.
 func FetchEPSS(ctx context.Context, client *http.Client, url string) (map[string]EPSSScore, error) {
-	if client == nil {
-		if url != "" && url != DefaultEPSSURL {
-			return nil, errors.New("custom feed URL requires a trusted configured client")
-		}
-		url = DefaultEPSSURL
-		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	}
-	if url == "" {
-		url = DefaultEPSSURL
+	client, url, err := feedClient(client, url, DefaultEPSSURL)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -295,15 +299,9 @@ func ParseNVD20WithTotal(r io.Reader) ([]Vulnerability, int, error) {
 
 // FetchNVD20Page retrieves and parses a single page from the NVD 2.0 API.
 func FetchNVD20Page(ctx context.Context, client *http.Client, baseURL, apiKey string, startIndex, resultsPerPage int) ([]Vulnerability, int, error) {
-	if client == nil {
-		if baseURL != "" && baseURL != DefaultNVD20URL {
-			return nil, 0, errors.New("custom feed URL requires a trusted configured client")
-		}
-		baseURL = DefaultNVD20URL
-		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	}
-	if baseURL == "" {
-		baseURL = DefaultNVD20URL
+	client, baseURL, err := feedClient(client, baseURL, DefaultNVD20URL)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	sep := "?"
