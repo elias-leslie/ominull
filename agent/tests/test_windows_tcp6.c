@@ -40,22 +40,31 @@ static DWORD FixtureTable(PVOID table, PDWORD size, BOOL order, ULONG family,
 }
 static ULONG64 fixtureIn = 1000, fixtureOut = 2000;
 static unsigned reads4, reads6;
+/* Collection state per family as the stack reports it in Rw. While it is off
+ * the Rod buffer is undefined; these are shapes production received: a stack
+ * pointer and a value that reads as ASCII text. */
+static BOOLEAN collecting4, collecting6;
+static void FixtureRod(BOOLEAN collecting, PUCHAR rw, ULONG rws, PUCHAR rod) {
+    if (rw) {
+        assert(rws == sizeof(TCP_ESTATS_DATA_RW_v0));
+        ((TCP_ESTATS_DATA_RW_v0 *)rw)->EnableCollection = collecting;
+    }
+    TCP_ESTATS_DATA_ROD_v0 *data = (void *)rod;
+    data->DataBytesIn = collecting ? fixtureIn : 0x7fff5a3c1e40ULL;
+    data->DataBytesOut = collecting ? fixtureOut : 7815274127455890776ULL;
+}
 static ULONG Read4(PMIB_TCPROW row, TCP_ESTATS_TYPE type, PUCHAR rw, ULONG rwv,
                    ULONG rws, PUCHAR ros, ULONG rosv, ULONG ross, PUCHAR rod,
                    ULONG rodv, ULONG rods) {
     (void)type;
-    (void)rw;
     (void)rwv;
-    (void)rws;
     (void)ros;
     (void)rosv;
     (void)ross;
     assert(row->dwLocalAddr == inet_addr("10.20.30.40") &&
            row->dwRemotePort == htons(443));
     assert(rodv == 0 && rods == sizeof(TCP_ESTATS_DATA_ROD_v0));
-    TCP_ESTATS_DATA_ROD_v0 *data = (void *)rod;
-    data->DataBytesIn = fixtureIn;
-    data->DataBytesOut = fixtureOut;
+    FixtureRod(collecting4, rw, rws, rod);
     reads4++;
     return 0;
 }
@@ -63,9 +72,7 @@ static ULONG Read6(PMIB_TCP6ROW row, TCP_ESTATS_TYPE type, PUCHAR rw, ULONG rwv,
                    ULONG rws, PUCHAR ros, ULONG rosv, ULONG ross, PUCHAR rod,
                    ULONG rodv, ULONG rods) {
     (void)type;
-    (void)rw;
     (void)rwv;
-    (void)rws;
     (void)ros;
     (void)rosv;
     (void)ross;
@@ -74,9 +81,7 @@ static ULONG Read6(PMIB_TCP6ROW row, TCP_ESTATS_TYPE type, PUCHAR rw, ULONG rwv,
     assert(!memcmp(&row->RemoteAddr, expected, 16) &&
            row->dwLocalPort == htons(40001));
     assert(rodv == 0 && rods == sizeof(TCP_ESTATS_DATA_ROD_v0));
-    TCP_ESTATS_DATA_ROD_v0 *data = (void *)rod;
-    data->DataBytesIn = fixtureIn;
-    data->DataBytesOut = fixtureOut;
+    FixtureRod(collecting6, rw, rws, rod);
     reads6++;
     return 0;
 }
@@ -86,11 +91,13 @@ static ULONG Set4(PMIB_TCPROW row, TCP_ESTATS_TYPE type, PUCHAR rw,
     (void)type;
     assert(!version && !offset && size == sizeof(TCP_ESTATS_DATA_RW_v0));
     assert(((TCP_ESTATS_DATA_RW_v0 *)rw)->EnableCollection);
+    if (row) collecting4 = TRUE;
     return 0;
 }
 static ULONG Set6(PMIB_TCP6ROW row, TCP_ESTATS_TYPE type, PUCHAR rw,
                   ULONG version, ULONG size, ULONG offset) {
     (void)row;
+    collecting6 = TRUE;
     return Set4(NULL, type, rw, version, size, offset);
 }
 #define GetPerTcpConnectionEStats Read4
@@ -120,6 +127,30 @@ int main(void) {
     }
     printf("TCP family rows: IPv4=%u IPv6=%u\n", v4, v6);
     assert(reads4 == 1 && reads6 == 1);
+    for (size_t i = 0; i < count; i++)
+        assert(!events[i].BytesMeasured && !events[i].BytesIn &&
+               !events[i].BytesOut);
+    fixtureIn += 7;
+    fixtureOut += 11;
+    count = PollTCPObservations(events, 64);
+    assert(count == 2);
+    for (size_t i = 0; i < count; i++)
+        assert(events[i].BytesMeasured && events[i].BytesIn == 7 &&
+               events[i].BytesOut == 11);
+
+    /* Collection switched off under an existing connection: the read still
+     * succeeds, but Rod is undefined. It must not become a delta. */
+    collecting4 = collecting6 = FALSE;
+    UINT64 unmeasured = g_TCPWinUnmeasured;
+    count = PollTCPObservations(events, 64);
+    assert(reads4 == 3 && reads6 == 3);
+    assert(g_TCPWinUnmeasured == unmeasured + 2);
+    for (size_t i = 0; i < count; i++)
+        assert(!events[i].BytesMeasured && !events[i].BytesIn &&
+               !events[i].BytesOut);
+    /* The next poll enables collection again and starts a new baseline. */
+    count = PollTCPObservations(events, 64);
+    assert(collecting4 && collecting6);
     for (size_t i = 0; i < count; i++)
         assert(!events[i].BytesMeasured && !events[i].BytesIn &&
                !events[i].BytesOut);

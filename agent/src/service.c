@@ -73,9 +73,9 @@ static DWORD WINAPI ServiceCtrlHandler(DWORD CtrlCode, DWORD dwEventType, LPVOID
  * then true deltas.
  *
  * Collection is off by default per connection and has to be enabled, which is
- * done on first sight. Anything that fails - the enable, the read, a full
- * table - leaves the flow at zero, and zero travels the whole pipeline as "not
- * measured" rather than as "no traffic".
+ * done on first sight. Anything that fails - the enable, the read, a read
+ * that finds collection off, a full table - leaves the flow at zero, and zero
+ * travels the whole pipeline as "not measured" rather than as "no traffic".
  * ------------------------------------------------------------------------- */
 
 #define ESTATS_TABLE_SIZE 4096
@@ -264,9 +264,16 @@ static DWORD TCPReadCounters(const TCP_ROW_WIN *src, bool enable, TCP_ESTATS_DAT
             : SetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, (PUCHAR)&rw, 0, sizeof(rw), 0);
         if (result != NO_ERROR) return result;
     }
-    return key->family == 6
-        ? GetPerTcp6ConnectionEStats(&row6, TcpConnectionEstatsData, NULL, 0, 0, NULL, 0, 0, (PUCHAR)rod, 0, sizeof(*rod))
-        : GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, NULL, 0, 0, NULL, 0, 0, (PUCHAR)rod, 0, sizeof(*rod));
+    /* The read succeeds even when collection is off for this connection, and
+     * then Rod is undefined: production received stack pointers and values
+     * that read as ASCII text as byte counts. Only Rw says whether collection
+     * is on, so it is read with the data and checked. */
+    TCP_ESTATS_DATA_RW_v0 state = {0};
+    DWORD result = key->family == 6
+        ? GetPerTcp6ConnectionEStats(&row6, TcpConnectionEstatsData, (PUCHAR)&state, 0, sizeof(state), NULL, 0, 0, (PUCHAR)rod, 0, sizeof(*rod))
+        : GetPerTcpConnectionEStats(&row, TcpConnectionEstatsData, (PUCHAR)&state, 0, sizeof(state), NULL, 0, 0, (PUCHAR)rod, 0, sizeof(*rod));
+    if (result == NO_ERROR && !state.EnableCollection) return ERROR_INVALID_DATA;
+    return result;
 }
 
 static void EstatsMeasure(const TCP_ROW_WIN *src, OMINULL_EVENT *ev) {
