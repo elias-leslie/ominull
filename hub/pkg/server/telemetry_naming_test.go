@@ -85,3 +85,24 @@ func TestSnapshotWithoutResolutionsIsUnchanged(t *testing.T) {
 		t.Fatalf("a name appeared from nowhere: %q", events[0].Domain)
 	}
 }
+
+// A sample whose byte count is past what a measurement can be (Windows ESTATS
+// has returned pointers) keeps its flow and loses its bytes, both of them:
+// one bad counter makes the whole sample unmeasured.
+func TestNormalizeDropsByteCountsThatAreNotMeasurements(t *testing.T) {
+	now := time.Now().UTC()
+	in := []storage.Event{
+		{DstIP: "10.0.0.2", BytesIn: 8389899496073898413, BytesOut: 64, Timestamp: now},
+		{DstIP: "10.0.0.2", BytesIn: 1200, BytesOut: -5, Timestamp: now},
+		{DstIP: "10.0.0.2", BytesIn: 1200, BytesOut: 64, Timestamp: now},
+	}
+	out := normalizeTelemetryEvents(in, "default", "e1", now)
+	if len(out) != 3 {
+		t.Fatalf("normalize dropped flows: %d of 3", len(out))
+	}
+	for i, want := range [][2]int64{{0, 0}, {0, 0}, {1200, 64}} {
+		if out[i].BytesIn != want[0] || out[i].BytesOut != want[1] {
+			t.Errorf("event %d: bytes %d/%d, want %d/%d", i, out[i].BytesIn, out[i].BytesOut, want[0], want[1])
+		}
+	}
+}

@@ -221,6 +221,11 @@ func normalizeTelemetryEvents(input []storage.Event, tenantID, endpointID string
 			}
 		}
 		events[i].Timestamp = events[i].Timestamp.UTC()
+		// A byte count past storage.MaxByteCount is not a measurement: the
+		// flow is kept, its bytes become unmeasured.
+		if !storage.ByteCountValid(events[i].BytesIn) || !storage.ByteCountValid(events[i].BytesOut) {
+			events[i].BytesIn, events[i].BytesOut = 0, 0
+		}
 		events[i].TenantID = tenantID
 		if endpointID != "" {
 			events[i].EndpointID = endpointID

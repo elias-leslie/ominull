@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"slices"
 	"sort"
@@ -779,7 +780,14 @@ func (s *Store) initSchema() error {
 	if err := s.initEnforcementGrantSchema(); err != nil {
 		return err
 	}
-	return s.initBaselineSchema()
+	if err := s.initBaselineSchema(); err != nil {
+		return err
+	}
+	// A failed repair is retried at the next start; it never keeps the hub down.
+	if err := s.repairByteCounts(); err != nil {
+		log.Printf("[!] %v", err)
+	}
+	return nil
 }
 
 func (s *Store) initRollupCubesSchema() error {
