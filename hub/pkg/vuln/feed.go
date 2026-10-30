@@ -85,72 +85,8 @@ type nvd20Envelope struct {
 
 // ParseNVD20 parses an official NVD 2.0 JSON payload into normalized Vulnerability records.
 func ParseNVD20(r io.Reader) ([]Vulnerability, error) {
-	var env nvd20Envelope
-	if err := json.NewDecoder(r).Decode(&env); err != nil {
-		return nil, fmt.Errorf("failed to decode NVD 2.0 JSON: %w", err)
-	}
-
-	var results []Vulnerability
-	for _, wrap := range env.Vulnerabilities {
-		cve := wrap.CVE
-		if cve.ID == "" {
-			continue
-		}
-
-		desc := ""
-		for _, d := range cve.Descriptions {
-			if strings.EqualFold(d.Lang, "en") {
-				desc = d.Value
-				break
-			}
-		}
-		if desc == "" && len(cve.Descriptions) > 0 {
-			desc = cve.Descriptions[0].Value
-		}
-
-		score := 0.0
-		severity := "UNKNOWN"
-		if len(cve.Metrics.CVSSMetricV31) > 0 {
-			score = cve.Metrics.CVSSMetricV31[0].CVSSData.BaseScore
-			severity = strings.ToUpper(cve.Metrics.CVSSMetricV31[0].CVSSData.BaseSeverity)
-		} else if len(cve.Metrics.CVSSMetricV30) > 0 {
-			score = cve.Metrics.CVSSMetricV30[0].CVSSData.BaseScore
-			severity = strings.ToUpper(cve.Metrics.CVSSMetricV30[0].CVSSData.BaseSeverity)
-		}
-
-		published, _ := time.Parse(time.RFC3339, cve.Published)
-		if published.IsZero() {
-			published = time.Now().UTC()
-		}
-
-		// Extract CPE match criteria
-		var cpeMatches []CPEMatchCriteria
-		for _, config := range cve.Configurations {
-			for _, node := range config.Nodes {
-				for _, match := range node.CPEMatch {
-					if match.Vulnerable {
-						cpeMatches = append(cpeMatches, match)
-					}
-				}
-			}
-		}
-
-		cpePatternJSON, _ := json.Marshal(cpeMatches)
-
-		results = append(results, Vulnerability{
-			CVEID:       cve.ID,
-			Title:       cve.ID,
-			Description: desc,
-			Severity:    severity,
-			CVSS:        score,
-			IsKEV:       false,
-			EPSS:        0.0,
-			CPEPattern:  string(cpePatternJSON),
-			PublishedAt: published,
-		})
-	}
-
-	return results, nil
+	results, _, err := ParseNVD20WithTotal(r)
+	return results, err
 }
 
 // ParseCISAKEV parses the official CISA KEV JSON catalog.
