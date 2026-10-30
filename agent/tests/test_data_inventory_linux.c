@@ -32,8 +32,12 @@ static bool has(uint64_t r, int bit) { return (r & DI_BIT(bit)) != 0; }
  * like a credential to a repository scanner. */
 static void join(char* out, size_t cap, const char* a, const char* b) { snprintf(out, cap, "%s%s", a, b); }
 
+/* Two 64-character lines of a PEM body (not a real key). */
+#define PEM_LINE1 "MIIEowIBAAKCAQEAu3pJ7xq9Lk2v8RzT4mWnB0sYcQf1dHgE6aVtK5oNiXbP2jUw"
+#define PEM_LINE2 "Zr7Cy3Mh9Gq4FeL0xSd8NvA1tBkWpJ6uOiTn5HlR2gYcV7mXzQ3bKfE0aDsP9wIr"
+
 static void test_content_rules(void) {
-    char t[512];
+    char t[768];
     join(t, sizeof(t), "aws_key = AKIA", "IOSFODNN7EXAMPLQ\n");
     CHECK(has(rules_of(t), DI_R_AWS_ACCESS_KEY));
     join(t, sizeof(t), "xAKIA", "IOSFODNN7EXAMPLQ");
@@ -52,10 +56,38 @@ static void test_content_rules(void) {
     CHECK(has(rules_of(t), DI_R_GOOGLE_API_KEY));
     join(t, sizeof(t), "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0", ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U");
     CHECK(has(rules_of(t), DI_R_JWT));
-    join(t, sizeof(t), "-----BEGIN RSA PRIVATE", " KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\n");
+    join(t, sizeof(t), "-----BEGIN RSA PRIVATE", " KEY-----\n" PEM_LINE1 "\n" PEM_LINE2 "\n-----END RSA PRIVATE KEY-----\n");
     CHECK(has(rules_of(t), DI_R_PRIVATE_KEY));
-    join(t, sizeof(t), "-----BEGIN ENCRYPTED PRIVATE", " KEY-----\nMIIE\n");
+    join(t, sizeof(t), "-----BEGIN RSA PRIVATE", " KEY-----\r\n" PEM_LINE1 "\r\n" PEM_LINE2 "\r\n-----END RSA PRIVATE KEY-----\r\n");
+    CHECK(has(rules_of(t), DI_R_PRIVATE_KEY)); /* CRLF */
+    join(t, sizeof(t), "-----BEGIN ENCRYPTED PRIVATE", " KEY-----\n" PEM_LINE1 "\n");
     CHECK(has(rules_of(t), DI_R_PRIVATE_KEY_ENCRYPTED) && !has(rules_of(t), DI_R_PRIVATE_KEY));
+    /* legacy encrypted PEM: Proc-Type/DEK-Info headers before the body */
+    join(t, sizeof(t), "-----BEGIN RSA PRIVATE", " KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,3F1D9A0B7C2E4D5F\n\n" PEM_LINE1 "\n");
+    CHECK(has(rules_of(t), DI_R_PRIVATE_KEY_ENCRYPTED) && !has(rules_of(t), DI_R_PRIVATE_KEY));
+    /* keys held in JSON or env strings: literal backslash-n escapes, not newlines */
+    join(t, sizeof(t), "{\"type\": \"service_account\", \"private_key\": \"-----BEGIN PRIVATE",
+         " KEY-----\\n" PEM_LINE1 "\\n" PEM_LINE2 "\\n-----END PRIVATE KEY-----\\n\"}\n");
+    CHECK(has(rules_of(t), DI_R_PRIVATE_KEY));
+    join(t, sizeof(t), "TLS_KEY=\"-----BEGIN EC PRIVATE", " KEY-----\\\\r\\\\n" PEM_LINE1 "\"\n"); /* double-escaped */
+    CHECK(has(rules_of(t), DI_R_PRIVATE_KEY));
+    join(t, sizeof(t), "\"-----BEGIN OPENSSH PRIVATE", " KEY-----\\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\\n\"");
+    CHECK(has(rules_of(t), DI_R_PRIVATE_KEY) && !has(rules_of(t), DI_R_PRIVATE_KEY_ENCRYPTED));
+    join(t, sizeof(t), "-----BEGIN PGP PRIVATE", " KEY BLOCK-----\nVersion: GnuPG v2\nComment: lab key\n\n" PEM_LINE1 "\n");
+    CHECK(has(rules_of(t), DI_R_PRIVATE_KEY_ENCRYPTED));
+    /* code that only names the header carries no key */
+    join(t, sizeof(t), "PEM_RE = re.compile(r\"-----BEGIN [A-Z ]*PRIVATE", " KEY-----[\\s\\S]+?-----END\")\n");
+    CHECK(rules_of(t) == 0);
+    join(t, sizeof(t), "    if line.startswith(\"-----BEGIN RSA PRIVATE", " KEY-----\"):\n        return True\n");
+    CHECK(rules_of(t) == 0);
+    join(t, sizeof(t), "HEADER = \"-----BEGIN PRIVATE", " KEY-----\\n\"\nredacted = text.replace(HEADER, '')\n");
+    CHECK(rules_of(t) == 0);
+    join(t, sizeof(t), "fixture = \"-----BEGIN RSA PRIVATE", " KEY-----\\nMIIE\\n-----END RSA PRIVATE KEY-----\"\n");
+    CHECK(rules_of(t) == 0); /* short placeholder body */
+    join(t, sizeof(t), "-----BEGIN PRIVATE", " KEY-----\n-----END PRIVATE KEY-----\n");
+    CHECK(rules_of(t) == 0);
+    join(t, sizeof(t), "ARMOR = \"-----BEGIN PGP PRIVATE", " KEY BLOCK-----\"\n");
+    CHECK(rules_of(t) == 0);
     join(t, sizeof(t), "-----BEGIN OPENSSH PRIVATE", " KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\n");
     CHECK(has(rules_of(t), DI_R_PRIVATE_KEY));
     join(t, sizeof(t), "-----BEGIN OPENSSH PRIVATE", " KEY-----\nb3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHI\n");

@@ -24,7 +24,7 @@
 
 /* Bumped whenever a rule is added or changed: a new rule set re-reads every
  * candidate file once (a full cycle) instead of trusting cached verdicts. */
-#define DI_RULES_VERSION 1
+#define DI_RULES_VERSION 2
 
 /* Rule ids. Order is the wire order of names; never renumber, append only. */
 enum {
@@ -379,6 +379,43 @@ static inline bool DataInv_UrlCredentialsAt(const unsigned char* at, const unsig
     return true;
 }
 
+static inline bool DataInv_IsB64(unsigned char c) { return DataInv_IsAlnum(c) || c == '+' || c == '/' || c == '='; }
+
+/* Skips what separates a PEM header from its body: CR, LF, spaces, tabs and
+ * the literal "\n" / "\r" escapes of keys held in JSON or env strings. */
+static inline const unsigned char* DataInv_SkipPemBreak(const unsigned char* s, const unsigned char* end) {
+    for (;;) {
+        if (s < end && (*s == '\r' || *s == '\n' || *s == ' ' || *s == '\t')) {
+            s++;
+            continue;
+        }
+        const unsigned char* b = s;
+        while (b < end && *b == '\\') b++;
+        if (b == s || b >= end || (*b != 'n' && *b != 'r')) return s;
+        s = b + 1;
+    }
+}
+
+/* Key material follows the header: a base64 run, or the Proc-Type header of a
+ * legacy encrypted PEM. Code that only names the format (a quote, a paren,
+ * regex text, a short placeholder after the header) carries no key. */
+static inline bool DataInv_PemBody(const unsigned char* s, const unsigned char* end) {
+    return DataInv_MemEq(s, end, "Proc-Type:") || DataInv_Run(s, end, DataInv_IsB64) >= 20;
+}
+
+/* An armored PGP key may carry "Name: value" header lines before its body. */
+static inline bool DataInv_PgpBody(const unsigned char* s, const unsigned char* end) {
+    for (int i = 0; i < 8; i++) {
+        s = DataInv_SkipPemBreak(s, end);
+        const unsigned char* k = s;
+        while (k < end && (DataInv_IsAlnum(*k) || *k == '-')) k++;
+        if (k == s || k >= end || *k != ':') break;
+        while (k < end && *k != '\n' && !(*k == '\\' && k + 1 < end && (k[1] == 'n' || k[1] == 'r'))) k++;
+        s = k;
+    }
+    return DataInv_PemBody(s, end);
+}
+
 static inline uint64_t DataInv_ContentRules(const unsigned char* buf, size_t len) {
     uint64_t r = DataInv_MagicRules(buf, len);
     if (DataInv_LooksBinary(buf, len)) return r;
@@ -395,23 +432,23 @@ static inline uint64_t DataInv_ContentRules(const unsigned char* buf, size_t len
                 for (const unsigned char* s = q; s + 16 <= stop; s++) {
                     if (memcmp(s, "PRIVATE KEY-----", 16) == 0) { hit = s; break; }
                 }
-                if (hit) {
+                const unsigned char* body = hit ? DataInv_SkipPemBreak(hit + 16, end) : NULL;
+                if (hit && DataInv_PemBody(body, end)) {
                     bool enc = (hit - q >= 10 && memcmp(q, "ENCRYPTED ", 10) == 0);
-                    const unsigned char* body = hit + 16;
                     const unsigned char* look = end - body > 400 ? body + 400 : end;
                     for (const unsigned char* s = body; !enc && s + 9 <= look; s++) {
                         if (memcmp(s, "ENCRYPTED", 9) == 0) enc = true;
                     }
                     /* OpenSSH keys carry their cipher name base64-encoded: "none" means unencrypted. */
-                    if (!enc && hit - q >= 8 && memcmp(q, "OPENSSH ", 8) == 0) {
-                        const unsigned char* s = body;
-                        while (s < look && (*s == '\r' || *s == '\n')) s++;
-                        /* base64 of "openssh-key-v1\0\0\0\0\x04none" starts b3BlbnNzaC1rZXktdjEAAAAABG5vbmU */
-                        if (!DataInv_MemEq(s, end, "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU")) enc = true;
-                    }
+                    /* base64 of "openssh-key-v1\0\0\0\0\x04none" starts b3BlbnNzaC1rZXktdjEAAAAABG5vbmU */
+                    if (!enc && hit - q >= 8 && memcmp(q, "OPENSSH ", 8) == 0 &&
+                        !DataInv_MemEq(body, end, "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU"))
+                        enc = true;
                     r |= DI_BIT(enc ? DI_R_PRIVATE_KEY_ENCRYPTED : DI_R_PRIVATE_KEY);
                 }
-                if (DataInv_MemEq(p, end, "-----BEGIN PGP PRIVATE" " KEY BLOCK-----")) r |= DI_BIT(DI_R_PRIVATE_KEY_ENCRYPTED);
+                if (DataInv_MemEq(p, end, "-----BEGIN PGP PRIVATE" " KEY BLOCK-----") &&
+                    DataInv_PgpBody(p + sizeof("-----BEGIN PGP PRIVATE" " KEY BLOCK-----") - 1, end))
+                    r |= DI_BIT(DI_R_PRIVATE_KEY_ENCRYPTED);
             }
             break;
         case 'A':
