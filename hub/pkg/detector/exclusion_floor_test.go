@@ -145,3 +145,38 @@ func TestSweepsAndResolverBypassIgnoreExclusionsAndQuietProcesses(t *testing.T) 
 		t.Fatalf("a quiet process's upload raised %d bandwidth findings", len(got))
 	}
 }
+
+// A backup job's upload is what an exclusion for a program and its storage
+// service is for: the 10 MB burst yields to one scoped to the endpoint, the
+// program's exact path and the service's range on 443 (task-341f8c5bafad4cdc,
+// rclone serving restic to Google Drive). Everything the exclusion does not
+// name still raises: another program to the same range, the same program to
+// another destination, and the same program on another endpoint.
+func TestABackupExclusionSilencesOnlyItsOwnUploadBurst(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	rclone := "/usr/local/bin/rclone"
+	if err := store.CreateExclusion(storage.Exclusion{ID: "ex-backup", TenantID: "default", Scope: "endpoint", ScopeValue: "linux-backup",
+		Name: "offsite backup", ProcessPath: rclone, DstIPRange: "198.51.100.0/24", Port: 443, Protocol: "tcp",
+		Reason: "fixture: restic backup through rclone", Active: true, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	upload := func(endpoint, path, dst string) int {
+		engine.Evaluate(storage.Event{TenantID: "default", EndpointID: endpoint, Timestamp: now, Action: "PERMIT",
+			Direction: "OUTBOUND", Protocol: 6, DstIP: dst, DstPort: 443, BytesOut: 64 << 20, ProcessPath: path, UserIdentity: "root"})
+		return len(anomaliesOfType(t, store, "BANDWIDTH_SPIKE"))
+	}
+	if n := upload("linux-backup", rclone, "198.51.100.4"); n != 0 {
+		t.Fatalf("the excluded backup upload raised %d bandwidth findings", n)
+	}
+	for i, c := range []struct{ endpoint, path, dst, what string }{
+		{"linux-backup", "/usr/bin/curl", "198.51.100.4", "another program to the storage range"},
+		{"linux-backup", "/usr/local/bin/rclone.new", "198.51.100.4", "another path to the storage range"},
+		{"linux-backup", rclone, "203.0.113.9", "the backup program to another destination"},
+		{"linux-other", rclone, "198.51.100.4", "the backup program on another endpoint"},
+	} {
+		if n := upload(c.endpoint, c.path, c.dst); n != i+1 {
+			t.Fatalf("%s: %d bandwidth findings, want %d", c.what, n, i+1)
+		}
+	}
+}
