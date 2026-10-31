@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strconv"
@@ -102,7 +103,8 @@ func (cx *ClassContext) roleOfID(id string) string {
 // home network for every other private address.
 func (cx *ClassContext) ZoneOf(ip string) string {
 	switch {
-	case netaddr.IsLoopback(ip):
+	case netaddr.IsLoopback(ip) || cx.cfg.IsContainerAddress(ip):
+		// The host's own containers are as local as its loopback.
 		return zoneLocal
 	case !isPrivateIP(ip):
 		return zoneExternal
@@ -136,6 +138,8 @@ type classEvidence struct {
 	Score      float64        `json:"score"`
 	Span       float64        `json:"span_minutes"`
 	Devices    *int           `json:"beacon_devices"`
+	DevicesUnk bool           `json:"beacon_devices_unknown"`
+	LastSeenAt string         `json:"last_seen_at"`
 	Tunnel     bool           `json:"tunnel_service"`
 	Browser    bool           `json:"browser"`
 	Upload     *int64         `json:"first_upload_bytes"`
@@ -218,10 +222,13 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 		switch {
 		case ev.Tunnel && !ev.Browser:
 			return page("a program beaconing to a shared tunnel front")
-		case port == 53 || port == 853 || port == 3478:
+		case (port == 53 || port == 853 || port == 3478) && knownResolverOrLocal(a.DstIP):
 			return digest("resolver forwarding or a STUN keepalive")
-		case ev.Score >= cx.cfg.BeaconPageScore && ev.Span >= 30 && ev.Devices != nil && *ev.Devices <= cx.cfg.BeaconRareDevices:
+		case ev.Score < cx.cfg.BeaconPageScore || ev.Span < float64(cx.cfg.BeaconPageSpanMin):
+		case ev.Devices != nil && *ev.Devices <= cx.cfg.BeaconRareDevices:
 			return page(fmt.Sprintf("a metronomic beacon (score %.2f over %.0f min) to a destination %d device(s) reach", ev.Score, ev.Span, *ev.Devices))
+		case ev.Devices == nil && ev.DevicesUnk:
+			return page(fmt.Sprintf("a metronomic beacon (score %.2f over %.0f min); how many devices reach it is unknown", ev.Score, ev.Span))
 		}
 		return digest("a periodic conversation that is not rare or not strong enough to page")
 	case "ENDPOINT_SILENT":
@@ -257,8 +264,9 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 var sweepHostsInTitle = regexp.MustCompile(`\((\d+) Hosts?\)`)
 
 // classifySweep pages a sweep that reached a floor port, a lab host reaching
-// outside the lab, or a fan-out to lan_sweep_hosts or more home hosts.
-// Everything else (an agent workstation's ssh round of its lab and
+// outside the lab, a fan-out to lan_sweep_hosts or more home hosts, or, from
+// any host but the agent workstation, that many home and infrastructure hosts
+// together. Everything else (an agent workstation's ssh round of its lab and
 // infrastructure hosts) is recorded.
 func (cx *ClassContext) classifySweep(a storage.AnomalyAlert, ev classEvidence, role string) (string, string) {
 	var floor []int
@@ -300,6 +308,10 @@ func (cx *ClassContext) classifySweep(a storage.AnomalyAlert, ev classEvidence, 
 	switch {
 	case role == storage.RoleLab && outside >= cx.cfg.LabEscapeHosts:
 		return storage.ClassPage, fmt.Sprintf("a lab host reached %d host(s) outside the lab", outside)
+	case role != storage.RoleAgent && outside >= cx.cfg.LANSweepHosts:
+		// Only the agent workstation makes routine rounds of the
+		// infrastructure hosts.
+		return storage.ClassPage, fmt.Sprintf("fan-out from %s host to %d home and infrastructure hosts (pages from %d)", roleArticle(role), outside, cx.cfg.LANSweepHosts)
 	case zones[zoneHome] >= cx.cfg.LANSweepHosts:
 		return storage.ClassPage, fmt.Sprintf("fan-out to %d home hosts (pages from %d)", zones[zoneHome], cx.cfg.LANSweepHosts)
 	}
@@ -345,16 +357,40 @@ func incidentKey(a storage.AnomalyAlert, ev classEvidence) string {
 	party := ""
 	switch fam {
 	case "presence":
+		// Each outage is its own incident: a host that returned and went
+		// dark again pages again.
+		party = ev.LastSeenAt
+	case "threat_intel_match":
+		party = a.DstIP
 	case "sweep":
-		if ev.FloorPorts != nil && len(*ev.FloorPorts) > 0 {
-			party = "floor:" + joinPorts(*ev.FloorPorts)
-		} else {
-			party = "fanout"
+		// One detector's sweep of one target: a lab escape is not hidden in
+		// an open sweep incident, nor a scan of one host in another's.
+		party = strings.ToLower(a.AnomalyType) + ":"
+		switch {
+		case ev.FloorPorts != nil && len(*ev.FloorPorts) > 0:
+			party += "floor:" + joinPorts(*ev.FloorPorts)
+		case a.AnomalyType == "LAB_ESCAPE":
+			party += firstNonEmpty(ev.TargetZone, "outside")
+		case a.AnomalyType == "PORT_SCAN_RECON":
+			party += a.DstIP
+		default:
+			party += "fanout"
 		}
 	default:
 		party = strings.ToLower(firstNonEmpty(ev.Dest, registrable(ev.Domain), registrable(ev.SNI), ev.Owner, a.DstIP))
 	}
 	return a.EndpointID + "|" + fam + "|" + party
+}
+
+// knownResolverOrLocal says whether a DNS-port destination is a resolver the
+// estate expects: a private address or a well-known public resolver. A
+// beacon on port 53 straight to any other public address is not forwarding.
+func knownResolverOrLocal(ip string) bool {
+	if isPrivateIP(ip) {
+		return true
+	}
+	a, err := netip.ParseAddr(ip)
+	return err == nil && publicResolvers[a.Unmap()]
 }
 
 func registrable(name string) string {

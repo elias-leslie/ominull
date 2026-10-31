@@ -839,7 +839,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			// span, usually minutes in. One that later holds at
 			// beacon_page_score for half an hour is raised once more (the
 			// strong key), since that is the shape that can page.
-			strong := bev.Score >= cfg.BeaconPageScore && bev.SpanMinutes >= 30
+			strong := bev.Score >= cfg.BeaconPageScore && bev.SpanMinutes >= float64(cfg.BeaconPageSpanMin)
 			first := !e.shouldSuppressAlert(alertKey, cooldown)
 			raise, strengthened := first, false
 			if strong && !e.shouldSuppressAlert(alertKey+":strong", cooldown) && !first {

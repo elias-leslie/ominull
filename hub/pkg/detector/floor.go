@@ -114,6 +114,7 @@ func ClampToFloor(t storage.DetectionTuning) (storage.DetectionTuning, []string)
 	ceiling("lab_escape_hosts", &t.LabEscapeHosts, floorLabEscapeHosts)
 	ceiling("new_dest_upload_mb", &t.NewDestUploadMB, floorNewDestUploadMB)
 	ceiling("page_incident_hours", &t.PageIncidentHours, floorPageIncidentHours)
+	ceiling("beacon_page_span_min", &t.BeaconPageSpanMin, floorBeaconPageSpanMin)
 	if t.NewDestWindowMin < floorNewDestWindowMin {
 		notes = append(notes, fmt.Sprintf("new_dest_window_min %d is below the floor and runs at %d", t.NewDestWindowMin, floorNewDestWindowMin))
 		t.NewDestWindowMin = floorNewDestWindowMin
@@ -148,4 +149,7 @@ const (
 	floorMaxPlausibleRateMbps = 2500
 	// floorPageIncidentHours is the longest one incident may hold its alerts.
 	floorPageIncidentHours = 24
+	// floorBeaconPageSpanMin is the longest a strong beacon may need to hold
+	// before it pages.
+	floorBeaconPageSpanMin = 30
 )

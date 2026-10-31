@@ -143,6 +143,10 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		{"shorter window", func(t *storage.DetectionTuning) { t.OffHoursStart = 23 }, []string{"off_hours_window"}},
 		{"moved window", func(t *storage.DetectionTuning) { t.OffHoursStart, t.OffHoursEnd = 23, 6 }, []string{"off_hours_window"}},
 		{"other zone", func(t *storage.DetectionTuning) { t.OffHoursZone = "UTC" }, []string{"off_hours_window"}},
+		{"lab network added", func(t *storage.DetectionTuning) { t.LabCIDRs = []string{"10.20.0.0/24"} }, []string{"lab_cidrs"}},
+		{"browser added", func(t *storage.DetectionTuning) { t.BeaconBrowsers = append(t.BeaconBrowsers, "lynx") }, []string{"beacon_browsers"}},
+		{"browser removed", func(t *storage.DetectionTuning) { t.BeaconBrowsers = t.BeaconBrowsers[1:] }, nil},
+		{"longer beacon span", func(t *storage.DetectionTuning) { t.BeaconPageSpanMin = 45 }, []string{"beacon_page_span_min"}},
 	}
 	for _, c := range cases {
 		after := base
@@ -163,6 +167,13 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		if strings.Join(got, ",") != strings.Join(c.want, ",") {
 			t.Errorf("%s: loosens %v, want %v", c.name, got, c.want)
 		}
+	}
+	// Taking a network out of a zone loosens too: its lab hosts lose the
+	// lab escape page, its servers the always-on page.
+	zoned := base
+	zoned.LabCIDRs, zoned.InfraCIDRs = []string{"10.20.0.0/24"}, []string{"10.0.0.1/32"}
+	if got := tuningLoosens(zoned, base); strings.Join(got, ",") != "infra_cidrs,lab_cidrs" {
+		t.Errorf("zones removed: loosens %v", got)
 	}
 	if base.AgentHeavyObserved {
 		off := base

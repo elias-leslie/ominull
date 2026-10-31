@@ -166,6 +166,10 @@ type DetectionTuning struct {
 	// TunnelServices are shared fronts (name suffixes) where beacon rarity
 	// means nothing: a non-browser program beaconing to one pages.
 	TunnelServices []string `json:"tunnel_services"`
+	// BeaconBrowsers are the program names (no path, no .exe) of the web
+	// browsers: a browser tab holding a tunnel-fronted page open is a person
+	// reading it, not an implant, so it does not page.
+	BeaconBrowsers []string `json:"beacon_browsers"`
 
 	// IntelPageConfidence is the threat-intelligence confidence (percent) at
 	// which a match pages; below it the match is recorded.
@@ -192,9 +196,10 @@ type DetectionTuning struct {
 	LabEscapeHosts int `json:"lab_escape_hosts"`
 
 	// A beacon pages when its score is at least BeaconPageScore over at least
-	// half an hour and the destination is seen from at most
+	// BeaconPageSpanMin minutes and the destination is seen from at most
 	// BeaconRareDevices devices; any other beacon is in the daily digest.
 	BeaconPageScore   float64 `json:"beacon_page_score"`
+	BeaconPageSpanMin int     `json:"beacon_page_span_min"`
 	BeaconRareDevices int     `json:"beacon_rare_devices"`
 
 	// A program sending NewDestUploadMB or more to a place its device never
@@ -266,6 +271,7 @@ func defaultDetectionTuning() DetectionTuning {
 		QuietClients:   defaultQuietClients(),
 
 		TunnelServices:       defaultTunnelServices(),
+		BeaconBrowsers:       defaultBeaconBrowsers(),
 		IntelPageConfidence:  IntelPageConfidenceDefault,
 		AutoIsolateRoles:     []string{RoleLab, RolePersonal},
 		PageIncidentHours:    24,
@@ -273,6 +279,7 @@ func defaultDetectionTuning() DetectionTuning {
 		LANSweepHosts:        10,
 		LabEscapeHosts:       1,
 		BeaconPageScore:      0.90,
+		BeaconPageSpanMin:    30,
 		BeaconRareDevices:    1,
 		NewDestUploadMB:      1,
 		NewDestWindowMin:     60,
@@ -297,6 +304,11 @@ const (
 func defaultTunnelServices() []string {
 	return []string{"trycloudflare.com", "workers.dev", "ngrok.io", "ngrok.app", "ngrok-free.app",
 		"loca.lt", "serveo.net", "localhost.run", "pastebin.com", "transfer.sh"}
+}
+
+// defaultBeaconBrowsers are the common web browsers by program name.
+func defaultBeaconBrowsers() []string {
+	return []string{"chrome", "chromium", "chromium-browser", "firefox", "msedge", "brave", "safari", "opera", "vivaldi"}
 }
 
 // defaultQuietProcesses is a starting point, not a security boundary. Every
@@ -806,6 +818,10 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.LabCIDRs = tidyList(t.LabCIDRs)
 	t.DecoyAddrs = tidyList(t.DecoyAddrs)
 	t.TunnelServices = tidyList(t.TunnelServices)
+	if t.BeaconBrowsers == nil {
+		t.BeaconBrowsers = defaultBeaconBrowsers()
+	}
+	t.BeaconBrowsers = tidyList(t.BeaconBrowsers)
 	t.AutoIsolateRoles = tidyList(t.AutoIsolateRoles)
 	t.IntelPageConfidence = clampInt(t.IntelPageConfidence, 1, 100, IntelPageConfidenceDefault)
 	t.PageIncidentHours = clampInt(t.PageIncidentHours, 1, 168, 24)
@@ -815,6 +831,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	if t.BeaconPageScore <= 0 || t.BeaconPageScore > 1 {
 		t.BeaconPageScore = 0.90
 	}
+	t.BeaconPageSpanMin = clampInt(t.BeaconPageSpanMin, 5, 240, 30)
 	t.BeaconRareDevices = clampInt(t.BeaconRareDevices, 1, 1000, 1)
 	t.NewDestUploadMB = clampInt(t.NewDestUploadMB, 1, 100000, 1)
 	t.NewDestWindowMin = clampInt(t.NewDestWindowMin, 1, 1440, 60)
@@ -865,6 +882,11 @@ func (t DetectionTuning) validZones() (DetectionTuning, error) {
 	for _, name := range t.TunnelServices {
 		if name == "" || strings.ContainsAny(name, " /:@*") || !strings.Contains(name, ".") {
 			return t, fmt.Errorf("%w: tunnel service %q must be a domain name such as trycloudflare.com", ErrInvalidDetectionTuning, name)
+		}
+	}
+	for _, name := range t.BeaconBrowsers {
+		if name == "" || strings.ContainsAny(name, " /\\:*") || strings.HasSuffix(name, ".exe") {
+			return t, fmt.Errorf("%w: browser %q must be a program name such as firefox, without a path or .exe", ErrInvalidDetectionTuning, name)
 		}
 	}
 	for _, r := range t.AutoIsolateRoles {
@@ -934,6 +956,21 @@ func (t DetectionTuning) IsTunnelService(name string) bool {
 	}
 	for _, s := range t.TunnelServices {
 		if name == s || strings.HasSuffix(name, "."+s) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsBrowser says whether a program is one of the web browsers, by name.
+func (t DetectionTuning) IsBrowser(procPath string) bool {
+	name := strings.ToLower(strings.TrimSpace(procPath))
+	if i := strings.LastIndexAny(name, "/\\"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSuffix(name, ".exe")
+	for _, b := range t.BeaconBrowsers {
+		if name != "" && name == b {
 			return true
 		}
 	}

@@ -23,7 +23,7 @@ func evidenceOf(t *testing.T, a storage.AnomalyAlert) map[string]any {
 func TestClassifyPagesOnlyTheFixedList(t *testing.T) {
 	cfg := storage.DefaultDetectionTuning()
 	cfg.LabCIDRs = []string{"10.20.0.0/24"}
-	cfg.InfraCIDRs = []string{"10.0.0.1/32"}
+	cfg.InfraCIDRs = []string{"10.0.0.1/32", "10.0.1.0/24"}
 	cx := NewClassContext(cfg, []storage.Endpoint{
 		{ID: "agent-ws", RoleTag: storage.RoleAgent, IP: "10.0.0.10"},
 		{ID: "laptop", IP: "10.0.0.11"},
@@ -39,9 +39,10 @@ func TestClassifyPagesOnlyTheFixedList(t *testing.T) {
 		raw, _ := json.Marshal(map[string]any{"sweep_targets": list, "floor_ports": []int{}})
 		return string(raw)
 	}
-	home := make([]string, 0, 10)
+	home, infra := make([]string, 0, 10), make([]string, 0, 10)
 	for i := 0; i < 10; i++ {
 		home = append(home, fmt.Sprintf("10.0.0.%d", 100+i))
+		infra = append(infra, fmt.Sprintf("10.0.1.%d", 1+i))
 	}
 	for _, c := range []struct {
 		name string
@@ -69,7 +70,11 @@ func TestClassifyPagesOnlyTheFixedList(t *testing.T) {
 		{"beacon, rare and strong", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 443, Evidence: `{"score":0.95,"span_minutes":40,"beacon_devices":1}`}, storage.ClassPage},
 		{"beacon, common", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 443, Evidence: `{"score":0.95,"span_minutes":40,"beacon_devices":4}`}, storage.ClassDigest},
 		{"beacon, short", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 443, Evidence: `{"score":0.95,"span_minutes":11,"beacon_devices":1}`}, storage.ClassDigest},
-		{"beacon, resolver", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 53, Evidence: `{"score":0.99,"span_minutes":60,"beacon_devices":1}`}, storage.ClassDigest},
+		{"beacon, resolver", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstIP: "1.1.1.1", DstPort: 53, Evidence: `{"score":0.99,"span_minutes":60,"beacon_devices":1}`}, storage.ClassDigest},
+		{"beacon, LAN resolver", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstIP: "10.0.0.1", DstPort: 853, Evidence: `{"score":0.99,"span_minutes":60,"beacon_devices":1}`}, storage.ClassDigest},
+		{"beacon on port 53 to a public non-resolver", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstIP: "203.0.113.53", DstPort: 53, Evidence: `{"score":0.99,"span_minutes":60,"beacon_devices":1}`}, storage.ClassPage},
+		{"beacon, rarity unknown", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 443, Evidence: `{"score":0.95,"span_minutes":40,"beacon_devices_unknown":true}`}, storage.ClassPage},
+		{"beacon stored before rarity", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 443, Evidence: `{"score":0.95,"span_minutes":40}`}, storage.ClassDigest},
 		{"beacon, tunnel front", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 443, Evidence: `{"tunnel_service":true}`}, storage.ClassPage},
 		{"beacon, browser on a tunnel front", storage.AnomalyAlert{AnomalyType: "C2_BEACONING", DstPort: 443, Evidence: `{"tunnel_service":true,"browser":true}`}, storage.ClassDigest},
 		{"infra host silent", storage.AnomalyAlert{AnomalyType: "ENDPOINT_SILENT", EndpointID: "srv"}, storage.ClassPage},
@@ -84,6 +89,8 @@ func TestClassifyPagesOnlyTheFixedList(t *testing.T) {
 		{"ssh round of the lab", storage.AnomalyAlert{AnomalyType: "LATERAL_PORT_SWEEP", EndpointID: "agent-ws", DstPort: 22,
 			Evidence: targets("10.20.0.101", "10.20.0.102", "10.20.0.103", "10.0.0.1", "10.0.0.2")}, storage.ClassRecord},
 		{"fan-out to ten home hosts", storage.AnomalyAlert{AnomalyType: "LATERAL_PORT_SWEEP", EndpointID: "agent-ws", DstPort: 22, Evidence: targets(home...)}, storage.ClassPage},
+		{"personal host sweeping the infrastructure", storage.AnomalyAlert{AnomalyType: "LATERAL_PORT_SWEEP", EndpointID: "laptop", DstPort: 22, Evidence: targets(infra...)}, storage.ClassPage},
+		{"agent workstation's round of the infrastructure", storage.AnomalyAlert{AnomalyType: "LATERAL_PORT_SWEEP", EndpointID: "agent-ws", DstPort: 22, Evidence: targets(infra...)}, storage.ClassRecord},
 		{"lab host sweeping home", storage.AnomalyAlert{AnomalyType: "LATERAL_PORT_SWEEP", EndpointID: "guest", DstPort: 22, Evidence: targets("10.0.0.100")}, storage.ClassPage},
 		{"unknown detector", storage.AnomalyAlert{AnomalyType: "SOMETHING_NEW"}, storage.ClassPage},
 	} {
@@ -306,5 +313,30 @@ func TestAnImpossibleRateIsANoteNotAnAlert(t *testing.T) {
 	}
 	if n, _ := store.CountAnomalyAlerts("", true); n != 0 {
 		t.Fatalf("a collector note is an open alert (%d open)", n)
+	}
+}
+
+// The counterparty keeps unrelated pages apart: two threat-list addresses at
+// one provider, two outages of one host, a lab escape during an open sweep.
+func TestIncidentKeysKeepSeparatePagesApart(t *testing.T) {
+	key := func(typ, ip, evidence string) string {
+		a := storage.AnomalyAlert{EndpointID: "ep", AnomalyType: typ, DstIP: ip, Evidence: evidence}
+		var ev classEvidence
+		_ = json.Unmarshal([]byte(evidence), &ev)
+		return incidentKey(a, ev)
+	}
+	owner := `{"destination_owner":"Hosting Co"}`
+	for _, c := range [][2]string{
+		{key("THREAT_INTEL_MATCH", "203.0.113.1", owner), key("THREAT_INTEL_MATCH", "203.0.113.2", owner)},
+		{key("ENDPOINT_SILENT", "", `{"last_seen_at":"2026-10-31T10:00:00Z"}`), key("ENDPOINT_SILENT", "", `{"last_seen_at":"2026-10-31T14:00:00Z"}`)},
+		{key("LATERAL_PORT_SWEEP", "10.0.0.5", `{}`), key("LAB_ESCAPE", "10.0.0.5", `{"target_zone":"infra"}`)},
+		{key("PORT_SCAN_RECON", "10.0.0.5", `{}`), key("PORT_SCAN_RECON", "10.0.0.6", `{}`)},
+	} {
+		if c[0] == c[1] {
+			t.Errorf("one incident for two pages: %s", c[0])
+		}
+	}
+	if key("LATERAL_PORT_SWEEP", "10.0.0.5", `{}`) != key("LATERAL_PORT_SWEEP", "10.0.0.9", `{}`) {
+		t.Error("one sweep's alerts should stay one incident")
 	}
 }

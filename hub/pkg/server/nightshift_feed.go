@@ -313,12 +313,37 @@ const (
 // line per group (rule, host and program), the largest groups first, each
 // named the way the alert list names an alert. It never asks: these findings
 // are kept with their evidence for the record, and only pages ask. It took
-// over the agent egress digest (ominull.anomalies.agent_egress), whose
-// findings are records now.
+// over the agent egress digest; ominull.anomalies.agent_egress stays in the
+// feed as the same digest of the agent runtimes' findings, so the contract
+// only grows.
 func (s *Server) digestFinding(now time.Time) (feedFinding, error) {
-	list, err := s.store.RecordedAlerts(now.Add(-feedAnomalyWindow), feedDigestScan)
+	return s.recordedDigest(now, "ominull.anomalies.digest", "Recorded today", nil)
+}
+
+// agentEgressTypes are the findings of the per-runtime agent egress detector.
+var agentEgressTypes = []string{"AGENT_NEW_DESTINATION", "AGENT_UPLOAD_VOLUME", "AGENT_DNS_BYPASS"}
+
+// agentEgressFinding is the digest of the agent runtimes' recorded findings
+// (a page among them is in the alert list).
+func (s *Server) agentEgressFinding(now time.Time) (feedFinding, error) {
+	return s.recordedDigest(now, "ominull.anomalies.agent_egress", "Agent runtimes recorded today", agentEgressTypes)
+}
+
+// recordedDigest digests the recorded findings of the last day, only those
+// of the given types when types is not nil.
+func (s *Server) recordedDigest(now time.Time, uid, title string, types []string) (feedFinding, error) {
+	all, err := s.store.RecordedAlerts(now.Add(-feedAnomalyWindow), feedDigestScan)
 	if err != nil {
 		return feedFinding{}, err
+	}
+	list := all
+	if types != nil {
+		list = nil
+		for _, a := range all {
+			if slices.Contains(types, a.AnomalyType) {
+				list = append(list, a)
+			}
+		}
 	}
 	type group struct {
 		line  feedAlert
@@ -359,8 +384,7 @@ func (s *Server) digestFinding(now time.Time) (feedFinding, error) {
 		lines = append(lines, map[string]any{"type": g.line.Type, "host": g.line.Host, "class": g.line.Class, "count": g.count, "what": text})
 	}
 	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_class": byClass, "by_type": byType,
-		"groups": len(order), "lines": lines, "truncated": len(list) == feedDigestScan}
-	const uid, title = "ominull.anomalies.digest", "Recorded today"
+		"groups": len(order), "lines": lines, "truncated": len(all) == feedDigestScan}
 	if len(list) == 0 {
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"Nothing recorded in the last 24 h", nil, unmapped), nil
@@ -639,6 +663,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	add("hunt_leads", []feedFinding{hl}, err)
 	dg, err := s.digestFinding(now)
 	add("digest", []feedFinding{dg}, err)
+	ae, err := s.agentEgressFinding(now)
+	add("agent_egress", []feedFinding{ae}, err)
 	dh, err := s.detectionHealthFinding(now)
 	add("detection_health", []feedFinding{dh}, err)
 	g, err := s.agentFinding(now)

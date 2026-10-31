@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 )
@@ -228,28 +230,32 @@ func AlertClass(a AnomalyAlert) string {
 func (s *Store) OpenIncident(tenantID, endpointID, key string, since time.Time) (id, worst string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.Query(`SELECT json_extract(evidence, '$.incident'), severity FROM anomaly_alerts
+	// The window runs from the incident's first page, not its newest member:
+	// activity that goes on for days asks again each window.
+	err = s.db.QueryRow(`SELECT json_extract(evidence, '$.incident') FROM anomaly_alerts
 		WHERE tenant_id = ? AND endpoint_id = ? AND timestamp >= ? AND json_valid(evidence)
-			AND json_extract(evidence, '$.incident_key') = ?
-		ORDER BY timestamp DESC LIMIT 200`, tenantID, endpointID, since.UTC(), key)
+			AND json_extract(evidence, '$.incident_key') = ? AND json_extract(evidence, '$.incident') = 'inc-' || id
+		ORDER BY timestamp DESC LIMIT 1`, tenantID, endpointID, since.UTC(), key).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	rows, err := s.db.Query(`SELECT severity FROM anomaly_alerts
+		WHERE tenant_id = ? AND endpoint_id = ? AND timestamp >= ? AND json_valid(evidence)
+			AND json_extract(evidence, '$.incident') = ?`, tenantID, endpointID, since.UTC(), id)
 	if err != nil {
 		return "", "", err
 	}
 	defer rows.Close()
 	rank := map[string]int{"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 	for rows.Next() {
-		var inc *string
 		var sev string
-		if err := rows.Scan(&inc, &sev); err != nil {
+		if err := rows.Scan(&sev); err != nil {
 			return "", "", err
 		}
-		if inc == nil || *inc == "" {
-			continue
-		}
-		if id == "" {
-			id = *inc
-		}
-		if *inc == id && rank[sev] > rank[worst] {
+		if rank[sev] > rank[worst] {
 			worst = sev
 		}
 	}

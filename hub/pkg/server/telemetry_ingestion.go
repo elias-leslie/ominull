@@ -203,7 +203,10 @@ func (s *Server) ingestTelemetryReplay(r *http.Request, tenantID string, batch T
 // that notes it (a collector-health record, at most hourly per endpoint),
 // made once the batch is stored.
 func (s *Server) dropImplausibleRates(events []storage.Event, ep storage.Endpoint) func() {
-	limit := float64(s.store.GetDetectionTuning().MaxPlausibleRateMbps) * 125000
+	// The floor applies here as in the detector: a loosened limit must not
+	// zero real bytes that the upload rules need.
+	tuning, _ := detector.ClampToFloor(s.store.GetDetectionTuning())
+	limit := float64(tuning.MaxPlausibleRateMbps) * 125000
 	first, rate, n := storage.DropImplausibleRates(events, limit)
 	if n == 0 {
 		return func() {}

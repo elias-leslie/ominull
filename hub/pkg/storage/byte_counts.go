@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"log"
+	"net"
 	"time"
 )
 
@@ -77,6 +78,10 @@ func DropImplausibleRates(events []Event, limit float64) (first Event, rate floa
 		return Event{}, 0, 0
 	}
 	for i := range events {
+		if ip := net.ParseIP(events[i].DstIP); ip != nil && ip.IsLoopback() {
+			// Loopback runs past any link's rate; it is not a counter glitch.
+			continue
+		}
 		r, ok := SampleRate(events[i])
 		if !ok || r <= limit {
 			continue

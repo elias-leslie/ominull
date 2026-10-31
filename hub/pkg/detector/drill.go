@@ -174,8 +174,11 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 	// A parked lab guest reaching a home host outside the lab pages.
 	labEP := ep
 	labEP.RoleTag, labEP.Presence = "", storage.PresenceParked
-	cases = append(cases, runAt(DrillCase{Rule: "lab escape", Want: "LAB_ESCAPE"}, labEP, "", live,
-		[]storage.Event{flow(drillProgram+"escape", lan(198), 8080, 60, 0)}))
+	var escape []storage.Event
+	for i := range min(max(live.LabEscapeHosts, 1), 40) {
+		escape = append(escape, flow(drillProgram+"escape", lan(150+i), 8080, 60, time.Duration(i)*time.Second))
+	}
+	cases = append(cases, runAt(DrillCase{Rule: "lab escape", Want: "LAB_ESCAPE"}, labEP, "", live, escape))
 
 	// A metronomic, uniform beacon to a destination no device reaches pages.
 	var beacon []storage.Event

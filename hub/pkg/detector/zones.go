@@ -199,11 +199,15 @@ func (e *Engine) beaconClassEvidence(raw string, ev storage.Event, cfg storage.D
 		// The device beaconing is one of them even before its profile row
 		// is written.
 		fields["beacon_devices"] = max(n, 1)
+	} else {
+		// Rarity unknown: Classify pages a strong beacon rather than
+		// calling it common.
+		fields["beacon_devices_unknown"] = true
 	}
 	if cfg.IsTunnelService(name) {
 		fields["tunnel_service"] = true
 	}
-	if isBrowser(procName) {
+	if cfg.IsBrowser(procName) {
 		fields["browser"] = true
 	}
 	fields["destination"] = owner
@@ -212,14 +216,4 @@ func (e *Engine) beaconClassEvidence(raw string, ev storage.Event, cfg storage.D
 	}
 	out, _ := json.Marshal(fields)
 	return string(out)
-}
-
-// isBrowser names the web browsers by program name: a browser tab holding a
-// tunnel-fronted page open is a person reading it.
-func isBrowser(procName string) bool {
-	switch strings.TrimSuffix(strings.ToLower(baseName(procName)), ".exe") {
-	case "chrome", "chromium", "chromium-browser", "firefox", "msedge", "brave", "safari", "opera", "vivaldi":
-		return true
-	}
-	return false
 }

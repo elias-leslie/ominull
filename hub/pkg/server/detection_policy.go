@@ -615,8 +615,13 @@ var tuningDirections = map[string]tuningDirection{
 	"admin_fanout_targets":   addLoosens,
 	"admin_fanout_max_hosts": higherLoosens,
 
-	"lab_cidrs":               addLoosens,
-	"infra_cidrs":             addLoosens,
+	// Any change to a zone loosens something: a network added mutes the
+	// admin and sweep rules there, one removed drops its hosts' lab escape
+	// and always-on infrastructure pages.
+	"lab_cidrs":               anyLoosens,
+	"infra_cidrs":             anyLoosens,
+	"beacon_browsers":         addLoosens,
+	"beacon_page_span_min":    higherLoosens,
 	"decoy_addrs":             removeLoosens,
 	"tunnel_services":         removeLoosens,
 	"intel_page_confidence":   higherLoosens,

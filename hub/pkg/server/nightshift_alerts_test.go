@@ -367,7 +367,7 @@ func TestAgentEgressDigestIsInformationalAndNamed(t *testing.T) {
 	seen := 0
 	for _, f := range doc.Findings {
 		switch f.FindingInfo.UID {
-		case "ominull.anomalies.digest":
+		case "ominull.anomalies.digest", "ominull.anomalies.agent_egress":
 			seen++
 			if f.SeverityID != ocsfSevInformational || f.StatusID != ocsfStatusNew ||
 				!strings.Contains(f.Message, "bash on ominull-target-linux connected straight to") ||
@@ -381,8 +381,8 @@ func TestAgentEgressDigestIsInformationalAndNamed(t *testing.T) {
 			}
 		}
 	}
-	if seen != 2 {
-		t.Fatalf("summary and digest not both in the feed (%d)", seen)
+	if seen != 3 {
+		t.Fatalf("summary, digest and agent egress digest not all in the feed (%d)", seen)
 	}
 }
 

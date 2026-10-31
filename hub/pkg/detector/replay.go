@@ -102,7 +102,7 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 	cx := NewClassContext(t, endpoints, observed)
 	incidentWindow := time.Duration(t.PageIncidentHours) * time.Hour
 	type openIncident struct {
-		last  time.Time
+		start time.Time // its first page: the window runs from here
 		worst string
 		page  int // index in Paging.Pages, -1 past the list
 	}
@@ -207,8 +207,8 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 					inc := incidents[key]
 					push, escalation := false, false
 					switch {
-					case inc == nil || a.Timestamp.Sub(inc.last) >= incidentWindow:
-						inc = &openIncident{worst: a.Severity, page: -1}
+					case inc == nil || a.Timestamp.Sub(inc.start) >= incidentWindow:
+						inc = &openIncident{start: a.Timestamp, worst: a.Severity, page: -1}
 						incidents[key] = inc
 						res.Paging.Incidents++
 						push = true
@@ -216,7 +216,6 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 						inc.worst = a.Severity
 						push, escalation = true, true
 					}
-					inc.last = a.Timestamp
 					if push {
 						res.Paging.Pushes++
 						inc.page = -1

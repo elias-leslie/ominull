@@ -377,9 +377,10 @@ func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endp
 		log.Printf("[-] device destination write failed for %s: %v", ev.EndpointID, err)
 		return
 	}
-	if cfg.AgentRuntimeOf(ev.ProcessPath) != "" {
-		return
-	}
+	// Agent runtimes are judged here too: their own first-contact upload
+	// (AGENT_NEW_DESTINATION) runs after the exclusions and only while
+	// agent_egress_enabled is on, and this rule is a floor. Both firing on
+	// one upload is one incident (same family and destination).
 	warming, _ := warmingUp(endpoint, cfg, now)
 	learnFor := time.Duration(cfg.AgentBaselineDays) * 24 * time.Hour
 	if warming || seen.FirstSeen.Sub(seen.Since) < learnFor {
