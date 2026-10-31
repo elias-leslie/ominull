@@ -148,6 +148,8 @@ type ClientCertBundle struct {
 	// written to a file only SYSTEM and Administrators can read, and a password
 	// stored beside it would protect nothing.
 	PFXBase64 string `json:"pfx_base64,omitempty"`
+	// NotAfter is the certificate's expiry, for the caller's records.
+	NotAfter time.Time `json:"-"`
 }
 
 // ClientCAPool returns the pool a TLS listener verifies agent certificates
@@ -183,7 +185,7 @@ func (m *Manager) IssueClientCert(hostname, ipStr string) (*ClientCertBundle, er
 			Organization: []string{"Ominull Enrolled Fleet"},
 			CommonName:   hostname,
 		},
-		NotBefore:   time.Now().Add(-10 * time.Minute),
+		NotBefore:   time.Now().Add(-ClientCertBackdate),
 		NotAfter:    time.Now().Add(ClientCertLifetime),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -218,6 +220,7 @@ func (m *Manager) IssueClientCert(hostname, ipStr string) (*ClientCertBundle, er
 		KeyPEM:    keyPEM,
 		CAPEM:     m.caPEM,
 		PFXBase64: base64.StdEncoding.EncodeToString(pfx),
+		NotAfter:  leaf.NotAfter,
 	}, nil
 }
 
@@ -255,6 +258,12 @@ const (
 // ClientCertLifetime is how long an agent or router client certificate is
 // valid. The hub reports a router certificate that is close to it.
 const ClientCertLifetime = 365 * 24 * time.Hour
+
+// ClientCertBackdate is how far before issue a client certificate's NotBefore
+// is set, so a peer whose clock runs a little behind still accepts it. The
+// hub reads it back to tell whether a certificate was issued after a renewal
+// request.
+const ClientCertBackdate = 10 * time.Minute
 
 // ServerCertificate returns a TLS leaf signed by the hub CA and valid for every
 // name and address in hosts, loading the stored one when it still fits and
