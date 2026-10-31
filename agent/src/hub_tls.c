@@ -550,6 +550,7 @@ bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
  * Renewal (Service_AdoptRenewedClientCert drives these).
  * ------------------------------------------------------------------------- */
 
+
 const void* Hub_ImportClientCertPFX(const AGENT_CONFIG* config, const unsigned char* pfx, unsigned long len) {
     if (!config || !pfx || len == 0) return NULL;
     CRYPT_DATA_BLOB blob;
@@ -568,6 +569,8 @@ const void* Hub_ImportClientCertPFX(const AGENT_CONFIG* config, const unsigned c
         CertGetNameStringA(found, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, name, sizeof(name));
         if (_stricmp(name, config->endpoint_id) == 0 && CertVerifyTimeValidity(NULL, found->pCertInfo) == 0)
             out = CertDuplicateCertificateContext(found);
+        else
+            Hub_DiscardClientCert(found); /* the import already persisted its key */
         CertFreeCertificateContext(found);
     }
     CertCloseStore(store, 0);

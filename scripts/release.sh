@@ -41,7 +41,7 @@ Options:
   --no-wait        queue the update and return without claiming convergence
   --urgent REASON  release the hub again within a day of the last release
                    (a live outage, a paging false alarm, a security fix);
-                   REASON goes in the release commit and the operations brief
+                   (put REASON in the release commit and the operations brief)
 EOF
 }
 
@@ -53,7 +53,12 @@ while [ "$#" -gt 0 ]; do
         --hub-only) DO_AGENTS=0; shift ;;
         --agents-only) DO_HUB=0; shift ;;
         --no-wait) WAIT_FOR_AGENTS=0; shift ;;
-        --urgent) URGENT_REASON="${2:?--urgent needs a reason}"; shift 2 ;;
+        --urgent)
+            URGENT_REASON="${2:-}"
+            case "${URGENT_REASON}" in
+                ""|-*) echo "[-] --urgent needs a reason, e.g. --urgent \"paging false alarm\"" >&2; exit 2 ;;
+            esac
+            shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "[-] Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -65,16 +70,20 @@ if [ "${DO_HUB}" -eq 1 ]; then
     if [ -n "${last_release}" ]; then
         read -r last_sha last_time last_subject <<<"${last_release}"
         last_name="$(printf '%s' "${last_subject}" | cut -d' ' -f1-2 | sed -E 's/[.:]+$//')"
-        shipped="$(git -C "${ROOT_DIR}" diff --name-only "${last_sha}" -- hub agent packaging \
+        # Committed changes only: a rerun after a failed run must not count
+        # the version bump that run left in the working tree.
+        shipped="$(git -C "${ROOT_DIR}" diff --name-only "${last_sha}" HEAD -- hub agent packaging screen \
             scripts/build.sh scripts/build-packages.sh scripts/build-linux-agent.sh scripts/build-bpf.sh \
-            ':(exclude)*_test.go' ':(exclude)agent/tests' ':(exclude)hub/**/testdata' ':(exclude)*.md')"
+            ':(exclude)*_test.go' ':(exclude)agent/tests' ':(exclude,glob)hub/**/testdata/**' ':(exclude)*.md')"
         if [ -z "${shipped}" ]; then
             echo "[-] Nothing the hub or agents ship has changed since ${last_name}; nothing to release." >&2
             exit 1
         fi
         age=$(( $(date +%s) - last_time ))
         if [ "${age}" -lt "${RELEASE_INTERVAL_SECONDS}" ] && [ -z "${URGENT_REASON}" ]; then
-            echo "[-] ${last_name} went out $(( age / 3600 ))h ago; hub releases are batched to one a day." >&2
+            if [ "${age}" -lt 3600 ]; then ago="$(( age / 60 ))m"; else ago="$(( age / 3600 ))h"; fi
+            next="$(date -u -d "@$(( last_time + RELEASE_INTERVAL_SECONDS ))" '+%Y-%m-%d %H:%M UTC')"
+            echo "[-] ${last_name} went out ${ago} ago; hub releases are batched to one a day (next after ${next})." >&2
             echo "    Leave this change for the next batch, or, if it cannot wait (a live outage, a paging" >&2
             echo "    false alarm, a security fix), run again with --urgent \"<why>\"." >&2
             exit 1

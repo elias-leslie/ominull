@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -43,9 +44,12 @@ const (
 	agentCertRenewDaysDefault = 60
 	agentCertRenewDaysMin     = 7
 	agentCertRenewDaysMax     = 300
-	// A reply carrying a certificate can be lost. Offer again after this long
-	// rather than on every heartbeat: each offer generates an RSA key.
-	agentCertOfferCooldown = time.Hour
+	// A reply carrying a certificate can be lost. Offer again after this many
+	// minutes rather than on every heartbeat: each offer generates an RSA key.
+	agentCertOfferCooldownSetting = "agent_cert_offer_cooldown_minutes"
+	agentCertOfferCooldownDefault = 60
+	agentCertOfferCooldownMin     = 10
+	agentCertOfferCooldownMax     = 24 * 60
 )
 
 // verifiedClientLeaf returns the client certificate the TLS stack verified
@@ -68,19 +72,31 @@ func (s *Server) agentCertRenewWindow() time.Duration {
 	return time.Duration(days) * 24 * time.Hour
 }
 
+// agentCertOfferCooldown is how long after an offer the next one waits.
+func (s *Server) agentCertOfferCooldown() time.Duration {
+	minutes := agentCertOfferCooldownDefault
+	if v, err := s.store.GetSetting(agentCertOfferCooldownSetting); err == nil && strings.TrimSpace(v) != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			minutes = min(max(n, agentCertOfferCooldownMin), agentCertOfferCooldownMax)
+		}
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
 // agentCertRenewalReason says why this heartbeat should carry a new
 // certificate, or "" when it should not. leaf is the certificate verified on
 // this request (nil when none was presented); credentialAuthed is true when
 // the request proved the endpoint's device credential.
-func agentCertRenewalReason(st storage.AgentCertState, leaf *x509.Certificate, credentialAuthed bool, now time.Time, window time.Duration) string {
-	if !st.OfferedAt.IsZero() && now.Sub(st.OfferedAt) < agentCertOfferCooldown {
+func agentCertRenewalReason(st storage.AgentCertState, leaf *x509.Certificate, credentialAuthed bool, now time.Time, window, cooldown time.Duration) string {
+	if !st.OfferedAt.IsZero() && now.Sub(st.OfferedAt) < cooldown {
 		return ""
 	}
 	requested := !st.RenewRequestedAt.IsZero()
 	if leaf != nil {
-		// A certificate issued at T carries NotBefore T - backdate. It
-		// predates the request when T is before the request.
-		if requested && leaf.NotBefore.Add(pki.ClientCertBackdate).Before(st.RenewRequestedAt) {
+		// A certificate issued at T carries NotBefore T - backdate, to the
+		// second. It predates the request when T is before the request's
+		// second (one issued in that same second counts as after it).
+		if requested && leaf.NotBefore.Add(pki.ClientCertBackdate).Before(st.RenewRequestedAt.Truncate(time.Second)) {
 			return "requested"
 		}
 		if leaf.NotAfter.Sub(now) < window {
@@ -122,7 +138,8 @@ func (s *Server) observeAgentCert(r *http.Request, endpointID string, capable bo
 			log.Printf("[!] Could not record the client certificate of %s: %v", endpointID, err)
 		}
 	}
-	if !capable {
+	// The reply carries a private key: only ever over TLS.
+	if !capable || r.TLS == nil {
 		return
 	}
 	st, err := s.store.GetAgentCertState(endpointID)
@@ -131,7 +148,7 @@ func (s *Server) observeAgentCert(r *http.Request, endpointID string, capable bo
 		return
 	}
 	credentialAuthed := r.Header.Get("X-Device-Endpoint-ID") == endpointID
-	reason := agentCertRenewalReason(st, leaf, credentialAuthed, now, s.agentCertRenewWindow())
+	reason := agentCertRenewalReason(st, leaf, credentialAuthed, now, s.agentCertRenewWindow(), s.agentCertOfferCooldown())
 	if reason == "" {
 		return
 	}
@@ -173,6 +190,9 @@ func (s *Server) handleAgentCertRenewal(w http.ResponseWriter, r *http.Request) 
 		out := make([]map[string]any, 0, len(states))
 		for _, st := range states {
 			row := map[string]any{"endpoint_id": st.EndpointID, "serial": st.Serial}
+			if !st.NotAfter.IsZero() {
+				row["days_left"] = daysLeft(st.NotAfter, time.Now())
+			}
 			for k, t := range map[string]time.Time{"not_after": st.NotAfter, "seen_at": st.SeenAt,
 				"renew_requested_at": st.RenewRequestedAt, "offered_at": st.OfferedAt} {
 				if !t.IsZero() {
@@ -186,14 +206,24 @@ func (s *Server) handleAgentCertRenewal(w http.ResponseWriter, r *http.Request) 
 		var req struct {
 			EndpointID string `json:"endpoint_id"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "unreadable renewal request")
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, `send {"endpoint_id": "<id>"}`)
 			return
 		}
 		id := strings.TrimSpace(req.EndpointID)
+		if id == "" {
+			writeJSONError(w, http.StatusBadRequest, "endpoint_id is required")
+			return
+		}
 		ep, err := s.store.GetEndpoint(id)
-		if err != nil || ep == nil || ep.ID != id || ep.Status == "retired" {
+		if err != nil || ep == nil || ep.ID != id {
 			writeJSONError(w, http.StatusNotFound, "endpoint not registered")
+			return
+		}
+		if ep.Status == "retired" {
+			writeJSONError(w, http.StatusConflict, "endpoint is retired")
 			return
 		}
 		if err := s.store.RequestAgentCertRenewal(id, time.Now().UTC()); err != nil {
@@ -201,16 +231,26 @@ func (s *Server) handleAgentCertRenewal(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		s.audit(r, "AGENT_CERT_RENEWAL_REQUESTED", id, "Asked for this endpoint's client certificate to be renewed on its next heartbeat")
-		writeJSON(w, http.StatusAccepted, map[string]string{"endpoint_id": id, "status": "requested"})
+		writeJSON(w, http.StatusAccepted, map[string]string{"endpoint_id": id, "status": "requested",
+			"note": "offered on its next heartbeat if its agent can renew (1.8.104 or later); GET shows offered_at, and a newer not_after once installed"})
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
+// daysLeft is whole days until t, rounded down: an hour past expiry is -1.
+func daysLeft(t, now time.Time) int {
+	return int(math.Floor(t.Sub(now).Hours() / 24))
+}
+
 // agentCertFinding tells Nightshift whether agent certificates are renewing.
 // Renewal starts agent_cert_renew_days before expiry; a certificate still in
 // use at half that window has failed to renew for weeks and needs a person
-// (an agent too old to renew, or one that keeps failing to install it).
+// (an agent too old to renew, a machine that has been off, or one that keeps
+// failing to install it). Messages may reach a push, so they carry counts and
+// never a device name; the machines are the finding's resources. Endpoints
+// never seen presenting a certificate are counted as unknown, not as fine;
+// they do not raise the finding, since an offline laptop would keep it open.
 func (s *Server) agentCertFinding(now time.Time) (feedFinding, error) {
 	const uid, title = "ominull.agents.certificate", "Agent client certificates"
 	states, err := s.store.ListAgentCertStates()
@@ -232,57 +272,90 @@ func (s *Server) agentCertFinding(now time.Time) (feedFinding, error) {
 		notAfter time.Time
 	}
 	var due []entry
-	var expired int
 	var unknown []string
+	var unknownRes, renewingRes []feedResource
+	expired, offline := 0, 0
 	next := entry{}
 	certs := map[string]any{}
 	for _, ep := range endpoints {
 		if ep.Status == "retired" {
 			continue
 		}
+		res := feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID}
 		st, ok := byID[ep.ID]
 		if !ok || st.NotAfter.IsZero() {
-			// Not seen presenting a certificate since the hub began recording:
-			// unknown, not fine. An offline laptop stays here until it reports.
 			unknown = append(unknown, ep.ID)
+			unknownRes = append(unknownRes, res)
 			continue
 		}
-		res := feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID}
 		left := st.NotAfter.Sub(now)
-		certs[ep.ID] = map[string]any{"not_after": st.NotAfter.UTC().Format(time.RFC3339), "days_left": int(left.Hours() / 24),
-			"agent_version": ep.DriverVersion}
+		row := map[string]any{"not_after": st.NotAfter.UTC().Format(time.RFC3339), "days_left": daysLeft(st.NotAfter, now)}
+		if ep.DriverVersion != "" {
+			row["agent_version"] = ep.DriverVersion
+		}
+		if !ep.LastSeenAt.IsZero() {
+			row["last_seen"] = ep.LastSeenAt.UTC().Format(time.RFC3339)
+		}
+		if !st.OfferedAt.IsZero() {
+			row["offered_at"] = st.OfferedAt.UTC().Format(time.RFC3339)
+		}
+		certs[ep.ID] = row
 		if next.notAfter.IsZero() || st.NotAfter.Before(next.notAfter) {
 			next = entry{res, st.NotAfter}
 		}
-		if left < warn {
+		switch {
+		case left < warn:
 			due = append(due, entry{res, st.NotAfter})
 			if left <= 0 {
 				expired++
 			}
+			if !ep.LastSeenAt.IsZero() && now.Sub(ep.LastSeenAt) > 48*time.Hour {
+				offline++
+			}
+		case left < window && !st.OfferedAt.IsZero():
+			renewingRes = append(renewingRes, res)
 		}
 	}
 	sort.Strings(unknown)
 	unmapped := map[string]any{"renew_days": int(window.Hours() / 24), "warn_days": int(warn.Hours() / 24),
 		"certificates": certs, "unknown": unknown}
+	unknownNote := ""
+	if len(unknown) > 0 {
+		unknownNote = fmt.Sprintf("; expiry unknown for %s not yet seen presenting one", plural(len(unknown), "endpoint", "endpoints"))
+	}
 	if len(due) > 0 {
 		sort.Slice(due, func(i, j int) bool { return due[i].notAfter.Before(due[j].notAfter) })
 		var resources []feedResource
 		for _, d := range due {
 			resources = append(resources, d.res)
 		}
-		msg := fmt.Sprintf("%s within %d days of expiry and not renewed", plural(len(due), "agent certificate is", "agent certificates are"), int(warn.Hours()/24))
+		var parts []string
 		if expired > 0 {
-			msg = fmt.Sprintf("%s expired and %d more within %d days, not renewed", plural(expired, "agent certificate has", "agent certificates have"), len(due)-expired, int(warn.Hours()/24))
+			parts = append(parts, fmt.Sprintf("%d expired", expired))
 		}
-		return s.feedFinding(now, uid, title, ocsfSevMedium, ocsfStatusNew, msg+": update the agent or re-enrol it", resources, unmapped), nil
+		if n := len(due) - expired; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d within %d days of expiry", n, int(warn.Hours()/24)))
+		}
+		if offline > 0 {
+			parts = append(parts, fmt.Sprintf("%d off line for over 2 days", offline))
+		}
+		msg := fmt.Sprintf("%s not renewed (%s). Agents on 1.8.104 or later renew once on line; update older agents, re-enrol any that cannot reconnect",
+			plural(len(due), "agent certificate", "agent certificates"), strings.Join(parts, ", "))
+		return s.feedFinding(now, uid, title, ocsfSevMedium, ocsfStatusNew, msg+unknownNote, resources, unmapped), nil
 	}
 	if next.notAfter.IsZero() {
 		// Nothing to warn about yet, and nothing known: each agent's next
 		// heartbeat records its certificate. Said as unknown, not as fine.
-		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-			"No agent has presented a client certificate since the hub began recording them, so no expiry is known yet", nil, unmapped), nil
+		msg := "No agent has presented a client certificate since the hub began recording them, so no expiry is known yet"
+		if len(unknown) > 0 {
+			msg += fmt.Sprintf(" (%s)", plural(len(unknown), "endpoint", "endpoints"))
+		}
+		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved, msg, unknownRes, unmapped), nil
 	}
-	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-		fmt.Sprintf("Agent certificates renew %d days before expiry; the next expires in %d days", int(window.Hours()/24), int(next.notAfter.Sub(now).Hours()/24)),
-		[]feedResource{next.res}, unmapped), nil
+	msg := fmt.Sprintf("Agent certificates renew %d days before expiry; the next expires in %d days", int(window.Hours()/24), daysLeft(next.notAfter, now))
+	if len(renewingRes) > 0 {
+		msg += fmt.Sprintf("; renewal offered to %s", plural(len(renewingRes), "endpoint", "endpoints"))
+	}
+	resources := append(append([]feedResource{next.res}, renewingRes...), unknownRes...)
+	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved, msg+unknownNote, resources, unmapped), nil
 }

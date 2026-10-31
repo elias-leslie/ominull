@@ -57,7 +57,7 @@ Supported products are the Debian-family Linux hub `.deb`, Linux agent `.deb`, a
 
 The release scripts (`scripts/release.sh`, `scripts/sign-release.sh`) build and sign these packages, but signed packages are not published as GitHub releases. To run your own fleet, build from source, replace the public key in `agent/include/release_key.h`, and sign with the matching private key through `OMINULL_SIGNING_KEY`.
 
-Observation records are bounded evidence, not packet capture or proof of complete network visibility. Learning proposals require explicit application. Package updates and privileged response actions follow their own trust and authorization boundaries.
+Observation records are bounded evidence, not packet capture or proof of complete network visibility. Package updates and privileged response actions follow their own trust and authorization boundaries.
 
 ## Getting started
 

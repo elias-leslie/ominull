@@ -57,6 +57,15 @@ int main(void) {
     CHECK(CertRenewal_DecodePEM("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCgB4Ci0tLS0tRU5EIA==", "-----BEGIN CERTIFICATE-----", pem, sizeof(pem)) == 0,
           "embedded NUL refused");
 
+    /* What a restart does with what an interrupted swap left behind. */
+    CHECK(CertRenewal_Recovery(false, false, false) == CERT_RECOVERY_NONE, "nothing staged: nothing to do");
+    CHECK(CertRenewal_Recovery(true, true, false) == CERT_RECOVERY_DISCARD, "staged pair not installed: discarded");
+    CHECK(CertRenewal_Recovery(false, true, false) == CERT_RECOVERY_DISCARD, "half-written pair: discarded");
+    CHECK(CertRenewal_Recovery(true, true, true) == CERT_RECOVERY_DISCARD, "old key kept but key not renamed: discarded");
+    CHECK(CertRenewal_Recovery(true, false, true) == CERT_RECOVERY_FINISH, "key renamed, certificate not: finished");
+    CHECK(CertRenewal_Recovery(true, false, false) == CERT_RECOVERY_DISCARD, "certificate left after the old key was restored: discarded");
+    CHECK(CertRenewal_Recovery(false, false, true) == CERT_RECOVERY_CLEAN_OLD, "swap done, old key left: removed");
+
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

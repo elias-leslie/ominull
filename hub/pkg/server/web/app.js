@@ -4071,15 +4071,16 @@
       }
     });
 
-    /* Held findings are rows left from the retired learning windows. The
-       button appears only while some remain, and says how many. */
+    /* Held findings are kept in full but not counted as open work (rows from
+       the retired learning windows, for one). The button appears only while
+       some exist, and says how many. */
     var heldTotal = Number(state.heldAlertsTotal) || 0;
     var heldBtn = (heldTotal > 0 || af.held) ? h("button", {
       cls: "btn mini" + (af.held ? " btn-primary" : ""),
       type: "button",
       "aria-pressed": af.held ? "true" : "false",
-      title: "Findings recorded during a learning window. They are kept in full and are not counted as open work.",
-      text: af.held ? "HELD (LEARNING)" : "HELD: " + heldTotal,
+      title: "Held findings: kept in full with their evidence, not counted as open work.",
+      text: af.held ? "HELD" : "HELD: " + heldTotal,
       on: {
         click: function () {
           af.held = !af.held;
@@ -4329,7 +4330,7 @@
             h("span", { text: (a.anomaly_type || "").replace(/_/g, " ").toLowerCase() }),
             a.technique ? h("span", { text: " " + a.technique }) : null,
             a.held_reason === "hunt" ? h("span", { title: "Behavioural hunt lead, not an alert", text: " \u00b7 hunt lead" })
-              : a.held_reason ? h("span", { title: "Recorded during a learning window and not counted as open work", text: " \u00b7 held" }) : null)),
+              : a.held_reason ? h("span", { title: "Held: kept in full, not counted as open work", text: " \u00b7 held" }) : null)),
         h("td", {}, h("span", { cls: "ip", text: (a.dst_ip || "—") + (a.dst_port ? ":" + a.dst_port : "") })),
         h("td", {}, h("span", { cls: "dim", text: a.process_path ? a.process_path.split("\\").pop().split("/").pop() : "—" })),
         h("td", {}, ackAction));
@@ -6392,7 +6393,7 @@
 
       h("h4", { cls: "tune-head", text: "New endpoints" }),
       h("div", { cls: "tune-list" },
-        tuningRow("Learning period", "Hours. A host installed this morning has no baseline to be unusual against, and every ordinary thing it does is a first-seen destination. Behavioural findings are held and logged during this window. Set to 0 to judge a host from its first packet.", warmup)),
+        tuningRow("New-host warm-up", "Hours. A host installed this morning has no baseline to be unusual against, and every ordinary thing it does is a first-seen destination. Behavioural findings are held and logged during this window. Set to 0 to judge a host from its first packet.", warmup)),
 
       h("h4", { cls: "tune-head", text: "Known-quiet" }),
       h("div", { cls: "tune-list" },
@@ -11667,8 +11668,8 @@
     if (af.type) aParams += "&type=" + encodeURIComponent(af.type);
     if (af.endpoint_id) aParams += "&endpoint_id=" + encodeURIComponent(af.endpoint_id);
     if (af.asset_id) aParams += "&asset_id=" + encodeURIComponent(af.asset_id);
-    /* The Held tab: rows left from the retired learning windows, recorded
-       without being raised. */
+    /* The Held tab: findings recorded without being raised (hunt leads have
+       their own view). */
     if (af.held) aParams += "&held=true";
     else if (af.hunt) aParams += "&held=hunt";
 

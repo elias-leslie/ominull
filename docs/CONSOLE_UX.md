@@ -198,8 +198,8 @@ in demo mode, with the fixture browser suite and the axe responsive check.
 
 ### Settings (Policy, Access, Audit)
 
-- Policy: two views, **Detection** (isolation baseline, tuning, learning mode,
-  exclusions, threat indicators, peer-mesh quarantine) and **Hub health**
+- Policy: two views, **Detection** (isolation baseline, tuning, exclusions,
+  threat indicators, peer-mesh quarantine) and **Hub health**
   (diagnostics, release convergence). Detection tuning is a row of on/off
   chips with one line per detector and a head chip for how many values differ
   from what shipped. Threat indicators fold after 10 with the count in the

@@ -22,7 +22,7 @@ failures=0
 expect() {
     local want="$1"; shift
     local out
-    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
+    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD -u OMINULL_RELEASE_INTERVAL_SECONDS bash scripts/release.sh "$@" 2>&1 || true)"
     if ! grep -qF -- "${want}" <<<"${out}"; then
         echo "FAIL: release.sh $* should say: ${want}" >&2
         echo "${out}" | sed 's/^/    /' >&2
@@ -32,7 +32,7 @@ expect() {
 passed="Deploy hook is missing"
 expect_not_batched() {
     local out
-    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
+    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD -u OMINULL_RELEASE_INTERVAL_SECONDS bash scripts/release.sh "$@" 2>&1 || true)"
     if grep -qE 'nothing to release|batched to one a day' <<<"${out}"; then
         echo "FAIL: release.sh $* should not be held back:" >&2
         echo "${out}" | sed 's/^/    /' >&2
@@ -43,16 +43,24 @@ expect_not_batched() {
 expect "Nothing the hub or agents ship has changed since Release 1.0.0; nothing to release."
 echo 'int y;' >> agent/tests/t.c
 echo 'package pkg // test' > hub/pkg/a_test.go
+mkdir -p hub/pkg/x/testdata && echo '{}' > hub/pkg/x/testdata/f.json
+git add -A && git commit -qm "tests"
 expect "nothing to release" # tests ship no bytes
 expect_not_batched --agents-only # rolling agents is not a hub release
 echo '// changed' >> hub/pkg/a.go
-expect "went out 0h ago; hub releases are batched to one a day."
+expect "nothing to release" # only committed changes count
+git add -A && git commit -qm "hub change"
+expect "went out 0m ago; hub releases are batched to one a day (next after"
+expect "--urgent needs a reason" --urgent --hub-only
+expect "--urgent needs a reason" --urgent
 expect "${passed}" --urgent "paging false alarm"
 expect "Releasing within a day of Release 1.0.0: paging false alarm" --urgent "paging false alarm"
 git add -A
-GIT_COMMITTER_DATE="$(date -d '-2 days' -R)" git commit -qm "Release 1.0.1: older"
-echo '// again' >> hub/pkg/a.go
-expect "${passed}"
+GIT_COMMITTER_DATE="$(date -d "-2 days" -R)" git commit -q --allow-empty -m "Release 1.0.1: older"
+expect "nothing to release"
+mkdir -p screen/helper && echo 'fn main() {}' > screen/helper/main.rs
+git add -A && git commit -qm "screen helper change"
+expect "${passed}" # the screen helper ships in the Windows package
 
 if [ "${failures}" -ne 0 ]; then
     echo "${failures} release batching check(s) failed" >&2

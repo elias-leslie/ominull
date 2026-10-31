@@ -26,7 +26,7 @@ body[data-section="topology"] #view {
   flex: 1;
 }
 
-/* Top bar: search, how to group, how much to show, the window, saved views. */
+/* Top bar: search, how to group, how much to show, and the window. */
 .tg-bar,
 .tg-filters,
 .tg-scope,

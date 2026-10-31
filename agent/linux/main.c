@@ -2409,6 +2409,55 @@ static bool ProbeClientCert(const LINUX_AGENT_CONFIG* config, const char* certPa
     return ok;
 }
 
+static void FsyncParentDir(const char* path) {
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char* slash = strrchr(dir, '/');
+    if (!slash) return;
+    if (slash == dir) slash[1] = '\0';
+    else *slash = '\0';
+    int fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (fd >= 0) {
+        fsync(fd);
+        close(fd);
+    }
+}
+
+/* RecoverClientCertSwap finishes or undoes a certificate swap a crash or power
+ * cut interrupted (CertRenewal_Recovery). Without it, a stop between the key
+ * and certificate renames leaves a key that does not match the certificate,
+ * and every handshake fails until the endpoint is re-enrolled. */
+static void RecoverClientCertSwap(const LINUX_AGENT_CONFIG* config) {
+    if (!config->client_cert_path[0] || !config->client_key_path[0]) return;
+    char newCert[sizeof(config->client_cert_path) + 8], newKey[sizeof(config->client_key_path) + 8];
+    char oldKey[sizeof(config->client_key_path) + 8];
+    snprintf(newCert, sizeof(newCert), "%s.new", config->client_cert_path);
+    snprintf(newKey, sizeof(newKey), "%s.new", config->client_key_path);
+    snprintf(oldKey, sizeof(oldKey), "%s.old", config->client_key_path);
+    switch (CertRenewal_Recovery(access(newCert, F_OK) == 0, access(newKey, F_OK) == 0, access(oldKey, F_OK) == 0)) {
+    case CERT_RECOVERY_FINISH:
+        if (rename(newCert, config->client_cert_path) == 0) {
+            FsyncParentDir(config->client_cert_path);
+            unlink(oldKey);
+            printf("[+] Finished installing a renewed client certificate an earlier stop interrupted.\n");
+        } else {
+            printf("[-] A renewed client certificate was left half installed and could not be finished; "
+                   "this endpoint may need re-enrolment.\n");
+        }
+        break;
+    case CERT_RECOVERY_DISCARD:
+        unlink(newCert);
+        unlink(newKey);
+        unlink(oldKey);
+        break;
+    case CERT_RECOVERY_CLEAN_OLD:
+        unlink(oldKey);
+        break;
+    default:
+        break;
+    }
+}
+
 /* AdoptRenewedClientCert installs the client certificate the hub renewed in
  * this heartbeat reply (cert_renewal.h). The new pair is written beside the
  * old one, proved against the hub, and only then renamed into place, key
@@ -2438,9 +2487,10 @@ static void AdoptRenewedClientCert(const LINUX_AGENT_CONFIG* config, const char*
                config->client_cert_path);
     } else if (!ProbeClientCert(config, newCert, newKey)) {
         printf("[!] The hub did not accept the renewed client certificate on a test request; keeping the current one.\n");
+    } else if (unlink(oldKey), link(config->client_key_path, oldKey) != 0) {
+        printf("[!] The current client key could not be kept aside for the swap; keeping the current certificate.\n");
     } else {
-        unlink(oldKey);
-        bool keptOld = link(config->client_key_path, oldKey) == 0;
+        bool keptOld = true;
         if (rename(newKey, config->client_key_path) != 0) {
             printf("[!] The renewed client key could not replace %s; keeping the current certificate.\n",
                    config->client_key_path);
@@ -2456,10 +2506,13 @@ static void AdoptRenewedClientCert(const LINUX_AGENT_CONFIG* config, const char*
             g_HubTlsReset = true;
             printf("[+] Installed the client certificate the hub renewed; the previous one is no longer used.\n");
         }
+        FsyncParentDir(config->client_cert_path);
         unlink(oldKey);
     }
-    unlink(newKey);
+    /* Certificate first: a lone <cert>.new means "key already swapped" to
+     * RecoverClientCertSwap. */
     unlink(newCert);
+    unlink(newKey);
     memset(b64, 0, sizeof(b64));
     memset(keyPem, 0, sizeof(keyPem));
     memset(certPem, 0, sizeof(certPem));
@@ -3841,6 +3894,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    RecoverClientCertSwap(&config);
     SetSelfHubPeer(&config);
 
     printf("[+] Initializing Linux socket collection and firewall control...\n");

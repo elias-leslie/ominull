@@ -33,8 +33,9 @@ func agentHeartbeat(t *testing.T, srv *Server, credential, endpoint string, leaf
 	body += `}`
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
 	r.Header.Set(deviceCredentialHeader, credential)
+	r.TLS = &tls.ConnectionState{}
 	if leaf != nil {
-		r.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{leaf}}}
+		r.TLS.VerifiedChains = [][]*x509.Certificate{{leaf}}
 	}
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
@@ -207,7 +208,7 @@ func TestAgentCertRenewalReasonTable(t *testing.T) {
 		{"no cert, lapsed, shared key", storage.AgentCertState{NotAfter: now.Add(-time.Hour)}, nil, false, ""},
 		{"no cert, still valid", storage.AgentCertState{NotAfter: now.Add(time.Hour)}, nil, true, ""},
 	} {
-		if got := agentCertRenewalReason(tc.st, tc.leaf, tc.cred, now, window); got != tc.want {
+		if got := agentCertRenewalReason(tc.st, tc.leaf, tc.cred, now, window, time.Hour); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -244,8 +245,14 @@ func TestAgentCertFeedWarnsWhenRenewalStalls(t *testing.T) {
 	}
 	_ = store.RecordAgentCertSeen("windows-off", now.Add(-24*time.Hour), "c", now.Add(-48*time.Hour))
 	f, _ = srv.agentCertFinding(now)
-	if !strings.HasPrefix(f.Message, "1 agent certificate has expired and 1 more") {
+	if !strings.HasPrefix(f.Message, "2 agent certificates not renewed (1 expired, 1 within 30 days of expiry). ") ||
+		strings.Contains(f.Message, "windows-") || len(f.Resources) != 2 || f.Resources[0].UID != "windows-off" {
 		t.Fatalf("expired certificate: %q", f.Message)
+	}
+	// An hour past expiry is a day ago, not "0 days left"; a renewal in
+	// progress is said.
+	if got := daysLeft(now.Add(-time.Hour), now); got != -1 {
+		t.Fatalf("daysLeft an hour past expiry = %d", got)
 	}
 
 	// The finding is in the Nightshift document.
@@ -253,5 +260,57 @@ func TestAgentCertFeedWarnsWhenRenewalStalls(t *testing.T) {
 	srv.handleNightshiftFeed(w, httptest.NewRequest(http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"uid":"ominull.agents.certificate"`) {
 		t.Fatalf("feed lacks the certificate finding: %d", w.Code)
+	}
+}
+
+func TestAgentCertFeedNamesUnknownAndRenewingHosts(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	for _, ep := range []string{"desk", "laptop", "server"} {
+		if err := store.UpsertEndpoint(storage.Endpoint{ID: ep, Hostname: ep, TenantID: "default", Status: "online"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, _ := srv.agentCertFinding(now)
+	if f.StatusID != ocsfStatusResolved || !strings.HasSuffix(f.Message, "(3 endpoints)") || len(f.Resources) != 3 {
+		t.Fatalf("nothing recorded yet: %q", f.Message)
+	}
+	_ = store.RecordAgentCertSeen("desk", now.Add(300*24*time.Hour), "a", now)
+	_ = store.RecordAgentCertSeen("server", now.Add(50*24*time.Hour), "b", now)
+	_ = store.MarkAgentCertOffered("server", now.Add(-10*time.Minute))
+	f, _ = srv.agentCertFinding(now)
+	want := "Agent certificates renew 60 days before expiry; the next expires in 50 days; renewal offered to 1 endpoint; expiry unknown for 1 endpoint not yet seen presenting one"
+	if f.StatusID != ocsfStatusResolved || f.Message != want || len(f.Resources) != 3 || f.Resources[2].UID != "laptop" {
+		t.Fatalf("got %q\nwant %q", f.Message, want)
+	}
+}
+
+func TestAgentCertRenewalRequestErrors(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	_ = store.UpsertEndpoint(storage.Endpoint{ID: "old", Hostname: "old", TenantID: "default", Status: "retired"})
+	for body, want := range map[string]int{`{}`: 400, `{"endpoint":"old"}`: 400, `{"endpoint_id":"nope"}`: 404, `{"endpoint_id":"old"}`: 409} {
+		w := httptest.NewRecorder()
+		srv.handleAgentCertRenewal(w, httptest.NewRequest(http.MethodPost, "/api/v1/endpoints/cert-renewal", strings.NewReader(body)))
+		if w.Code != want {
+			t.Errorf("%s: %d %s, want %d", body, w.Code, w.Body.String(), want)
+		}
+	}
+}
+
+func TestAgentCertNeverOfferedWithoutTLS(t *testing.T) {
+	t.Parallel()
+	srv, store, cred := setupCertEndpoint(t, "plain-ep")
+	defer store.Close()
+	_ = store.RequestAgentCertRenewal("plain-ep", time.Now().UTC().Add(-time.Minute))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(`{"type":"telemetry","endpoint_id":"plain-ep","ip":"10.0.4.7","events":[],"cert_renewal":true}`))
+	r.Header.Set(deviceCredentialHeader, cred)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if strings.Contains(w.Body.String(), "client_certificate") {
+		t.Fatal("a private key went out over a connection without TLS")
 	}
 }

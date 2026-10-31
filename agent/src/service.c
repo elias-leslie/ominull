@@ -1264,9 +1264,10 @@ bool Service_AdoptRenewedClientCert(const AGENT_CONFIG* config, const char* repl
                   MoveFileExA(staged, config->client_pfx_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
     SecureZeroMemory(pfx, sizeof(pfx));
     if (!onDisk) {
+        DWORD err = GetLastError();
         DeleteFileA(staged);
         fprintf(stderr, "[!] The renewed client certificate is in use, but %s could not be replaced (Error: %lu).\n",
-                config->client_pfx_path, GetLastError());
+                config->client_pfx_path, err);
     }
     Hub_UseClientCert(cert);
     Hub_ResetConnections();

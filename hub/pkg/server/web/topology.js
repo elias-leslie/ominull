@@ -993,8 +993,6 @@
       pan.setAttribute("aria-pressed", String(mode === "pan"));
       box.setAttribute("aria-pressed", String(mode === "select"));
     }
-    // Moving the view is not a change worth saving; moving or pinning hosts,
-    // filters and the window are.
     function say(text, keep) {
       clearTimeout(noticeTimer);
       transient = keep ? "" : text;

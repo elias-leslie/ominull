@@ -74,4 +74,23 @@ static inline size_t CertRenewal_DecodePEM(const char* b64, const char* begin, c
     return n;
 }
 
+/* A swap is: write <key>.new and <cert>.new, prove them, hard-link the live
+ * key to <key>.old, rename <key>.new over the key, rename <cert>.new over the
+ * certificate, remove <key>.old. Cleanup removes <cert>.new before <key>.new,
+ * so <cert>.new without <key>.new only happens between the two renames.
+ * CertRenewal_Recovery says what a restart finds and what to do about it. */
+typedef enum {
+    CERT_RECOVERY_NONE = 0,   /* nothing staged */
+    CERT_RECOVERY_FINISH,     /* new key is live, new certificate staged: rename it in */
+    CERT_RECOVERY_DISCARD,    /* a pair was staged but not installed: remove it */
+    CERT_RECOVERY_CLEAN_OLD,  /* the swap finished; remove the old key */
+} CertRecovery;
+
+static inline CertRecovery CertRenewal_Recovery(bool certNew, bool keyNew, bool keyOld) {
+    if (certNew && !keyNew && keyOld) return CERT_RECOVERY_FINISH;
+    if (certNew || keyNew) return CERT_RECOVERY_DISCARD;
+    if (keyOld) return CERT_RECOVERY_CLEAN_OLD;
+    return CERT_RECOVERY_NONE;
+}
+
 #endif

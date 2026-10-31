@@ -55,25 +55,41 @@ re-enrolled because its certificate aged out:
   handshake (expiry and serial, `endpoint_certificates`). Within
   `agent_cert_renew_days` of expiry (hub setting, default 60, 7 to 300) it puts
   a new certificate and key in the heartbeat reply (`client_certificate`), at
-  most once an hour until the agent presents the new one.
+  most once every `agent_cert_offer_cooldown_minutes` (hub setting, default 60,
+  10 to 1440) until the agent presents the new one. The reply carries a private
+  key, so it only ever goes out over TLS.
 - The agent proves the new certificate against the hub on a fresh connection
   before using it. Linux writes it beside the old files and renames it into
   place; Windows imports it into the machine store and replaces its archive.
   On any failure the agent keeps the certificate it has, which stays valid
-  until its own expiry, and the hub offers again an hour later.
+  until its own expiry, and the hub offers again after the cooldown. A Linux
+  agent stopped between its two renames finishes the swap when it starts.
 - `POST /api/v1/endpoints/cert-renewal` with `{"endpoint_id": "..."}` (admin)
-  asks for a renewal on the endpoint's next heartbeat whatever its expiry, for
-  example after a suspected key leak. `GET` on the same route lists what the
-  hub knows about each endpoint's certificate. A Windows endpoint whose
+  asks for a renewal on the endpoint's next heartbeat whatever its expiry
+  (202; 400 without `endpoint_id`, 404 for an unknown endpoint, 409 for a
+  retired one). `GET` on the same route lists each endpoint's recorded
+  certificate: `not_after`, `days_left`, `serial`, `seen_at`, and
+  `renew_requested_at` / `offered_at` when set. A Windows endpoint whose
   certificate has already expired, and which reports with its device
-  credential alone, is offered a new one too.
+  credential alone, is offered a new one too. A Linux agent always presents its
+  certificate, so one whose certificate expired while it was off cannot
+  reconnect and needs re-enrolment.
+- Renewal is not revocation. Nothing revokes the old certificate, and whoever
+  holds a certificate can renew it, so a leaked key is answered by re-enrolling
+  the endpoint, not by asking for a renewal.
 
 Nightshift sees this as the `ominull.agents.certificate` finding. It turns
 medium when a certificate is within half the renewal window of expiry, or
-expired, and still not renewed, which means the agent is too old to renew or
-keeps failing to install the new one: update the agent or re-enrol it.
+expired, and still not renewed. Its message counts them (expired, close to
+expiry, off line for over two days) and never names a machine, since it may
+reach a push; the machines are its resources. The agent is too old to renew,
+the machine has been off, or it keeps failing to install the new one: an agent
+on 1.8.104 or later renews by itself once it is on line; update an older agent,
+and re-enrol a machine that cannot reconnect. Otherwise it is informational and
+says when the next certificate expires and how many were offered a renewal.
 Endpoints the hub has not seen present a certificate since it began recording
-are listed as unknown, not as fine.
+are counted as unknown (and listed in `unknown`), not as fine; they do not raise
+the finding, because a laptop that is off would keep it open.
 
 ## Linux and Windows
 
