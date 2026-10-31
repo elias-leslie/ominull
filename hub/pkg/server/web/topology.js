@@ -127,15 +127,11 @@
       first = true,
       fitNext = false,
       selected = "",
-      dirty = false,
-      views = [],
-      currentView = null,
       history = [],
       dragBefore = null,
       pendingData = null,
       dragging = false,
       destroyed = false,
-      saveError = "",
       listRows = LIST_ROWS,
       noticeTimer,
       transient = "",
@@ -168,8 +164,6 @@
     };
     if (api.draft) {
       state = { ...state, ...api.draft.state };
-      currentView = api.draft.currentView;
-      dirty = api.draft.dirty;
       first = false;
     }
     const root = el("section", {
@@ -228,35 +222,7 @@
       (v) => {
         state.window = v;
         api.onWindow(v);
-        markDirty();
       },
-    );
-    const saved = select("Saved view", [["", "Unsaved workspace"]], loadView);
-    const save = button("Save", () => saveView(false)),
-      saveAs = button("Save as…", () => saveView(true));
-    if (api.role === "auditor") {
-      save.disabled = true;
-      saveAs.disabled = true;
-      save.title = saveAs.title = "Auditors can explore but cannot save views";
-    }
-    const removeView = button("Delete view", deleteView);
-    removeView.hidden = true;
-    const dirtyDot = el("span", {
-      class: "tg-dirty",
-      title: "Unsaved changes",
-      text: "●",
-      hidden: "",
-    });
-    const views_ = el(
-      "details",
-      { class: "tg-views" },
-      el(
-        "summary",
-        { class: "btn tg-button" },
-        "Views",
-        dirtyDot,
-      ),
-      el("div", { class: "tg-pop" }, saved, el("div", { class: "tg-row" }, save, saveAs, removeView)),
     );
     const helpText = el(
       "div",
@@ -301,7 +267,6 @@
       detail,
       windowSelect,
       el("span", { class: "tg-fill" }),
-      views_,
       help,
     );
 
@@ -400,7 +365,6 @@
     const listButton = button("List view", () => {
       state.list = !state.list;
       applyListMode();
-      markDirty();
     });
     const undo = button("Undo", () => {
       if (!history.length) return;
@@ -409,7 +373,6 @@
       state.pins = before.pins;
       restorePositions();
       updatePins();
-      markDirty();
       undo.disabled = !history.length;
     });
     undo.disabled = true;
@@ -776,15 +739,9 @@
     function escapeKey(e) {
       if (e.key !== "Escape") return;
       if (!tooltip.hidden) hideTooltip();
-      else if (views_.open) views_.open = false;
       else if (selected && root.contains(document.activeElement)) clearSelection();
     }
     document.addEventListener("keydown", escapeKey);
-    // A click outside the views panel closes it.
-    function closeViews(e) {
-      if (views_.open && !views_.contains(e.target)) views_.open = false;
-    }
-    document.addEventListener("click", closeViews);
     function highlight(id) {
       cy.elements().removeClass("incoming outgoing muted");
       const hovered = cy.getElementById(id || "");
@@ -996,7 +953,6 @@
         dragBefore = null;
       }
       capture();
-      markDirty();
       if (pendingData) {
         const d = pendingData;
         pendingData = null;
@@ -1021,7 +977,6 @@
     setMode(state.mode);
     syncControls();
     applyListMode();
-    refreshViews();
     inspect();
     function applyListMode() {
       canvas.hidden = state.list;
@@ -1040,15 +995,6 @@
     }
     // Moving the view is not a change worth saving; moving or pinning hosts,
     // filters and the window are.
-    function markDirty() {
-      dirty = true;
-      dirtyDot.hidden = false;
-    }
-    function markClean() {
-      dirty = false;
-      dirtyDot.hidden = true;
-    }
-    if (dirty) dirtyDot.hidden = false;
     function say(text, keep) {
       clearTimeout(noticeTimer);
       transient = keep ? "" : text;
@@ -1060,7 +1006,6 @@
         }, 6000);
     }
     function noticeText() {
-      if (saveError) return saveError;
       if (transient) return transient;
       if (loadError && loaded)
         return (
@@ -1151,7 +1096,6 @@
       );
     }
     function change(rearrange) {
-      markDirty();
       syncControls();
       renderGraph();
       if (rearrange) arrange(false);
@@ -1378,7 +1322,6 @@
     function arrange(selectionOnly) {
       if (!first) {
         remember();
-        markDirty();
       }
       capture();
       const movable = selectionOnly
@@ -1592,7 +1535,6 @@
       first = true;
       hideTooltip();
       renderGraph(true);
-      markDirty();
     }
     function goBack(index = (state.trail || []).length - 1) {
       const entry = state.trail?.[index];
@@ -1613,7 +1555,6 @@
         cy.zoom(vp.zoom);
         cy.pan(vp.pan);
       }
-      markDirty();
     }
     function drill(id) {
       const n = nodeMap.get(id);
@@ -1856,14 +1797,12 @@
           const ids = selectedLeaves().map((x) => x.id());
           state.pins = [...new Set([...state.pins, ...ids])];
           updatePins();
-          markDirty();
         }, "Keep the selected hosts where they are");
         unpinBtn = button("Unpin", () => {
           remember();
           const ids = new Set(selectedLeaves().map((x) => x.id()));
           state.pins = state.pins.filter((id) => !ids.has(id));
           updatePins();
-          markDirty();
         });
         arrangeBtn = button("Arrange selection", () => arrange(true), "Lay out only the selected hosts");
         if (n.type !== "traffic")
@@ -1931,190 +1870,6 @@
         }, 60);
     }
 
-    /* ---- saved views ---- */
-    function refreshViews() {
-      return api
-        .request("/api/v1/topology/views")
-        .then((d) => {
-          views = d.views || [];
-          const s = saved.querySelector("select");
-          s.replaceChildren(
-            el("option", { value: "", text: "Unsaved workspace" }),
-          );
-          views.forEach((v) =>
-            s.append(el("option", { value: v.id, text: v.name })),
-          );
-          s.value = currentView ? currentView.id : "";
-          removeView.hidden = !currentView || api.role === "auditor";
-        })
-        .catch((e) => {
-          say("Saved views unavailable: " + e.message);
-        });
-    }
-    function applyView(v) {
-      saveError = "";
-      currentView = v;
-      state = {
-        ...state,
-        ...v.state,
-        regions: v.state.regions ?? false,
-        scope: v.state.scope || null,
-        scopeLabel: v.state.scopeLabel || "Overview",
-        scopeLimit: v.state.scopeLimit || 60,
-        trail: v.state.trail || [],
-        collapsedRegions: v.state.collapsedRegions || {},
-        regionOverrides: v.state.regionOverrides || {},
-        detail: v.state.detail || "auto",
-      };
-      state.expanded = state.expanded || {};
-      state.positions = state.positions || {};
-      state.pins = state.pins || [];
-      syncControls();
-      setMode(state.mode);
-      lastStructure = "";
-      first = false;
-      selected = "";
-      const vp = state.viewport;
-      renderGraph(true);
-      restorePositions();
-      updatePins();
-      if (vp) {
-        cy.zoom(vp.zoom);
-        cy.pan(vp.pan);
-      }
-      applyListMode();
-      api.onWindow(state.window);
-      markClean();
-      removeView.hidden = api.role === "auditor";
-      views_.open = false;
-    }
-    function loadView(id) {
-      const v = views.find((v) => v.id === id);
-      if (!v) return;
-      if (dirty) {
-        confirmDialog("Discard unsaved layout changes?", () => applyView(v), () => {
-          saved.querySelector("select").value = currentView ? currentView.id : "";
-        });
-      } else applyView(v);
-    }
-    function confirmDialog(title, done, cancelled) {
-      const d = el("dialog", { class: "tg-dialog" }, el("h2", { text: title }));
-      const row = el("div", { class: "tg-row" });
-      row.append(
-        button("Keep editing", () => {
-          d.close();
-          d.remove();
-          if (cancelled) cancelled();
-        }),
-        button("Continue", () => {
-          d.close();
-          d.remove();
-          done();
-        }, "", "btn-primary"),
-      );
-      d.append(row);
-      d.addEventListener("cancel", () => {
-        d.remove();
-        if (cancelled) cancelled();
-      });
-      root.append(d);
-      d.showModal();
-    }
-    function saveView(asNew) {
-      if (api.role === "auditor") return;
-      capture();
-      if (currentView && !asNew) {
-        persist(currentView.name, currentView.id, currentView.revision);
-        return;
-      }
-      const input = el("input", {
-        maxlength: "100",
-        "aria-label": "View name",
-        placeholder: "e.g. Application dependencies",
-      });
-      const d = el(
-        "dialog",
-        { class: "tg-dialog" },
-        el("h2", { text: "Save personal view" }),
-        el("p", {
-          text: "Keeps filters, time window, positions, pins and zoom for your account.",
-        }),
-        input,
-      );
-      const go = button("Save view", () => {
-        if (!input.value.trim()) {
-          input.focus();
-          return;
-        }
-        const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
-          b.toString(16).padStart(2, "0"),
-        ).join("");
-        persist(input.value.trim(), id, 0);
-        d.close();
-        d.remove();
-      }, "", "btn-primary");
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          go.click();
-        }
-      });
-      d.addEventListener("cancel", () => d.remove());
-      d.append(
-        el(
-          "div",
-          { class: "tg-row" },
-          button("Cancel", () => {
-            d.close();
-            d.remove();
-          }),
-          go,
-        ),
-      );
-      root.append(d);
-      d.showModal();
-      input.focus();
-    }
-    function persist(name, id, revision) {
-      api
-        .request("/api/v1/topology/views", "PUT", { id, name, revision, state })
-        .then((v) => {
-          currentView = v;
-          saveError = "";
-          markClean();
-          removeView.hidden = false;
-          say("Personal view saved.");
-          refreshViews();
-        })
-        .catch((e) => {
-          saveError =
-            "View not saved: " +
-            e.message +
-            ". Your layout is still here; use Save as to keep a separate copy.";
-          renderNotice();
-        });
-    }
-    function deleteView() {
-      if (!currentView || api.role === "auditor") return;
-      confirmDialog("Delete this saved view?", () =>
-        api
-          .request("/api/v1/topology/views", "DELETE", {
-            id: currentView.id,
-            revision: currentView.revision,
-          })
-          .then(() => {
-            currentView = null;
-            removeView.hidden = true;
-            markDirty();
-            refreshViews();
-          })
-          .catch((e) => {
-            saveError = e.message;
-            renderNotice();
-          }),
-      );
-    }
-
     /* ---- data ---- */
     function update(next, error) {
       if (destroyed) return;
@@ -2172,7 +1927,7 @@
       focus,
       getDraft() {
         capture();
-        return JSON.parse(JSON.stringify({ state, currentView, dirty }));
+        return JSON.parse(JSON.stringify({ state }));
       },
       destroy() {
         destroyed = true;
@@ -2180,7 +1935,6 @@
         clearTimeout(noticeTimer);
         hideTooltip();
         document.removeEventListener("keydown", escapeKey);
-        document.removeEventListener("click", closeViews);
         themeWatch.disconnect();
         observer.disconnect();
         worker.terminate();

@@ -39,11 +39,9 @@ them together. Pins protect positions during arrangement; Undo restores prior
 positions and pins within the current scope. Layout changes never invoke
 containment or policy APIs.
 
-Saved views belong to the authenticated operator. Explicit Save records filters,
-relative time window, scope, navigation trail, positions, pins and viewport. Revision
-checks reject stale writes with HTTP 409. Save as can preserve a conflicting edit
-as another view. Auditors can explore but cannot write saved views. Endpoint
-credentials cannot access workspace or saved-view routes.
+Arrangements are not saved: there are no saved views (the feature was cut on
+2026-10-31; nobody had saved one). Endpoint credentials cannot access the
+workspace route.
 
 ## Implementation
 
@@ -52,7 +50,7 @@ and Cytoscape instance survive polling. A worker uses fCoSE for general layouts 
 results are ignored after a new layout or drag. Poll updates retain positions,
 and data arriving during a drag waits until release. Navigation destroys the
 worker and canvas, retaining an in-memory draft when returning from another
-console section. Reloading the page requires a saved view. Graph failures retain the last successful graph and show an
+console section. Reloading the page starts a fresh layout. Graph failures retain the last successful graph and show an
 error rather than replacing the graph with a false empty state.
 
 Dependencies are pinned in `web-build/package-lock.json`. Run `npm ci` and
@@ -90,11 +88,10 @@ The worker arranges each region independently, then packs region bounds with cle
 gutters. Cross-region links cannot distort the layout within a region. Drag a
 region's background to move its contents. Select it to pin all visible leaves, or double-click to explore it. Network group
 actions offer a personal visual-region override.
-This changes the saved view, never network policy or asset identity.
+This changes the current layout only, never network policy or asset identity.
 
-Saved views retain regions, overrides, collapsed regions, positions and pins.
-Older views open in their original flat layout to preserve their coordinates.
-Enable “Separate logical regions” under Filters to convert an old view, then Save.
+Returning from another console section keeps regions, overrides, collapsed
+regions, positions and pins for that page session.
 
 Canvas labels omit repeated unknown-scope and quiet-window text. Hover or inspect
 an item for full scope and activity evidence. Counts describe addresses, including

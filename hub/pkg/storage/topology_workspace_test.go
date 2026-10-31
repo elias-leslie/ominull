@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -56,46 +54,6 @@ func TestTopologyWorkspaceKeepsIdentityDirectionAndEvidence(t *testing.T) {
 	}
 }
 
-func TestTopologyViewsAreOwnedAndRevisionChecked(t *testing.T) {
-	s := newTestStore(t)
-	v := TopologyView{ID: "view-one", Name: "Investigate", State: json.RawMessage(`{"group":"network"}`)}
-	saved, err := s.SaveTopologyView("operator-a", v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if saved.Revision != 1 {
-		t.Fatal(saved)
-	}
-	other, err := s.ListTopologyViews("operator-b")
-	if err != nil || len(other) != 0 {
-		t.Fatalf("owner leak %v %v", other, err)
-	}
-	if _, err = s.SaveTopologyView("operator-a", v); !errors.Is(err, ErrTopologyViewConflict) {
-		t.Fatalf("stale write accepted: %v", err)
-	}
-	v.Revision = 1
-	v.Name = "Updated"
-	if _, err = s.SaveTopologyView("operator-a", v); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.DeleteTopologyView("operator-b", v.ID, 2); !errors.Is(err, ErrTopologyViewConflict) {
-		t.Fatalf("other owner delete: %v", err)
-	}
-	got, _ := s.ListTopologyViews("operator-a")
-	if len(got) != 1 || got[0].Name != "Updated" {
-		t.Fatal(got)
-	}
-}
-
-func TestTopologyViewRejectsNonObjectState(t *testing.T) {
-	s := newTestStore(t)
-	for _, raw := range []string{`null`, `[]`, `"text"`, `{"coverage":12}`, `{"activeOnly":"yes"}`, `{"positions":{"one":{"x":"bad","y":0}}}`} {
-		if _, err := s.SaveTopologyView("owner", TopologyView{ID: "bad", Name: "Bad", State: json.RawMessage(raw)}); err == nil {
-			t.Errorf("accepted invalid state %s", raw)
-		}
-	}
-}
-
 func TestTopologyGatewayRetainsAgentCoverage(t *testing.T) {
 	n := assetNode(Asset{IP: "10.0.4.1", Role: "gateway", AgentEndpointID: "gateway-agent"}, map[string]Endpoint{}, map[string]bool{})
 	if n.Type != "gateway" || n.EndpointID != "gateway-agent" {
@@ -124,25 +82,6 @@ func TestTopologyExplicitVirtualNetworkClassification(t *testing.T) {
 	}
 	if err := s.SetTopologyNetworks([]TopologyNetwork{{CIDR: "10.0.4.0/24", Kind: "guess"}}); err == nil {
 		t.Fatal("invalid network kind accepted")
-	}
-}
-
-func TestTopologyViewRegionValidation(t *testing.T) {
-	for _, raw := range []string{`{"regions":"yes"}`, `{"regionOverrides":{"lan":"guess"}}`, `{"collapsedRegions":{"discovery":"yes"}}`} {
-		if validTopologyViewState([]byte(raw)) {
-			t.Errorf("invalid region state accepted: %s", raw)
-		}
-	}
-}
-
-func TestTopologyViewScopeValidation(t *testing.T) {
-	for _, raw := range []string{`{"scope":{"kind":"guess","id":"a"}}`, `{"scope":{"kind":"host"}}`, `{"trail":"bad"}`, `{"trail":[{"trail":[{}]}]}`, `{"scopeLimit":-1}`} {
-		if validTopologyViewState([]byte(raw)) {
-			t.Errorf("invalid scope state accepted: %s", raw)
-		}
-	}
-	if !validTopologyViewState([]byte(`{"scope":{"kind":"process","id":"a","process":"/bin/client"},"trail":[{"scope":null,"positions":{"a":{"x":12,"y":42}},"viewport":{"zoom":1,"pan":{"x":0,"y":0}}}]}`)) {
-		t.Fatal("valid navigation state rejected")
 	}
 }
 

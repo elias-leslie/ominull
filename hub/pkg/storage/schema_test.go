@@ -76,3 +76,44 @@ func TestUpgradedSchemaLeavesLegacyRowsInert(t *testing.T) {
 	// No current schema initializer or retained API recreates, migrates, or
 	// evaluates these rows. Their continued presence is historical data only.
 }
+
+// Retired tables go at startup while empty and stay while they hold rows.
+func TestRetiredTablesDroppedOnlyWhenEmpty(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "retired.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE rules (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE dns_rules (id TEXT PRIMARY KEY)`,
+		`INSERT INTO rules (id) VALUES ('kept')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	has := func(table string) bool {
+		var n int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+	if !has("rules") {
+		t.Error("rules held a row and was dropped")
+	}
+	if has("dns_rules") {
+		t.Error("empty dns_rules was not dropped")
+	}
+	if err := store.dropRetiredTables(); err != nil { // again: nothing to do
+		t.Fatal(err)
+	}
+}

@@ -251,7 +251,6 @@ tenant-scoped. Agent routes use a unique device credential.
 | `/api/v1/learning/proposals` | GET | what a window observed, as candidate tuning changes with their evidence |
 | `/api/v1/learning/proposals/apply` | POST | apply an explicit list of proposal ids |
 | `/api/v1/topology/workspace` | GET | grouped communication data with stable asset IDs and observed domain/process evidence |
-| `/api/v1/topology/views` | GET, PUT, DELETE | personal saved layouts with revision conflict checks; auditors read only |
 | `/api/v1/router/telemetry` | POST | ingest one gateway poll: DHCP leases, conntrack flows, resolver queries and the answers they returned |
 | `/api/v1/router/flows` | GET | stored flow rollups, filterable by source, destination and hours |
 | `/api/v1/router/talkers` | GET | which devices are talking and to whom, ranked by bytes and named where known |
@@ -443,8 +442,8 @@ before its latest incident are withdrawn, and a capped read marks every record
 unverified. Everything else is `unverified`, which the learner must not train
 on. The default document stays v1.
 
-See [Topology workspace](../docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins,
-saved views and the limits of observed domain/process evidence.
+See [Topology workspace](../docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins
+and the limits of observed domain/process evidence.
 
 ## Build, test, and release
 

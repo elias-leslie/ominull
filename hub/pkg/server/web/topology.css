@@ -75,7 +75,6 @@ body[data-section="topology"] #view {
 .tg-chip:focus-visible,
 .tg-field select:focus-visible,
 .tg-search:focus-visible,
-.tg-views summary:focus-visible,
 .tg-peer:focus-visible,
 .tg-canvas:focus-visible {
   outline: 2px solid var(--brand);
@@ -103,46 +102,6 @@ body[data-section="topology"] #view {
 }
 .tg-help-text p + p {
   margin-top: var(--s-1);
-}
-
-/* Saved views live behind one button. */
-.tg-views {
-  position: relative;
-}
-.tg-views summary {
-  list-style: none;
-  user-select: none;
-}
-.tg-views summary::-webkit-details-marker {
-  display: none;
-}
-.tg-views[open] summary {
-  border-color: var(--ink-3);
-}
-.tg-dirty {
-  color: var(--warn);
-  font-size: var(--t-1);
-}
-.tg-pop {
-  position: absolute;
-  top: calc(100% + var(--s-1));
-  right: 0;
-  z-index: var(--z-menu, 70);
-  display: grid;
-  gap: var(--s-2);
-  width: 280px;
-  padding: var(--s-3);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-b);
-  box-shadow: var(--overlay);
-}
-.tg-pop .tg-field {
-  display: grid;
-  gap: var(--s-1);
-}
-.tg-pop .tg-field select {
-  max-width: none;
 }
 
 /* Filters: each chip is the filter and its count. */
@@ -594,35 +553,6 @@ body[data-section="topology"] #view {
 }
 .tg-tooltip-finding {
   color: var(--crit);
-}
-
-.tg-dialog {
-  max-width: 420px;
-  padding: var(--s-5);
-  background: var(--panel);
-  color: var(--ink);
-  border: 1px solid var(--line);
-  border-radius: var(--r-b);
-}
-.tg-dialog::backdrop {
-  background: #0009;
-}
-.tg-dialog h2 {
-  margin: 0 0 var(--s-3);
-  font-size: var(--t-5);
-  font-weight: 500;
-}
-.tg-dialog p {
-  margin: 0 0 var(--s-3);
-  font-size: var(--t-3);
-  line-height: 1.6;
-  color: var(--ink-2);
-}
-.tg-dialog input {
-  width: 100%;
-  box-sizing: border-box;
-  margin-bottom: var(--s-4);
-  min-height: 32px;
 }
 
 @media (max-width: 1100px) {

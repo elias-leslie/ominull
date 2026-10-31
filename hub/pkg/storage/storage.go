@@ -467,7 +467,6 @@ func (s *Store) Close() error {
 
 func (s *Store) initSchema() error {
 	schema := `
- CREATE TABLE IF NOT EXISTS topology_views (owner TEXT NOT NULL,id TEXT NOT NULL,name TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL,updated_at DATETIME NOT NULL,PRIMARY KEY(owner,id));
 	CREATE TABLE IF NOT EXISTS tenants (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -724,6 +723,10 @@ func (s *Store) initSchema() error {
 	}
 
 	if err := s.initAgentCertSchema(); err != nil {
+		return err
+	}
+
+	if err := s.dropRetiredTables(); err != nil {
 		return err
 	}
 
