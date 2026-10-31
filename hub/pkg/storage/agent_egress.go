@@ -81,30 +81,46 @@ func (s *Store) initAgentEgressSchema() error {
 	return nil
 }
 
+// AgentDestinationSeen is what ObserveAgentDestination knew about a
+// destination when an event reached it.
+type AgentDestinationSeen struct {
+	Known       bool      // the runtime had reached this destination before
+	Since       time.Time // when this runtime's baseline began on the endpoint
+	FirstSeen   time.Time // when the runtime first reached the destination
+	BytesBefore int64     // what it had sent there before this event
+}
+
 // ObserveAgentDestination records that runtime reached destination and says
-// whether it had before, and when this runtime was first seen on this
-// endpoint at all (the start of its baseline).
-func (s *Store) ObserveAgentDestination(tenantID, endpointID, runtime, destination string, bytesOut int64, at time.Time) (known bool, since time.Time, err error) {
+// whether it had before, when it first did and how much it had sent there,
+// and when this runtime was first seen on this endpoint at all (the start of
+// its baseline).
+func (s *Store) ObserveAgentDestination(tenantID, endpointID, runtime, destination string, bytesOut int64, at time.Time) (AgentDestinationSeen, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	at = at.UTC()
-	since, err = s.agentBaselineStart(tenantID, endpointID, runtime, at)
+	bytesOut = max(bytesOut, 0)
+	seen := AgentDestinationSeen{Since: at, FirstSeen: at}
+	since, err := s.agentBaselineStart(tenantID, endpointID, runtime, at)
 	if err != nil {
-		return false, at, err
+		return seen, err
 	}
-	res, err := s.db.Exec(`UPDATE agent_egress_destinations SET last_seen = ?, events = events + 1, bytes_out = bytes_out + ?
-		WHERE tenant_id = ? AND endpoint_id = ? AND runtime = ? AND destination = ?`,
-		at, max(bytesOut, 0), tenantID, endpointID, runtime, destination)
-	if err != nil {
-		return false, since, err
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return true, since, nil
+	seen.Since = since
+	var total int64
+	err = s.db.QueryRow(`UPDATE agent_egress_destinations SET last_seen = ?, events = events + 1, bytes_out = bytes_out + ?
+		WHERE tenant_id = ? AND endpoint_id = ? AND runtime = ? AND destination = ?
+		RETURNING first_seen, bytes_out`,
+		at, bytesOut, tenantID, endpointID, runtime, destination).Scan(&seen.FirstSeen, &total)
+	switch {
+	case err == nil:
+		seen.Known, seen.BytesBefore = true, total-bytesOut
+		return seen, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return seen, err
 	}
 	_, err = s.db.Exec(`INSERT INTO agent_egress_destinations (tenant_id, endpoint_id, runtime, destination, first_seen, last_seen, events, bytes_out)
 		VALUES (?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT DO NOTHING`,
-		tenantID, endpointID, runtime, destination, at, at, max(bytesOut, 0))
-	return false, since, err
+		tenantID, endpointID, runtime, destination, at, at, bytesOut)
+	return seen, err
 }
 
 // agentBaselineStart returns when the runtime's baseline began on the

@@ -25,9 +25,10 @@ import (
 // "Codex reached a new site" is judged against Codex, not against the estate.
 
 const (
-	agentLargeFirstUpload = 1 << 20 // a first contact carrying a megabyte is the louder finding
-	agentUploadDays       = 14
-	agentDNSCooldown      = time.Hour
+	agentLargeFirstUpload   = 1 << 20   // a new destination sent a megabyte soon after first contact pages
+	agentFirstContactWindow = time.Hour // how long after first contact an upload counts as the first contact's
+	agentUploadDays         = 14
+	agentDNSCooldown        = time.Hour
 )
 
 // publicResolvers are the anycast addresses of the public DNS-over-HTTPS and
@@ -182,24 +183,7 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 
 	dest := agentDestination(ev.Domain, ev.SNI, ev.DstIP, geo)
 	if dest != "" {
-		known, since, err := e.store.ObserveAgentDestination(ev.TenantID, ev.EndpointID, runtime, dest, ev.BytesOut, now)
-		learning := now.Sub(since) < time.Duration(cfg.AgentBaselineDays)*24*time.Hour
-		if err != nil {
-			log.Printf("[-] agent egress baseline write failed for %s/%s: %v", ev.EndpointID, runtime, err)
-		} else if !known && !learning && !warming {
-			severity := "MEDIUM"
-			if geo.Tenancy == storage.TenancyHosting || strings.HasPrefix(dest, "net:") || ev.BytesOut >= agentLargeFirstUpload {
-				severity = "HIGH"
-			}
-			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
-				ID: uuid.New().String(), TenantID: ev.TenantID, EndpointID: ev.EndpointID, Hostname: endpoint.Hostname,
-				AnomalyType: "AGENT_NEW_DESTINATION", Technique: "T1567", Severity: severity,
-				Title:       fmt.Sprintf("%s reached a destination it never has: %s", runtime, dest),
-				Description: fmt.Sprintf("Agent runtime %s connected to %s:%d (%s), outside everything it has reached on this endpoint since %s.", runtime, ev.DstIP, ev.DstPort, describeOwner(geo), since.UTC().Format("2006-01-02")),
-				Details:     fmt.Sprintf("Runtime: %s | Destination: %s | Process: %s | Sent: %s | %s", runtime, dest, ev.ProcessPath, humanBytes(ev.BytesOut), describeOwner(geo)),
-				ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
-			})
-		}
+		e.checkAgentDestination(ev, geo, endpoint, cfg, runtime, dest, warming, now)
 	}
 
 	if ev.BytesOut <= 0 {
@@ -236,6 +220,63 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 			ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
 		})
 	}
+}
+
+// checkAgentDestination judges a runtime reaching dest. Agents read the web
+// for a living - documentation, issue trackers, a project's site during a
+// bug hunt - so somewhere new is reported (MEDIUM, the agent-egress digest)
+// and never pages on its own, whoever hosts it: most of the web sits on
+// rented compute, and an address the hub could not name is usually a site
+// whose lookup it did not see. What pages (HIGH) is the exfiltration shape:
+// the runtime sending agentLargeFirstUpload or more to the new destination
+// within agentFirstContactWindow of first reaching it. A connection's first
+// report carries no bytes on Linux (the agent's first counter reading is its
+// baseline), so the upload is judged over the destination's first window,
+// once, when its total crosses the line.
+func (e *Engine) checkAgentDestination(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
+	runtime, dest string, warming bool, now time.Time) {
+	sent := max(ev.BytesOut, 0)
+	seen, err := e.store.ObserveAgentDestination(ev.TenantID, ev.EndpointID, runtime, dest, sent, now)
+	if err != nil {
+		log.Printf("[-] agent egress baseline write failed for %s/%s: %v", ev.EndpointID, runtime, err)
+		return
+	}
+	learnFor := time.Duration(cfg.AgentBaselineDays) * 24 * time.Hour
+	if warming || seen.FirstSeen.Sub(seen.Since) < learnFor {
+		// Inside the runtime's baseline: learned, not new.
+		return
+	}
+	total := seen.BytesBefore + sent
+	large := total >= agentLargeFirstUpload && seen.BytesBefore < agentLargeFirstUpload && now.Sub(seen.FirstSeen) <= agentFirstContactWindow
+	if seen.Known && !large {
+		return
+	}
+	alert := storage.AnomalyAlert{
+		ID: uuid.New().String(), TenantID: ev.TenantID, EndpointID: ev.EndpointID, Hostname: endpoint.Hostname,
+		AnomalyType: "AGENT_NEW_DESTINATION", Technique: "T1567", Severity: "MEDIUM",
+		Title:       fmt.Sprintf("%s reached a destination it never has: %s", runtime, dest),
+		Description: fmt.Sprintf("Agent runtime %s connected to %s:%d (%s), outside everything it has reached on this endpoint since %s.", runtime, ev.DstIP, ev.DstPort, describeOwner(geo), seen.Since.UTC().Format("2006-01-02")),
+		Details:     fmt.Sprintf("Runtime: %s | Destination: %s | Process: %s | Sent: %s | %s", runtime, dest, ev.ProcessPath, humanBytes(sent), describeOwner(geo)),
+		ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
+	}
+	if large {
+		alert.Severity = "HIGH"
+		alert.Title = fmt.Sprintf("%s sent %s to a destination it never has: %s", runtime, humanBytes(total), dest)
+		alert.Description = fmt.Sprintf("Agent runtime %s sent %s to %s:%d (%s) within %s of first reaching it; nothing it has reached on this endpoint since %s went there before.",
+			runtime, humanBytes(total), ev.DstIP, ev.DstPort, describeOwner(geo), minutesPhrase(now.Sub(seen.FirstSeen)), seen.Since.UTC().Format("2006-01-02"))
+		alert.Details = fmt.Sprintf("Runtime: %s | Destination: %s | Process: %s | Sent since first contact: %s | First contact: %s | %s",
+			runtime, dest, ev.ProcessPath, humanBytes(total), seen.FirstSeen.UTC().Format(time.RFC3339), describeOwner(geo))
+	}
+	e.recordAnomaly(ev, geo, endpoint, alert)
+}
+
+// minutesPhrase reads a duration under agentFirstContactWindow: "a minute",
+// "12 minutes".
+func minutesPhrase(d time.Duration) string {
+	if m := int(d.Minutes()); m > 1 {
+		return fmt.Sprintf("%d minutes", m)
+	}
+	return "a minute"
 }
 
 // runtimeToOwnVendor reports a flow from an agent runtime's own executable to

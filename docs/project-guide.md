@@ -379,8 +379,11 @@ the first `agent_baseline_days` the runtime's destinations are learned; after
 that a registrable domain it has never reached (on a CDN or rented compute,
 the domain together with the network owner, because the hub borrows names
 from the resolver and one address there serves many sites) is
-`AGENT_NEW_DESTINATION`
-(HIGH on rented compute, a bare address, or a first contact over 1 MB), an hour
+`AGENT_NEW_DESTINATION`, reported (MEDIUM, in the agent-egress digest) and
+never paged on its own whoever hosts it, because agents read the web for a
+living; it pages (HIGH) only when the runtime sends 1 MB or more there within
+an hour of first reaching it, once, when the total crosses the line (a
+connection's first report carries no bytes on Linux); an hour
 of uploads above `max(agent_upload_floor_mb, agent_upload_factor x` its
 14-day 95th-percentile hour`)` is `AGENT_UPLOAD_VOLUME`, and a runtime or an
 interpreter resolving names through public DNS, DoT or DoH is

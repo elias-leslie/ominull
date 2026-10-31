@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -69,8 +70,78 @@ func TestAnAgentReachingANewDestinationAfterItsBaselineIsReported(t *testing.T) 
 	if len(got) != 1 {
 		t.Fatalf("one new registrable domain should raise one finding, got %d", len(got))
 	}
-	if got[0].Severity != "HIGH" {
-		t.Fatalf("a first contact carrying 4 MB is HIGH, got %q", got[0].Severity)
+	if got[0].Severity != "HIGH" || got[0].Title != "claude sent 4.0 MB to a destination it never has: attacker.example" {
+		t.Fatalf("a first contact carrying 4 MB is HIGH, got %q %q", got[0].Severity, got[0].Title)
+	}
+}
+
+// Agents read the web: a first visit is reported in the digest, never paged,
+// whoever hosts the site. Owner, 2026-10-31, about k8s-kind.netlify.app
+// (Netlify sits in an AWS customer range): "completely normal for agents to
+// reach websites".
+func TestAnAgentsFirstVisitIsReportedNotPagedWhateverItsHosting(t *testing.T) {
+	engine, store := noiseEngine(t)
+	start := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	engine.Evaluate(agentEvent("linux-76", claudePath, "api.anthropic.com", "160.79.104.10", 443, 2000, start))
+	now := time.Now().UTC()
+	rented := threatintel.GeoRecord{ASN: "AS16509", Org: "Amazon Web Services (customer range)", Tenancy: storage.TenancyHosting}
+	for i, c := range []struct {
+		domain, ip string
+		geo        threatintel.GeoRecord
+	}{
+		{"k8s-kind.netlify.app", "203.0.113.20", rented},
+		{"", "203.0.113.30", threatintel.GeoRecord{}}, // no name, no owner: net:203.0.113.0/24
+		{"kind.sigs.k8s.io", "203.0.113.40", threatintel.GeoRecord{}},
+	} {
+		ev := agentEvent("linux-76", claudePath, c.domain, c.ip, 443, 0, now.Add(time.Duration(i)*time.Second))
+		engine.checkAgentDestination(ev, c.geo, storage.Endpoint{Hostname: "h76"}, storage.DefaultDetectionTuning(), "claude",
+			agentDestination(ev.Domain, ev.SNI, ev.DstIP, c.geo), false, ev.Timestamp)
+	}
+	got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION")
+	if len(got) != 3 {
+		t.Fatalf("three first visits should raise three findings, got %d", len(got))
+	}
+	for _, a := range got {
+		if a.Severity != "MEDIUM" {
+			t.Errorf("%q is %s, want MEDIUM (report only)", a.Title, a.Severity)
+		}
+	}
+}
+
+// The exfiltration shape pages: a new destination receiving a megabyte soon
+// after first contact. A connection's first report carries no bytes on
+// Linux, so the upload is summed over the destination's first hour, and the
+// page is raised once, when the total crosses the line.
+func TestALargeUploadToANewDestinationPagesOnce(t *testing.T) {
+	engine, store := noiseEngine(t)
+	start := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	engine.Evaluate(agentEvent("linux-77", claudePath, "api.anthropic.com", "160.79.104.10", 443, 2000, start))
+	now := time.Now().UTC().Add(-2 * time.Hour)
+	at := func(d time.Duration) time.Time { return now.Add(d) }
+	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 0, at(0)))
+	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 600<<10, at(30*time.Second)))
+	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 1 || got[0].Severity != "MEDIUM" {
+		t.Fatalf("first contact and 600 KB: want one MEDIUM, got %+v", got)
+	}
+	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 600<<10, at(time.Minute)))
+	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 2<<20, at(2*time.Minute)))
+	var high []storage.AnomalyAlert
+	for _, a := range anomaliesOfType(t, store, "AGENT_NEW_DESTINATION") {
+		if a.Severity == "HIGH" {
+			high = append(high, a)
+		}
+	}
+	if len(high) != 1 || high[0].Title != "claude sent 1.2 MB to a destination it never has: attacker.example" {
+		t.Fatalf("crossing 1 MB within the first hour should page once, got %+v", high)
+	}
+
+	// Past the first hour, uploads to it are the hourly volume's to judge.
+	engine.Evaluate(agentEvent("linux-77", claudePath, "late.example", "198.51.100.50", 443, 0, at(0)))
+	engine.Evaluate(agentEvent("linux-77", claudePath, "late.example", "198.51.100.50", 443, 4<<20, at(90*time.Minute)))
+	for _, a := range anomaliesOfType(t, store, "AGENT_NEW_DESTINATION") {
+		if a.Severity == "HIGH" && strings.Contains(a.Title, "late.example") {
+			t.Fatalf("an upload after the first hour paged: %q", a.Title)
+		}
 	}
 }
 

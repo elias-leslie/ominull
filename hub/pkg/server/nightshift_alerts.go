@@ -211,6 +211,9 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	case "AGENT_NEW_DESTINATION":
 		name := firstName(ev.SNI, ev.Domain, titleDestination(a.Title))
 		out.What = fmt.Sprintf("%s on %s reached %s for the first time", who, host, destPhrase(name, a.DstIP, a.DstPort, ev.Owner))
+		if sent := titleUpload(a.Title); sent != "" {
+			out.What += fmt.Sprintf(" and sent %s there within the hour", sent)
+		}
 		if vendor := tuning.RuntimeVendor(proc, name); vendor != "" {
 			// A cause, not an explanation: on a shared CDN address the name
 			// can be any other site's.
@@ -350,6 +353,20 @@ func titleDestination(title string) string {
 		return ""
 	}
 	return dest
+}
+
+// titleUpload reads the amount from the title of an agent-egress upload
+// page ("claude sent 4.0 MB to a destination it never has: x.example").
+func titleUpload(title string) string {
+	_, rest, ok := strings.Cut(title, " sent ")
+	if !ok {
+		return ""
+	}
+	sent, _, ok := strings.Cut(rest, " to a destination it never has: ")
+	if !ok {
+		return ""
+	}
+	return sent
 }
 
 func destPhrase(name, ip string, port uint16, owner string) string {

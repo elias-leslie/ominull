@@ -228,6 +228,13 @@ func TestDescribeAgentEgressNamesFactsAndExplainsOurs(t *testing.T) {
 		codex.Expected != "" || !strings.Contains(codex.Cause, "OpenAI") {
 		t.Fatalf("codex = %+v", codex)
 	}
+	// An upload page names the amount the new destination received.
+	upload := describeAlert(storage.AnomalyAlert{ID: "u", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "HIGH", Hostname: "workstation-1",
+		Title:       "claude sent 4.0 MB to a destination it never has: drop.example@amazon web services (customer range)",
+		ProcessPath: "/home/u/.local/share/claude/versions/2.1.301", DstIP: "198.51.100.40", DstPort: 443}, storage.DefaultDetectionTuning())
+	if upload.What != "claude on workstation-1 reached drop.example (198.51.100.40:443) for the first time and sent 4.0 MB there within the hour" {
+		t.Fatalf("upload page = %+v", upload)
+	}
 	// Claude Code's native build runs as its version number; the runtime comes
 	// from agent_runtimes, so its own service is still named as the cause.
 	claude := describeAlert(storage.AnomalyAlert{ID: "n", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "workstation-1",

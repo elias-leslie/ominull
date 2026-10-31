@@ -33,7 +33,7 @@ func TestBehaviouralFindingsAreHuntLeadsAndMutedOnAgentHeavyHosts(t *testing.T) 
 			}
 			now := time.Now().UTC()
 			if tc.name == "agent runtime observed" {
-				if _, _, err := store.ObserveAgentDestination("default", "linux-41", "claude-code", "api.example", 10, now); err != nil {
+				if _, err := store.ObserveAgentDestination("default", "linux-41", "claude-code", "api.example", 10, now); err != nil {
 					t.Fatal(err)
 				}
 			}
