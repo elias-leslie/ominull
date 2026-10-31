@@ -20,7 +20,11 @@ type RetentionPolicy struct {
 	// Events is the raw flow window (minute rows and loopback hourly counters).
 	Events time.Duration
 	// FlowRollups is how long the daily cold segments (hourly rollups) stay.
-	FlowRollups   time.Duration
+	FlowRollups time.Duration
+	// CommProfiles is the novelty memory: the communication profiles and
+	// the learned destinations that say whether a destination is new. It
+	// outlives the raw flows, or a site visited once a month is "new" every
+	// time.
 	CommProfiles  time.Duration
 	AnomalyAlerts time.Duration
 	// AnomalyCounts keeps per-signature daily counts of pruned anomalies.
@@ -34,24 +38,31 @@ type RetentionPolicy struct {
 	// RouterDaily covers the per-device daily traffic and DNS aggregates that
 	// baselines are built from, so it outlives the raw rows by months.
 	RouterDaily time.Duration
+	// JobReoffers is how long the response scheduler's re-offer rows
+	// (scheduler, offered -> offered) stay in response_job_audit. One is
+	// written per pending offer per scheduler pass: 74,079 of the table's
+	// 74,809 rows by 2026-10-27. Every other job transition is kept for good.
+	JobReoffers time.Duration
 	// ColdDir overrides where cold segments are written (default: "cold"
 	// beside the database file; none for an in-memory database).
 	ColdDir string
 }
 
 // DefaultRetention is what a hub uses unless an operator says otherwise: the
-// home tier (raw 14 d; hourly rollups 90 d; anomalies 90 d, counts 1 y).
+// home tier (raw 14 d; hourly rollups and novelty memory 90 d; anomalies
+// 90 d, counts 1 y).
 func DefaultRetention() RetentionPolicy {
 	return RetentionPolicy{
 		Events:         14 * 24 * time.Hour,
 		FlowRollups:    90 * 24 * time.Hour,
-		CommProfiles:   14 * 24 * time.Hour,
+		CommProfiles:   90 * 24 * time.Hour,
 		AnomalyAlerts:  90 * 24 * time.Hour,
 		AnomalyCounts:  365 * 24 * time.Hour,
 		AuditLogs:      365 * 24 * time.Hour,
 		RouterFlows:    14 * 24 * time.Hour,
 		DNSResolutions: 14 * 24 * time.Hour,
 		RouterDaily:    RouterDailyRetention,
+		JobReoffers:    14 * 24 * time.Hour,
 	}
 }
 
@@ -185,6 +196,14 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 		removed["router_daily"] = n
 	}
 
+	if policy.JobReoffers > 0 {
+		n, err := s.pruneJobReoffers(now.Add(-policy.JobReoffers))
+		if err != nil {
+			return removed, fmt.Errorf("pruning response_job_audit re-offers: %w", err)
+		}
+		removed["response_job_audit"] = n
+	}
+
 	if policy.Events > 0 {
 		if err := s.collectFlowDictionaries(now.Add(-policy.Events), now); err != nil {
 			return removed, fmt.Errorf("flow dictionaries: %w", err)
@@ -310,6 +329,29 @@ func (s *Store) collectFlowDictionaries(cutoff, now time.Time) error {
 	s.resetFlowCaches()
 	s.flowWriter.lastGC = now
 	return nil
+}
+
+// pruneJobReoffers deletes the scheduler's offered -> offered rows older than
+// cutoff. The table belongs to the response store (response/store.go), which
+// shares this database; a hub without it has nothing to prune.
+func (s *Store) pruneJobReoffers(cutoff time.Time) (int64, error) {
+	var exists int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'response_job_audit'`).Scan(&exists); err != nil || exists == 0 {
+		return 0, err
+	}
+	stmt := fmt.Sprintf(`DELETE FROM response_job_audit WHERE id IN (SELECT id FROM response_job_audit
+		WHERE actor = 'scheduler' AND from_state = 'offered' AND to_state = 'offered' AND timestamp < ? LIMIT %d)`, pruneBatch)
+	var total int64
+	for {
+		n, err := s.pruneBatch(stmt, cutoff)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < pruneBatch {
+			return total, nil
+		}
+	}
 }
 
 // releaseFreePages returns pruned pages to the filesystem when the database

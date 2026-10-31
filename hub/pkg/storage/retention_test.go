@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql/driver"
 	"fmt"
+	"ominull/hub/pkg/response"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -189,7 +190,8 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 
 	seed("events", "timestamp", now.Add(-30*24*time.Hour), pruneBatch+7)
 	seed("events", "timestamp", now.Add(-1*time.Hour), 3)
-	seed("comm_profiles", "last_seen", now.Add(-30*24*time.Hour), 4)
+	seed("comm_profiles", "last_seen", now.Add(-100*24*time.Hour), 4) // past the 90-day novelty memory
+	seed("comm_profiles", "last_seen", now.Add(-30*24*time.Hour), 1)  // a month old is still remembered
 	seed("comm_profiles", "last_seen", now.Add(-1*time.Hour), 2)
 	seed("anomaly_alerts", "timestamp", now.Add(-90*24*time.Hour), 4)
 	seed("anomaly_alerts", "timestamp", now.Add(-1*time.Hour), 2)
@@ -204,8 +206,8 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 	if got := count("events"); got != 3 {
 		t.Errorf("events: kept %d rows, want the 3 inside retention (removed %d)", got, removed["events"])
 	}
-	if got := count("comm_profiles"); got != 2 {
-		t.Errorf("comm_profiles: kept %d rows, want 2", got)
+	if got := count("comm_profiles"); got != 3 {
+		t.Errorf("comm_profiles: kept %d rows, want 3", got)
 	}
 	if got := count("anomaly_alerts"); got != 2 {
 		t.Errorf("anomaly_alerts: kept %d rows, want 2", got)
@@ -224,8 +226,8 @@ func TestOldTelemetryIsPruned(t *testing.T) {
 	if got := count("events"); got != 7 {
 		t.Errorf("an empty retention policy removed rows: %d left, want 7", got)
 	}
-	if got := count("comm_profiles"); got != 2 {
-		t.Errorf("an empty retention policy removed communication profiles: %d left, want 2", got)
+	if got := count("comm_profiles"); got != 3 {
+		t.Errorf("an empty retention policy removed communication profiles: %d left, want 3", got)
 	}
 }
 
@@ -541,5 +543,62 @@ func TestAFailedPruneStillRefreshesTheDataReport(t *testing.T) {
 	store.retentionSweep(policy)
 	if store.DataReport() == nil {
 		t.Error("the data size report is still pending after a failed sweep")
+	}
+}
+
+// The response scheduler writes an offered -> offered row per pending offer per
+// pass; those go after JobReoffers, and every other job transition stays.
+func TestSchedulerReoffersArePrunedAndOtherJobHistoryIsKept(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "reoffers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := response.NewStore(store.DB()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	old, recent := now.Add(-15*24*time.Hour), now.Add(-13*24*time.Hour)
+	add := func(ts time.Time, from, to, actor string) {
+		t.Helper()
+		if _, err := store.db.Exec(`INSERT INTO response_job_audit (timestamp, tenant_id, endpoint_id, job_id, grant_id, from_state, to_state, actor, details)
+			VALUES (?, 'default', 'e1', 'j1', 'g1', ?, ?, ?, '')`, ts, from, to, actor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < pruneBatch+3; i++ { // more than one batch
+		add(old, "offered", "offered", "scheduler")
+	}
+	add(recent, "offered", "offered", "scheduler")
+	add(old, "queued", "offered", "scheduler")
+	add(old, "offered", "failed", "scheduler")
+	add(old, "offered", "offered", "admin")
+	add(old, "", "queued", "admin")
+
+	removed, err := store.PruneOldData(RetentionPolicy{JobReoffers: 14 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed["response_job_audit"] != int64(pruneBatch+3) {
+		t.Fatalf("removed %d re-offer rows, want %d", removed["response_job_audit"], pruneBatch+3)
+	}
+	var left int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM response_job_audit`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 5 {
+		t.Fatalf("%d rows left, want the recent re-offer and the four other transitions", left)
+	}
+}
+
+// A hub database without the response store's tables prunes without error.
+func TestReofferPruningWithoutResponseStore(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "noresponse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.PruneOldData(RetentionPolicy{JobReoffers: time.Hour}); err != nil {
+		t.Fatal(err)
 	}
 }
