@@ -556,6 +556,8 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	add("agent_egress", []feedFinding{ae}, err)
 	g, err := s.agentFinding(now)
 	add("agents", []feedFinding{g}, err)
+	acf, err := s.agentCertFinding(now)
+	add("agent_certificates", []feedFinding{acf}, err)
 	inv, err := s.inventoryFinding(now)
 	add("inventory", []feedFinding{inv}, err)
 	rf, err := s.routerFindings(now)

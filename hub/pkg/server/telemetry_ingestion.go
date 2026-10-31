@@ -147,6 +147,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	}
 	// Agents compress their next batches only once they have read this.
 	resp["accept_encoding"] = "gzip"
+	s.observeAgentCert(r, batch.EndpointID, batch.CertRenewal, resp, now)
 	s.addTrustControl(r.Context(), resp, persisted, batch.Trust)
 	if desc, ok := resp["agent_update"].(map[string]string); ok && batch.Trust != nil {
 		if g := s.updateGrantFor(batch.EndpointID, desc["version"]); g != nil {

@@ -42,6 +42,39 @@ channel. After enrollment, an agent refuses a missing CA, unknown issuer,
 mismatched name, expired certificate, or untrusted peer. There is no silent
 cleartext fallback.
 
+## Client certificate renewal
+
+Client certificates are issued for one year. From 1.8.104 the hub renews them
+over the agent's own authenticated heartbeat, so an endpoint never has to be
+re-enrolled because its certificate aged out:
+
+- Agents that can install a renewed certificate send `"cert_renewal": true` in
+  each heartbeat. Older agents never get one, so the hub does not generate keys
+  for them on every beat.
+- The hub records the certificate each endpoint presents on a verified
+  handshake (expiry and serial, `endpoint_certificates`). Within
+  `agent_cert_renew_days` of expiry (hub setting, default 60, 7 to 300) it puts
+  a new certificate and key in the heartbeat reply (`client_certificate`), at
+  most once an hour until the agent presents the new one.
+- The agent proves the new certificate against the hub on a fresh connection
+  before using it. Linux writes it beside the old files and renames it into
+  place; Windows imports it into the machine store and replaces its archive.
+  On any failure the agent keeps the certificate it has, which stays valid
+  until its own expiry, and the hub offers again an hour later.
+- `POST /api/v1/endpoints/cert-renewal` with `{"endpoint_id": "..."}` (admin)
+  asks for a renewal on the endpoint's next heartbeat whatever its expiry, for
+  example after a suspected key leak. `GET` on the same route lists what the
+  hub knows about each endpoint's certificate. A Windows endpoint whose
+  certificate has already expired, and which reports with its device
+  credential alone, is offered a new one too.
+
+Nightshift sees this as the `ominull.agents.certificate` finding. It turns
+medium when a certificate is within half the renewal window of expiry, or
+expired, and still not renewed, which means the agent is too old to renew or
+keeps failing to install the new one: update the agent or re-enrol it.
+Endpoints the hub has not seen present a certificate since it began recording
+are listed as unknown, not as fine.
+
 ## Linux and Windows
 
 Linux uses libcurl with the enrolled CA or operating-system trust, and does not

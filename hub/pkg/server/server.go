@@ -171,6 +171,9 @@ type TelemetryBatchMessage struct {
 	// Trust is a grant-verifying agent's own account of its trust state
 	// (pinned keys, manifest, enforcement watermarks, last refusal).
 	Trust *response.AgentTrustReport `json:"trust,omitempty"`
+	// CertRenewal is true from agents that install a renewed client
+	// certificate handed to them in the heartbeat reply (agent_cert.go).
+	CertRenewal bool `json:"cert_renewal,omitempty"`
 }
 
 type DiscoveredAsset struct {
@@ -3800,6 +3803,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/endpoints/", s.authMiddleware(requireAdmin(s.handleEndpointSubroutes)))
 	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
 	mux.HandleFunc("/api/v1/endpoints/presence", s.authMiddleware(requireAdmin(s.handleEndpointPresence)))
+	mux.HandleFunc("/api/v1/endpoints/cert-renewal", s.authMiddleware(requireAdmin(s.handleAgentCertRenewal)))
 	mux.HandleFunc("/api/v1/endpoints/monitor-only", s.authMiddleware(requireAdmin(s.handleMonitorOnly)))
 	mux.HandleFunc("/api/v1/trust/rules", s.authMiddleware(requireAdmin(s.handleTrustRules)))
 	mux.HandleFunc("/api/v1/trust/effective", s.authMiddleware(requireAdmin(s.handleTrustEffective)))
