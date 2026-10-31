@@ -18,8 +18,25 @@ hub_url_safe() {
 
 # hub_curl_config KEY URL: a curl -K config with the key header and, for an
 # HTTPS hub, the hub CA. Read it from a descriptor, never a command line.
+#
+# Every agent holds the same admin key, so the hub records an admin-key call as
+# "admin" unless the caller names itself in X-Ominull-Agent. The name is
+# $OMINULL_AGENT (e.g. "summitflow offsite backup (task-341f8c5b)"), else the
+# agent session this runs in: "cc:<id>" (Claude Code) or "codex:<id>", six
+# characters of the session id, plus " (Aico <window>)". The hub shows it as
+# a claim: agent "cc:f5c210 (Aico b33f5536)" (admin key). A name the hub would
+# refuse (over 64 characters, not printable ASCII, quotes, backslashes, a
+# leading or trailing space) is left out.
 hub_curl_config() {
+    local agent="${OMINULL_AGENT:-}" id="${CLAUDE_CODE_SESSION_ID:-}" kind=cc
+    if [ -z "${agent}" ]; then
+        if [ -z "${id}" ]; then id="${CODEX_THREAD_ID:-}"; kind=codex; fi
+        if [ -n "${id}" ]; then agent="${kind}:${id:0:6}${AICO_WIDGET_ID:+ (Aico ${AICO_WIDGET_ID})}"; fi
+    fi
+    case "${agent}" in *\"*|*\\*|" "*|*" ") agent="" ;; esac
+    if [ "${#agent}" -gt 64 ] || [ -n "$(printf '%s' "${agent}" | LC_ALL=C tr -d ' -~')" ]; then agent=""; fi
     printf 'header = "X-API-Key: %s"\n' "$1"
+    if [ -n "${agent}" ]; then printf 'header = "X-Ominull-Agent: %s"\n' "${agent}"; fi
     case "$2" in https://*) printf 'cacert = "%s"\n' "${OMINULL_HUB_CA:-/etc/ominull/ca.crt}" ;; esac
 }
 

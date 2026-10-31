@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	hubauth "ominull/hub/pkg/auth"
 	"ominull/hub/pkg/storage"
 )
 
@@ -125,6 +126,61 @@ func TestResolvingFindingsRecordsWhy(t *testing.T) {
 	}
 	if a, _ := store.GetAnomalyAlert("curl-1"); !a.Acknowledged {
 		t.Fatal("the named finding was not resolved")
+	}
+}
+
+// Every agent holds the same admin key, so a resolve names whoever labelled
+// itself with X-Ominull-Agent, as a claim, in the resolution and the audit. An
+// unlabelled call (every caller before the label) still reads "admin", an
+// unusable label is ignored, and X-Username stays the hub's to set: a caller
+// cannot name itself through it, and a signed-in operator keeps their name.
+func TestResolvingFindingsNamesTheAgentThatLabelledItself(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedNpmFindings(t, store, 3)
+	resolve := func(id string, headers map[string]string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"ids": []string{id}, "reason": "own automation", "verdict": storage.VerdictBenign})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/anomalies/resolve", bytes.NewReader(body))
+		req.Header.Set("X-API-Key", "mock_admin_token")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		if headers["Authorization"] != "" {
+			req.Header.Del("X-API-Key")
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("resolve %s = %d %s", id, w.Code, w.Body.String())
+		}
+	}
+	jwt, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "owner@example.com", Role: hubauth.RoleAdmin, TenantID: "default"}, "mock_admin_token", time.Hour)
+	resolve("curl-1", map[string]string{agentLabelHeader: "cc:abc123 (Aico b33f5536)", "X-Username": "owner@example.com"})
+	resolve("npm-0", nil)
+	resolve("npm-1", map[string]string{agentLabelHeader: `bad"label`})
+	resolve("npm-2", map[string]string{"Authorization": "Bearer " + jwt, agentLabelHeader: "cc:abc123"})
+	for id, want := range map[string]string{
+		"curl-1": `agent "cc:abc123 (Aico b33f5536)" (admin key)`,
+		"npm-0":  "admin",
+		"npm-1":  "admin",
+		"npm-2":  "owner@example.com",
+	} {
+		if _, by, _, ok := store.AnomalyResolution(id); !ok || by != want {
+			t.Errorf("%s resolved_by = %q %v, want %q", id, by, ok, want)
+		}
+	}
+	page, err := store.AuditHistory("", 100, "", storage.AuditFilter{Action: findingsAcknowledgedAudit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]int{}
+	for _, e := range page.Entries {
+		names[e.Username]++
+	}
+	if names[`agent "cc:abc123 (Aico b33f5536)" (admin key)`] != 1 || names["admin"] != 2 || names["owner@example.com"] != 1 {
+		t.Fatalf("audit names = %v", names)
 	}
 }
 

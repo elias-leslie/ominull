@@ -78,6 +78,38 @@ func TestOminullctl_ParseFlags(t *testing.T) {
 	}
 }
 
+// Every request names the agent session ominullctl runs in (X-Ominull-Agent),
+// so the hub records it rather than "admin"; $OMINULL_AGENT wins, an unusable
+// one sends none, and outside an agent session nothing is sent.
+func TestOminullctl_NamesTheAgentSession(t *testing.T) {
+	var seen []string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("X-Ominull-Agent"))
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer hub.Close()
+	for _, tc := range []struct{ env, cc, codex, aico, want string }{
+		{"", "f5c210d6-e196-4911", "", "b33f5536", "cc:f5c210 (Aico b33f5536)"},
+		{"", "", "019a2b3c-4d5e", "", "codex:019a2b"},
+		{"summitflow offsite backup", "f5c210d6", "", "", "summitflow offsite backup"},
+		{`bad"label`, "f5c210d6", "", "", ""},
+		{"", "", "", "b33f5536", ""},
+	} {
+		t.Setenv("OMINULL_AGENT", tc.env)
+		t.Setenv("CLAUDE_CODE_SESSION_ID", tc.cc)
+		t.Setenv("CODEX_THREAD_ID", tc.codex)
+		t.Setenv("AICO_WIDGET_ID", tc.aico)
+		cfg, _ := parseGlobalFlags([]string{"--url", hub.URL, "--api-key-file", filepath.Join(t.TempDir(), "none"), "endpoints"})
+		seen = nil
+		if _, err := newAPIClient(cfg).doRequest(http.MethodGet, "/api/v1/endpoints", nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(seen) != 1 || seen[0] != tc.want {
+			t.Fatalf("%+v: hub saw %q", tc, seen)
+		}
+	}
+}
+
 func TestOminullctl_NoPlaintextEnvAPIKey(t *testing.T) {
 	t.Setenv("OMINULL_API_KEY", "should-not-be-used")
 	t.Setenv("OMINULL_API_KEY_FILE", "/nonexistent/test/admin.key")

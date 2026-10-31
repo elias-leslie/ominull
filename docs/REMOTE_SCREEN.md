@@ -513,7 +513,8 @@ for agents.
 handshake line as `"text"` and runs `ominull-screen ctl type` with no text
 argument. With `-` (or no text) ominullctl reads it from its own stdin, one
 trailing newline dropped, so a caller can keep a password off every command
-line. `--agent LABEL` (default `$OMINULL_AGENT`; at most 64 printable ASCII
+line. `--agent LABEL` (default `$OMINULL_AGENT`, else the agent session, e.g.
+`cc:f5c210 (Aico b33f5536)`; at most 64 printable ASCII
 characters, checked client-side) is sent as `X-Ominull-Agent` on the session
 request and, from the held state, on every later request for that session.
 

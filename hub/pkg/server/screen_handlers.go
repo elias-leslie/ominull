@@ -427,12 +427,12 @@ func screenAgentName(r *http.Request) string {
 	if r.Header.Get("X-Auth-Method") != "api-key" {
 		return ""
 	}
+	if label, ok := agentLabel(r); ok && label != "" {
+		return "admin (agent calling itself \"" + label + "\", admin key)"
+	}
 	u := r.Header.Get("X-Username")
 	if u == "" {
 		u = "admin"
-	}
-	if label, ok := agentLabel(r); ok && label != "" {
-		return u + " (agent calling itself \"" + label + "\", admin key)"
 	}
 	return u + " (agent, admin key)"
 }

@@ -174,6 +174,9 @@ func (c *APIClient) doRaw(method, endpoint string, body []byte) ([]byte, int, er
 	if c.cfg.TenantID != "" {
 		req.Header.Set("X-Tenant-ID", c.cfg.TenantID)
 	}
+	if c.cfg.Agent != "" {
+		req.Header.Set("X-Ominull-Agent", c.cfg.Agent)
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("HTTP request failed: %w", err)

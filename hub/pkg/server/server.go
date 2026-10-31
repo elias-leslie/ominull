@@ -332,6 +332,12 @@ func (s *Server) tenantFromRequest(r *http.Request) string {
 	return r.Header.Get("X-Tenant-ID")
 }
 
+// adminAgentName is how an admin-key caller that labels itself is named:
+// as a claim, the same words the screen consent prompt uses.
+func adminAgentName(label string) string {
+	return "agent \"" + label + "\" (admin key)"
+}
+
 func (s *Server) operatorFromRequest(r *http.Request) string {
 	if u := r.Header.Get("X-Username"); u != "" {
 		return u
@@ -1167,6 +1173,14 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				r.Header.Set("X-Role", "admin")
 				r.Header.Set("X-Username", "admin")
 				r.Header.Set("X-Auth-Method", "api-key")
+				// Every agent holds the same admin key, so the key alone
+				// names nobody. An agent that labels itself (X-Ominull-Agent)
+				// is recorded under that label, shown as a claim, wherever
+				// the hub records who acted (audit, resolutions, tuning,
+				// exclusions). Without a label it stays "admin".
+				if label, ok := agentLabel(r); ok && label != "" {
+					r.Header.Set("X-Username", adminAgentName(label))
+				}
 				proceed(w, r)
 				return
 			}

@@ -32,6 +32,10 @@ type CLIConfig struct {
 	JSONOutput bool
 	TenantID   string
 	Limit      int
+	// Agent is the label sent as X-Ominull-Agent on every request, so the
+	// hub records which agent acted rather than "admin": $OMINULL_AGENT,
+	// else the agent session ominullctl runs in. Empty sends none.
+	Agent string
 }
 
 func main() {
@@ -232,6 +236,11 @@ func parseGlobalFlags(args []string) (CLIConfig, []string) {
 	fs.IntVar(&cfg.Limit, "limit", 50, "Pagination limit")
 
 	_ = fs.Parse(args)
+	if v := strings.TrimSpace(os.Getenv("OMINULL_AGENT")); validAgentLabel(v) {
+		cfg.Agent = v
+	} else if v == "" {
+		cfg.Agent = sessionAgentLabel()
+	}
 
 	// Read API key from file if present (first line if multi-line)
 	if data, err := os.ReadFile(cfg.APIKeyFile); err == nil {
@@ -274,6 +283,9 @@ func (c *APIClient) doRequestWith(method, endpoint string, body interface{}, hea
 	req.Header.Set("Content-Type", "application/json")
 	if c.cfg.TenantID != "" {
 		req.Header.Set("X-Tenant-ID", c.cfg.TenantID)
+	}
+	if c.cfg.Agent != "" && req.Header.Get("X-Ominull-Agent") == "" {
+		req.Header.Set("X-Ominull-Agent", c.cfg.Agent)
 	}
 
 	resp, err := c.httpClient.Do(req)

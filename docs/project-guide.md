@@ -219,6 +219,20 @@ Protected operator routes use the admin key, a signed console session, native
 OIDC session, or verified Cloudflare Access assertion. Tenant routes remain
 tenant-scoped. Agent routes use a unique device credential.
 
+Every agent holds the one admin key, so an admin-key call is recorded as
+`admin` unless the caller names itself in `X-Ominull-Agent` (1 to 64 printable
+ASCII characters, no `"` or `\`, no leading or trailing space; an unusable one
+reads `admin`, and is a 400 on routes the authority signs). The hub records it, as a claim, as
+`agent "<name>" (admin key)` wherever it records who acted: the audit,
+`anomaly_resolutions.resolved_by`, tuning saves, exclusions, isolations, the
+Nightshift feed's "by". `X-Username` stays the hub's own: it is cleared on the
+way in and never taken from the caller. `scripts/hub-request.sh` (`hub_post`,
+`hub_curl_config`) and `ominullctl` send `$OMINULL_AGENT`, else the agent
+session they run in (`cc:<id> (Aico <window>)` or `codex:<id>`); a raw curl
+adds `header = "X-Ominull-Agent: <name>"` to its `-K` config. A call without
+it still works and reads `admin`. Sessions an agent opens (terminal, screen)
+belong to that name, so reattach with the same one.
+
 | Route | Method | Purpose |
 |---|---:|---|
 | `/` | GET | operator console |

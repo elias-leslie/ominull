@@ -60,13 +60,16 @@ const maxScreenTypeText = 64 * 1024
 // argument. Tests replace it.
 var screenStdin io.Reader = os.Stdin
 
-// screenAgentLabel is --agent, else $OMINULL_AGENT: a short name for the
-// agent asking, which the hub records in the audit
-// (X-Ominull-Agent). Empty means none.
+// screenAgentLabel is --agent, else $OMINULL_AGENT, else the agent session
+// ominullctl runs in (sessionAgentLabel): a short name for the agent asking,
+// which the hub records in the audit (X-Ominull-Agent). Empty means none.
 func screenAgentLabel(flagVal string) (string, error) {
 	v := strings.TrimSpace(flagVal)
 	if v == "" {
 		v = strings.TrimSpace(os.Getenv("OMINULL_AGENT"))
+	}
+	if v == "" {
+		v = sessionAgentLabel()
 	}
 	if len(v) > 64 {
 		return "", errors.New("--agent (or $OMINULL_AGENT) is at most 64 characters")
@@ -80,6 +83,46 @@ func screenAgentLabel(flagVal string) (string, error) {
 		}
 	}
 	return v, nil
+}
+
+// sessionAgentLabel names the agent session ominullctl runs in, for the hub
+// to record instead of the bare "admin" every admin-key caller shares:
+// "cc:<id>" (Claude Code) or "codex:<id>" (Codex), the first six characters
+// of the session id, plus " (Aico <window>)" inside an Aico window. Empty
+// outside an agent session, or when the ids would not make a valid label.
+func sessionAgentLabel() string {
+	id, kind := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")), "cc"
+	if id == "" {
+		id, kind = strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")), "codex"
+	}
+	if id == "" {
+		return ""
+	}
+	if len(id) > 6 {
+		id = id[:6]
+	}
+	label := kind + ":" + id
+	if w := strings.TrimSpace(os.Getenv("AICO_WIDGET_ID")); w != "" {
+		label += " (Aico " + w + ")"
+	}
+	if !validAgentLabel(label) {
+		return ""
+	}
+	return label
+}
+
+// validAgentLabel is what the hub accepts as X-Ominull-Agent: 1 to 64
+// printable ASCII characters, no quotes or backslashes.
+func validAgentLabel(v string) bool {
+	if v == "" || len(v) > 64 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e || v[i] == '"' || v[i] == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // agentHeader adds X-Ominull-Agent to every request it carries.
