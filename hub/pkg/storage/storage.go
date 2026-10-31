@@ -718,6 +718,10 @@ func (s *Store) initSchema() error {
 		return err
 	}
 
+	if err := s.initAgentCertSchema(); err != nil {
+		return err
+	}
+
 	if err := s.initDeviceIdentitySchema(); err != nil {
 		return err
 	}
