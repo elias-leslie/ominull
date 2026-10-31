@@ -476,3 +476,11 @@ func evidenceText(evidence, key string) string {
 	}
 	return ""
 }
+
+// operatorName is who a tuning change is saved as.
+func operatorName(r *http.Request) string {
+	if by := strings.TrimSpace(r.Header.Get("X-Username")); by != "" {
+		return by
+	}
+	return "admin"
+}

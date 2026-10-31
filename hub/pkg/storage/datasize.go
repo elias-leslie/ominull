@@ -145,7 +145,7 @@ var dataTypes = []struct {
 	{"router_flows", "Router flows (5-min)", "hot", "router", []string{"router_flows", "router_client_counters"}, nil},
 	{"anomalies", "Anomalies + resolutions", "hot", "hub", []string{"anomaly_alerts", "anomaly_resolutions"}, nil},
 	{"inventory", "Inventory / posture", "hot", "endpoint", []string{"software_inventory", "vulnerabilities", "vulnerability_matches"}, []string{"data_"}},
-	{"baselines", "Baselines + learning", "hot", "endpoint", nil, []string{"agent_egress_", "learning_", "baseline_"}},
+	{"baselines", "Baselines", "hot", "endpoint", nil, []string{"agent_egress_", "baseline_"}},
 	{"dns_daily", "Router DNS per client×domain daily", "retained", "router", []string{"dns_domain_daily"}, nil},
 	{"router_daily", "Router per-device daily", "retained", "router", []string{"router_client_daily"}, nil},
 	{"anomaly_counts", "Anomaly counts per signature", "retained", "hub", []string{"anomaly_signature_daily"}, nil},

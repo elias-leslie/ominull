@@ -201,8 +201,9 @@ type AnomalyAlert struct {
 	// finding raised before this column existed.
 	Technique string `json:"technique,omitempty"`
 	// HeldReason is why this finding is recorded but is not being shown as
-	// open: "learning", the endpoint was inside a learning window when the
-	// detector spoke, or "hunt", a behavioural hunt lead (anomaly_tier.go).
+	// open: "hunt", a hunt lead or a record or digest finding
+	// (anomaly_tier.go), or "learning" on rows written inside a learning
+	// window before those were retired.
 	//
 	// A held finding is kept rather than dropped, because a host that was
 	// already compromised when its baseline period opened is exactly the host
@@ -412,7 +413,6 @@ type Store struct {
 	retention sync.Mutex
 	analytics analyticsCache
 	traffic   trafficCache
-	learning  learningCache
 	baseline  baselineQueries
 	// flowWriter caches flow dictionary ids and open minute aggregates
 	// (flows.go); guarded by mu.
@@ -751,7 +751,9 @@ func (s *Store) initSchema() error {
 	if err := s.initAgentEgressSchema(); err != nil {
 		return err
 	}
-	if err := s.initLearningSchema(); err != nil {
+	// Learning windows were retired on 2026-10-31: two ran in September and
+	// nothing read what they recorded.
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS learning_observations; DROP TABLE IF EXISTS learning_windows`); err != nil {
 		return err
 	}
 	// The hub's passive IPv6 monitor was retired (agents keep IPv6
@@ -1906,12 +1908,18 @@ func (s *Store) CountAnomalyAlerts(tenantID string, unacknowledgedOnly bool) (in
 const (
 	// HeldExclude is the default view: what is actually being raised.
 	HeldExclude = ""
-	// HeldOnly is the Held tab - findings a learning window is sitting on.
-	// Hunt leads have their own view (HeldHuntOnly).
+	// HeldOnly is the Held tab: held findings that are not hunt leads (today
+	// only rows left from the retired learning windows). Hunt leads have their
+	// own view (HeldHuntOnly).
 	HeldOnly = "held"
 	// HeldAny is every finding the detectors wrote, held or not.
 	HeldAny = "all"
 )
+
+// HeldLearning is the held reason of a finding raised inside a learning window.
+// The windows were retired on 2026-10-31; rows written before then keep this
+// reason until retention removes them.
+const HeldLearning = "learning"
 
 func (s *Store) QueryAnomalyAlerts(tenantID string, limit, offset int, unackOnly bool, endpointID, anomalyType, severity, held string, search ...string) ([]AnomalyAlert, int64, error) {
 	return s.queryAnomalyAlerts(tenantID, limit, offset, unackOnly, endpointID, "", anomalyType, severity, held, search...)

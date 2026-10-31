@@ -628,7 +628,7 @@ func TestOminullctl_ScriptsCommands(t *testing.T) {
 	}
 }
 
-func TestOminullctl_AgentsUpdateAndLearningNeedNoApproval(t *testing.T) {
+func TestOminullctl_AgentsUpdateNeedsNoApproval(t *testing.T) {
 	mux := http.NewServeMux()
 	var sends []string
 	record := func(body string) http.HandlerFunc {
@@ -639,22 +639,14 @@ func TestOminullctl_AgentsUpdateAndLearningNeedNoApproval(t *testing.T) {
 		}
 	}
 	mux.HandleFunc("/api/v1/agents/update", record(`{"status":"published"}`))
-	mux.HandleFunc("/api/v1/learning/proposals/apply", record(`{"applied":["p-1"],"skipped":{}}`))
-	mux.HandleFunc("/api/v1/learning/windows", record(`{"window":{"id":"w-2"},"open":true}`))
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	client := newAPIClient(CLIConfig{HubURL: server.URL, APIKey: "test"})
 	if err := client.cmdAgents([]string{"update", "ep-1", "1.2.3"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.cmdLearning([]string{"apply", "--window", "w-1", "--ids", "p-1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.cmdLearning([]string{"open", "--scope", "endpoint", "--id", "ep-1"}); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"/api/v1/agents/update ", "/api/v1/learning/proposals/apply ", "/api/v1/learning/windows "}
+	want := []string{"/api/v1/agents/update "}
 	if strings.Join(sends, "|") != strings.Join(want, "|") {
-		t.Fatalf("each command is one request with no approval id: %v", sends)
+		t.Fatalf("the command is one request with no approval id: %v", sends)
 	}
 }

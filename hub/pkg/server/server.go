@@ -3153,7 +3153,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 	anomalyType := r.URL.Query().Get("type")
 	severity := r.URL.Query().Get("severity")
 
-	// "held=true" is the Held tab: findings a learning window is sitting on.
+	// "held=true" is the Held tab: held findings that are not hunt leads.
 	// The default view never shows them, which is the whole point of holding
 	// one, and "held=all" is there for an operator reconciling the two.
 	held := storage.HeldExclude
@@ -3199,7 +3199,7 @@ func (s *Server) handleAnomalies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	unackTotal, _ := s.store.CountAnomalyAlerts(tenantID, true)
-	// How many findings the learning windows are sitting on, so the console can
+	// How many findings are held outside the hunt view, so the console can
 	// offer the Held tab only when there is something in it - and so that a
 	// quiet console is never quiet because something is hiding findings without
 	// saying so.
@@ -3743,10 +3743,6 @@ func (s *Server) routes() *http.ServeMux {
 	}))
 	mux.HandleFunc("/api/v1/detection/tuning/suppress", s.authMiddleware(s.handleSuppressPair))
 	mux.HandleFunc("/api/v1/detection/tuning/replay", s.authMiddleware(s.handleTuningReplay))
-	mux.HandleFunc("/api/v1/learning/windows", s.authMiddleware(s.handleLearningWindows))
-	mux.HandleFunc("/api/v1/learning/windows/close", s.authMiddleware(s.handleCloseLearningWindow))
-	mux.HandleFunc("/api/v1/learning/proposals", s.authMiddleware(s.handleLearningProposals))
-	mux.HandleFunc("/api/v1/learning/proposals/apply", s.authMiddleware(s.handleApplyLearningProposals))
 
 	// Router telemetry: what the gateway can see that no agent can.
 	mux.HandleFunc("/api/v1/router/telemetry", s.routerAuth(s.handleRouterTelemetry))

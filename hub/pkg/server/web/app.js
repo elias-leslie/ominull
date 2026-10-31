@@ -534,7 +534,7 @@
     if (!reading && READ_ONLY) return Promise.reject(Object.assign(new Error("Read-only access"), {status:403}));
     var record = resources[path] || (resources[path] = {});
     if (reading && pendingReads[path]) return pendingReads[path];
-    var ageBudget = /^\/api\/v1\/(hierarchy|locations|scanner\/coverage|learning\/windows|agents\/update-status)(\?|$)/.test(path) ? 60000 : 0;
+    var ageBudget = /^\/api\/v1\/(hierarchy|locations|scanner\/coverage|agents\/update-status)(\?|$)/.test(path) ? 60000 : 0;
     if (reading && record.updated && !record.error && Date.now() - record.updated < ageBudget) return Promise.resolve(record.value);
     if (reading && record.retryAt > Date.now()) return Promise.reject(record.error);
     var controller = new AbortController();
@@ -1258,11 +1258,6 @@
         if (base === "/api/v1/detection/tuning") { resolve(demoTuning()); return; }
         /* Terminals live on the terminal page, which demo mode does not serve. */
         if (base === "/api/v1/terminal/sessions") { resolve({ sessions: [] }); return; }
-        /* Learning mode reads answer empty in the demo console: the section
-           renders and explains itself rather than throwing on a hub that is
-           not there. */
-        if (base === "/api/v1/learning/windows") { resolve({ windows: [] }); return; }
-        if (base === "/api/v1/learning/proposals") { resolve({ window: "demo-window", proposals: [] }); return; }
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
         if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
         if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
@@ -1559,14 +1554,6 @@
         : "process";
       return { pair: demoProc + "@example", added: true, acknowledged: body && body.id };
     }
-    /* Learning mode in the demo console. The windows list answers empty and
-       the write paths answer plausibly, so the section renders and explains
-       itself rather than throwing on a hub that is not there. */
-    if (base === "/api/v1/learning/windows") {
-      return { window: { id: "demo-window", scope_type: (body && body.scope_type) || "endpoint", scope_label: "demo", status: "active", ends_at: new Date(Date.now() + 7 * 86400000).toISOString(), note: (body && body.note) || "" }, open: true };
-    }
-    if (base === "/api/v1/learning/windows/close") { return { id: body && body.id, status: "completed" }; }
-    if (base === "/api/v1/learning/proposals/apply") { return { applied: arrayOf(body && body.ids), skipped: {} }; }
     if (base === "/api/v1/anomalies/resolve") {
       DEMO_CACHE["/api/v1/anomalies"].forEach(function (a) {
         if (arrayOf(body && body.ids).indexOf(a.id) >= 0) {
@@ -4084,11 +4071,8 @@
       }
     });
 
-    /* Held findings are the ones a learning window is sitting on. The button
-       appears only when there are some, so a console with no window open is
-       not carrying a control for a state it is not in - but when findings are
-       being held, it says so and how many, because a quiet alert list that is
-       quiet for an invisible reason is worse than a noisy one. */
+    /* Held findings are rows left from the retired learning windows. The
+       button appears only while some remain, and says how many. */
     var heldTotal = Number(state.heldAlertsTotal) || 0;
     var heldBtn = (heldTotal > 0 || af.held) ? h("button", {
       cls: "btn mini" + (af.held ? " btn-primary" : ""),
@@ -6518,168 +6502,6 @@
   }
 
 
-  /* Learning mode.
-
-     A window is the answer to "this estate has never been tuned and I am not
-     going to read four hundred findings to do it". While one is open the
-     detectors still run and their findings are recorded as held; when it
-     closes, what was observed becomes proposals with the evidence attached.
-
-     Nothing here applies itself. Each proposal names what it would silence,
-     the technique that silence would blunt, and how many machines corroborate
-     it - because a pair seen on five workstations is platform traffic and the
-     same pair seen on exactly one host is the thing you were looking for. */
-  function learningCard() {
-    var rows = arrayOf(state.learningWindows).map(function (row) {
-      var w = row.window || {};
-      var label = row.open ? "Open" : (w.status || "closed");
-      return [
-        h("span", { cls: "dim", text: (w.scope_type || "") + " \u00b7 " + (w.scope_label || w.scope_id || "") }),
-        h("span", { cls: "st", "data-state": row.open ? "ok" : "idle" },
-          h("span", { text: label })),
-        h("span", { cls: "dim-3", title: stampTitle(parseTime(w.ends_at)) }, row.open ? (Number.isFinite(Number(row.remaining_minutes)) ? Math.floor(row.remaining_minutes / 1440) + "d " + Math.floor(row.remaining_minutes % 1440 / 60) + "h remaining" : "Unknown end time") : (parseTime(w.ends_at) ? stamp(parseTime(w.ends_at)) : "Unknown end time")),
-        h("span", { cls: "dim-3 cell-wrap", text: w.note || "" }),
-        h("div", { cls: "row-actions" },
-          h("button", {
-            cls: "btn mini", type: "button", text: "Proposals",
-            on: { click: function () { openProposalsSheet(w); } }
-          }),
-          (IS_ADMIN && row.open) ? h("button", {
-            cls: "btn mini", type: "button", text: "Close",
-            on: {
-              click: function () {
-                request("/api/v1/learning/windows/close", "POST", { id: w.id })
-                  .then(function () { toast("Learning window closed", "ok"); refresh(); })
-                  .catch(function (e) { toast("Close failed: " + e.message, "crit"); });
-              }
-            }
-          }) : null)
-      ];
-    });
-
-    var body = stackOnPhone(simpleTable(["Scope", "State", "Ends", "Note", ""], rows, {
-      key: "learning-windows",
-      empty: "No learning window has been opened. Detections are being judged, not described."
-    }));
-
-    var actions = IS_ADMIN ? [
-      h("button", {
-        cls: "btn", type: "button", text: "Open a window",
-        on: { click: openLearningSheet }
-      })
-    ] : [];
-    return card("Learning mode", body, actions, false,
-      "While a window is open, beacon, volume and agent egress findings on its scope are held instead of raised; threat-list matches, sensitive ports, sweeps, resolver bypass and silence still page. Proposals lists the tuning changes the hub suggests from what it saw, for you to apply.");
-  }
-
-  function openLearningSheet() {
-    var scope = h("select", {}, 
-      h("option", { value: "endpoint", text: "One endpoint" }),
-      h("option", { value: "location", text: "A location" }),
-      h("option", { value: "tenant", text: "Every endpoint" }));
-    var target = h("select", {});
-    var note = h("input", { type: "text", placeholder: "Why this window is open" });
-    var days = h("input", { type: "number", value: "7", min: "1", max: "90" });
-
-    function fillTargets() {
-      clear(target);
-      if (scope.value === "endpoint") {
-        arrayOf(state.endpoints).forEach(function (ep) {
-          if (ep.status === "retired") return;
-          target.appendChild(h("option", { value: ep.id, text: ep.hostname || ep.id }));
-        });
-      } else if (scope.value === "location") {
-        arrayOf(state.locations).forEach(function (l) {
-          target.appendChild(h("option", { value: l.id, text: l.name || l.id }));
-        });
-      } else {
-        target.appendChild(h("option", { value: "", text: "Every endpoint in every tenant" }));
-      }
-    }
-    scope.addEventListener("change", fillTargets);
-    fillTargets();
-
-    var body = h("div", { cls: "stack" },
-      h("p", { cls: "note", text: "While this window is open, beacon, volume and agent egress findings for the endpoints it covers are recorded and held rather than raised. They stay readable under HELD on the alerts page. Threat-list matches, sensitive ports, sweeps, resolver bypass and silence still raise: a host going dark or reaching a known-bad address during its baseline period is exactly when you want to know." }),
-      h("div", { cls: "form-row" },
-        h("label", { cls: "field" }, h("span", { text: "Scope" }), scope),
-        h("label", { cls: "field" }, h("span", { text: "Which" }), target)),
-      h("div", { cls: "form-row" },
-        h("label", { cls: "field" }, h("span", { text: "Days" }), days),
-        h("label", { cls: "field" }, h("span", { text: "Note" }), note)));
-
-    openSheet("Open a learning window", body, [
-      h("button", {
-        cls: "btn btn-primary", type: "button", text: "Open",
-        on: {
-          click: function () {
-            var n = Number(days.value) || 7;
-            var which = target.value ? (target.options[target.selectedIndex] || {}).text || target.value : "every endpoint in every tenant";
-            request("/api/v1/learning/windows", "POST", {
-              scope_type: scope.value,
-              scope_id: target.value,
-              days: n,
-              note: note.value
-            }).then(function () {
-              toast("Learning window open. Its held findings are under HELD.", "ok");
-              closeSheet();
-              refresh();
-            }).catch(function (e) { toast("Could not open the window: " + e.message, "crit"); });
-          }
-        }
-      })
-    ]);
-  }
-
-  function openProposalsSheet(w) {
-    request("/api/v1/learning/proposals?window=" + encodeURIComponent(w.id))
-      .then(function (d) {
-        var proposals = arrayOf(d && d.proposals);
-        var chosen = {};
-        var rows = proposals.map(function (p) {
-          var box = h("input", { type: "checkbox" });
-          box.addEventListener("change", function () { chosen[p.id] = box.checked; });
-          return [
-            IS_ADMIN ? box : h("span", { cls: "dim-3", text: "\u2014" }),
-            h("span", { cls: "dim", text: p.kind.replace(/_/g, " ") }),
-            h("span", { text: p.subject }),
-            h("span", { cls: "dim-3", text: p.silences + (p.technique ? " (" + p.technique + ")" : "") }),
-            h("span", { cls: "ip", text: p.evidence + " on " + p.endpoints + " host(s)" }),
-            h("span", { cls: "st", "data-state": p.corroboration >= 0.6 ? "ok" : "idle" },
-              h("span", { text: p.corroboration.toFixed(2) }))
-          ];
-        });
-
-        var body = h("div", {},
-          h("p", { cls: "note", text: "Corroboration is how many of the machines this window watched agree. A proposal backed by one host scores low on purpose: that is the shape of a finding, not of ordinary traffic." }),
-          stackOnPhone(simpleTable(["", "Kind", "Subject", "Silences", "Evidence", "Corroboration"], rows, {
-            key: "learning-proposals",
-            empty: "This window has nothing to propose yet."
-          })));
-
-        openSheet("Proposals \u00b7 " + (w.scope_label || w.scope_id || ""), body, IS_ADMIN ? [
-          h("button", {
-            cls: "btn btn-primary", type: "button", text: "Apply selected",
-            on: {
-              click: function () {
-                var ids = Object.keys(chosen).filter(function (k) { return chosen[k]; });
-                if (!ids.length) { toast("Nothing selected", "warn"); return; }
-                request("/api/v1/learning/proposals/apply", "POST", { window: w.id, ids: ids })
-                  .then(function (res) {
-                    var n = arrayOf(res && res.applied).length;
-                    toast("Applied " + n + " proposal(s) \u2014 see Detection tuning", "ok");
-                    closeSheet();
-                    refresh();
-                  })
-                  .catch(function (e) { toast("Apply failed: " + e.message, "crit"); });
-              }
-            }
-          })
-        ] : []);
-      })
-      .catch(function (e) { toast("Could not read the proposals: " + e.message, "crit"); });
-  }
-
   function renderPolicy() {
     var view = $("view");
     clear(view);
@@ -6754,7 +6576,6 @@
       convergenceCard(),
       baselineCard(),
       tuningCard(),
-      learningCard(),
       card("Exclusions \u00b7 " + state.exclusions.length, excl, null, false,
         "Traffic that matches an exclusion is not reported by the behavioural detectors. Threat-list matches, sensitive ports, sweeps and resolver bypass still raise. Disable one to close it; an expired one matches nothing and is renewed by saving it with a new expiry."),
       card("Threat indicators \u00b7 " + capped(state.iocs.length, IOC_PAGE), iocs, [
@@ -11682,7 +11503,7 @@
       alerts: ["/api/v1/anomalies"],
       traffic: ["/api/v1/traffic/overview", "/api/v1/traffic/flows"],
       topology: ["/api/v1/topology/workspace"],
-      policy: ["/api/v1/baseline/policies", "/api/v1/detection/tuning", "/api/v1/learning/windows"],
+      policy: ["/api/v1/baseline/policies", "/api/v1/detection/tuning"],
       access: ["/api/v1/operators", "/api/v1/device-auth/credentials"],
       forensics: ["/api/v1/evidence/bundles", "/api/v1/vulnerabilities"],
       response: ["/api/v1/response/jobs", "/api/v1/terminal/sessions"],
@@ -11846,9 +11667,8 @@
     if (af.type) aParams += "&type=" + encodeURIComponent(af.type);
     if (af.endpoint_id) aParams += "&endpoint_id=" + encodeURIComponent(af.endpoint_id);
     if (af.asset_id) aParams += "&asset_id=" + encodeURIComponent(af.asset_id);
-    /* The Held tab. A learning window records findings without raising them,
-       and a console that never showed them would be quiet for a reason the
-       operator could not see. */
+    /* The Held tab: rows left from the retired learning windows, recorded
+       without being raised. */
     if (af.held) aParams += "&held=true";
     else if (af.hunt) aParams += "&held=hunt";
 
@@ -11900,7 +11720,6 @@
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
       request("/api/v1/locations").then(function (d) { state.locations = arrayOf(d); }),
-      request("/api/v1/learning/windows").then(function (d) { state.learningWindows = arrayOf(d && d.windows); }).catch(function () { /* Keep last successful snapshot; request records the error. */ }),
       request("/api/v1/anomalies" + aParams).then(function (d) {
         if (aParams !== alertQuery()) return;
         if (d && Array.isArray(d.alerts)) {

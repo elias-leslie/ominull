@@ -338,42 +338,6 @@ func TestMarkingExpectedIsSignedAtOnce(t *testing.T) {
 	}
 }
 
-// Learning proposals loosen through the same gate and apply on the first request.
-func TestApplyingLearningProposalsIsSignedAtOnce(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	seedLearningEndpoint(t, store, "ep-1", "workstation")
-	seedLearningEndpoint(t, store, "ep-2", "workstation")
-	win, err := store.CreateLearningWindow(storage.LearningWindow{
-		TenantID: "default", ScopeType: storage.LearningScopeLocation, ScopeID: "loc-home", StartedBy: "test",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	var obs []storage.LearningObservation
-	for _, ep := range []string{"ep-1", "ep-2"} {
-		obs = append(obs, storage.LearningObservation{WindowID: win.ID, EndpointID: ep, Kind: storage.LearnPair,
-			Key: "/opt/acme/backup-agent@as64500", Count: 200, FirstSeen: now, LastSeen: now})
-	}
-	if err := store.RecordLearningObservations(obs); err != nil {
-		t.Fatal(err)
-	}
-	proposals, err := store.ComputeLearningProposals(win.ID)
-	if err != nil || len(proposals) == 0 {
-		t.Fatalf("proposals: %v %v", proposals, err)
-	}
-	body := `{"window":"` + win.ID + `","ids":["` + proposals[0].ID + `"]}`
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/learning/proposals/apply", body, ""), http.StatusOK)
-	if !strings.Contains(a.Summary, "quiet_pairs +/opt/acme/backup-agent@as64500") {
-		t.Fatalf("authorization = %+v", a)
-	}
-	if len(store.GetDetectionTuning().QuietPairs) == 0 {
-		t.Fatal("the proposal did not apply")
-	}
-}
-
 // Exclusions: a create and turning one on loosen and are signed; turning one
 // off and deleting one tighten, apply at once and are noted.
 func TestExclusionWritesAreJudged(t *testing.T) {
@@ -587,68 +551,6 @@ func TestParkingOrRetiringAHostIsSignedAtOnce(t *testing.T) {
 	kinds := noteKinds(policyNotes(t, store))
 	if len(kinds) != 3 || !strings.HasPrefix(kinds[0], "loosened (retire) with authorization") || kinds[1] != "tightened endpoint watch presence" ||
 		!strings.HasPrefix(kinds[2], "loosened (presence) with authorization") {
-		t.Fatalf("notes = %v", kinds)
-	}
-}
-
-// Opening a learning window holds the behavioural findings of every host it
-// covers, so the authority signs it, and an estate-wide window says so in
-// words. Closing it needs no signature.
-func TestOpeningALearningWindowIsSignedAtOnce(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-1", TenantID: "default", Hostname: "web", Status: "online", LastSeenAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
-	}
-	learning := func() bool {
-		_, on := store.LearningWindowFor(storage.Endpoint{ID: "ep-1", TenantID: "default"})
-		return on
-	}
-	open := func(body string) (signedChange, storage.LearningWindow) {
-		t.Helper()
-		w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", body, "")
-		a := mustSign(t, store, w, http.StatusOK)
-		var opened struct {
-			Window storage.LearningWindow `json:"window"`
-		}
-		_ = json.Unmarshal(w.Body.Bytes(), &opened)
-		return a, opened.Window
-	}
-
-	a, estate := open(`{"scope_type":"tenant","days":90}`)
-	if a.Target != "learning:tenant:" ||
-		a.Summary != "every host in every tenant for 90 days; holds beacon, volume and agent egress findings" {
-		t.Fatalf("estate window authorization = %+v", a)
-	}
-	if !learning() {
-		t.Fatal("the window did not open")
-	}
-	if d := time.Until(estate.EndsAt); d < 89*24*time.Hour || d > 90*24*time.Hour {
-		t.Fatalf("window ends in %v, want 90 days", d)
-	}
-
-	// One host for two hours names the host; a note is a label.
-	a, host := open(`{"scope_type":"endpoint","scope_id":"ep-1","hours":2,"note":"new host"}`)
-	if a.Target != "learning:endpoint:ep-1" || a.Summary != "endpoint ep-1 (web) for 2 hours; holds beacon, volume and agent egress findings; note new host" {
-		t.Fatalf("host window authorization = %+v", a)
-	}
-	n := len(authorizedAudit(t, store))
-	if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows", `{"scope_type":"location","days":7}`, ""); w.Code != http.StatusBadRequest || len(authorizedAudit(t, store)) != n {
-		t.Fatalf("a location window naming no location = %d %s", w.Code, w.Body.String())
-	}
-
-	for _, id := range []string{estate.ID, host.ID} {
-		if w := policyPost(srv, http.MethodPost, "/api/v1/learning/windows/close", `{"id":"`+id+`"}`, ""); w.Code != http.StatusOK {
-			t.Fatalf("close = %d %s", w.Code, w.Body.String())
-		}
-	}
-	if learning() {
-		t.Fatal("a window is still open after both were closed")
-	}
-	kinds := noteKinds(policyNotes(t, store))
-	if len(kinds) != 4 || kinds[0] != "tightened learning window close" || kinds[1] != "tightened learning window close" ||
-		!strings.HasPrefix(kinds[2], "loosened (learning_window) with authorization") || !strings.HasPrefix(kinds[3], "loosened (learning_window) with authorization") {
 		t.Fatalf("notes = %v", kinds)
 	}
 }

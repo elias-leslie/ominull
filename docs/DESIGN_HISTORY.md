@@ -47,6 +47,29 @@ Tunnel + Access console path. Retention-expired evidence, including terminal
 recordings (30 days), is now pruned hourly instead of only on an explicit API
 call.
 
+## Third trim (2026-10-31)
+
+Removed:
+
+- learning windows (`learning_windows`, `learning_observations`). Two windows
+  ran in September and nothing read their results; detection learns from
+  communication profiles and tuning data instead.
+- three tables that never held a row in production: `rules` and `dns_rules`
+  (no code since the feature reduction) and `topology_views`, with the topology
+  page's saved-view controls and route. A migration drops each only while it is
+  empty and logs and keeps one that still holds rows.
+- the disabled `ominull-agent` package on the hub container.
+- the hourly `scheduler offered -> offered` rows in `response_job_audit` (one
+  per pending offer per scheduler pass, 74,079 of them by 2026-10-27) are kept
+  for 14 days; every other job transition is kept as before.
+
+Frozen: multi-tenant scoping, vulnerability matching (`hub/pkg/vuln`), the
+network scanner (`hub/pkg/scanner`) and its port results (`asset_ports`),
+evidence legal hold, native OIDC, mesh quarantine (`quarantined_peers`) and trust
+rules (`trust_rules`, the only source for selective isolation) stay as they are
+and get fixes only; their tables are empty but kept. None is in use on the
+one-hub, one-owner fleet; new work there needs a reason from the owner first.
+
 ## Measured additions
 
 - **Linux UDP observation (2026-09-07).** eBPF returned as a real collector: an
