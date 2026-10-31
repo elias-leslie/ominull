@@ -83,9 +83,9 @@ func TestServer_ConsoleTLSListener(t *testing.T) {
 	go func() {
 		_ = srv.Start("")
 	}()
-	// Start does setup work before it listens; under -race on a busy host
-	// that takes longer than any fixed sleep, so wait for the port.
-	for deadline := time.Now().Add(10 * time.Second); ; {
+	// Start drills every floor case before it listens (about 4 s under -race
+	// alone, past 10 s beside the whole parallel suite), so wait for the port.
+	for deadline := time.Now().Add(60 * time.Second); ; {
 		c, err := net.DialTimeout("tcp", consoleAddr, 200*time.Millisecond)
 		if err == nil {
 			c.Close()
