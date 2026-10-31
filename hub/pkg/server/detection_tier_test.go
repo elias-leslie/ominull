@@ -84,7 +84,7 @@ func TestHuntLeadsNeverPageAndCarryTheirTierOnV4(t *testing.T) {
 		case "ominull.anomalies.hunt":
 			seen++
 			if f.SeverityID != ocsfSevInformational || f.StatusID != ocsfStatusNew || f.Unmapped["muted_agent_heavy"] != 1.0 ||
-				!strings.HasPrefix(f.Message, "3 hunt leads") {
+				!strings.HasPrefix(f.Message, "3 findings recorded in the last 24 h, kept for the record") {
 				t.Fatalf("hunt finding = sev %d status %d %q %v", f.SeverityID, f.StatusID, f.Message, f.Unmapped)
 			}
 		}

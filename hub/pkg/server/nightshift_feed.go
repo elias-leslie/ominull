@@ -295,8 +295,10 @@ func (s *Server) huntFinding(now time.Time) (feedFinding, error) {
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"No hunt leads in the last 24 h", nil, unmapped), nil
 	}
-	msg := fmt.Sprintf("%s in the last 24 h (behavioural, not alerts; %d muted on agent-heavy hosts)",
-		plural(win.Total, "hunt lead", "hunt leads"), win.Muted)
+	msg := plural(win.Total, "finding", "findings") + " recorded in the last 24 h, kept for the record and not alerts"
+	if win.Muted > 0 {
+		msg += fmt.Sprintf(" (%d lowered to low on agent hosts)", win.Muted)
+	}
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
@@ -363,7 +365,7 @@ func (s *Server) digestFinding(now time.Time) (feedFinding, error) {
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
 			"Nothing recorded in the last 24 h", nil, unmapped), nil
 	}
-	msg := fmt.Sprintf("%s recorded in the last 24 h, none of them asking for you: %s",
+	msg := fmt.Sprintf("%s recorded in the last 24 h, none asking for you. Most common: %s",
 		plural(len(list), "finding", "findings"), strings.Join(named, "; "))
 	if rest := len(order) - len(named); rest > 0 {
 		msg += fmt.Sprintf("; %s", plural(rest, "more group", "more groups"))
@@ -394,11 +396,22 @@ func (s *Server) detectionHealthFinding(now time.Time) (feedFinding, error) {
 	const uid, title = "ominull.detection.health", "Detection health"
 	if len(incidents) <= budget {
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-			fmt.Sprintf("%s paged in the last 7 days, within the budget of %d", plural(len(incidents), "incident", "incidents"), budget), nil, unmapped), nil
+			fmt.Sprintf("%s paged in the last 7 days, within the weekly page budget of %d", plural(len(incidents), "incident", "incidents"), budget), nil, unmapped), nil
 	}
 	unmapped["noisiest"] = noisiest
-	msg := fmt.Sprintf("%s paged in the last 7 days, over the budget of %d. The noisiest rule is %s (%s); if those were not worth a page, tune that rule. Nothing was held back.",
+	msg := fmt.Sprintf("%s paged in the last 7 days, more than the weekly page budget of %d. The noisiest rule is %s (%s); if those were not worth a page, tune that rule. Every page was still sent.",
 		plural(len(incidents), "incident", "incidents"), budget, ruleName(noisiest), plural(most, "incident", "incidents"))
+	if most == 1 {
+		// No rule stands out: name them all.
+		unmapped["noisiest"] = ""
+		names := make([]string, 0, len(byType))
+		for typ := range byType {
+			names = append(names, ruleName(typ))
+		}
+		sort.Strings(names)
+		msg = fmt.Sprintf("%s paged in the last 7 days, more than the weekly page budget of %d, each from a different rule (%s). No rule is repeating, so there is nothing to tune. Every page was still sent.",
+			plural(len(incidents), "incident", "incidents"), budget, strings.Join(names, ", "))
+	}
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
 }
 

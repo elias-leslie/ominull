@@ -137,6 +137,10 @@ type alertEvidence struct {
 	// upload went to; FirstUpload what was sent there since first contact.
 	Destination string `json:"destination"`
 	FirstUpload *int64 `json:"first_upload_bytes"`
+	// A threat-list match's confidence, threat type and the endpoint's action.
+	IntelConf *int   `json:"intel_confidence"`
+	IntelType string `json:"intel_type"`
+	Action    string `json:"action"`
 }
 
 func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedAlert {
@@ -220,7 +224,7 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	case "PORT_SCAN_RECON":
 		out.What = fmt.Sprintf("%s on %s tried many different ports on %s within 10 seconds", who, host, orUnknown(a.DstIP))
 	case "THREAT_INTEL_MATCH":
-		out.What = fmt.Sprintf("%s contacted %s, an address on a threat list", host, orUnknown(a.DstIP))
+		out.What = intelWhat(a, ev, who, proc != "", host)
 	case "C2_BEACONING":
 		out.What = fmt.Sprintf("%s on %s contacted %s on a steady timer, the way remote-control malware checks in", who, host, orUnknown(a.DstIP))
 	case "BANDWIDTH_SPIKE":
@@ -245,10 +249,14 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	case "DECOY_TOUCH":
 		out.What = fmt.Sprintf("%s on %s connected to %s, a decoy address nothing legitimate uses", who, host, orUnknown(a.DstIP))
 	case "LAB_ESCAPE":
-		n := max(len(ev.Hosts), 1)
-		out.What = fmt.Sprintf("%s on lab host %s reached %s outside the lab", who, host, plural(n, "host", "hosts"))
+		where := "outside the lab"
 		if z := zoneWord(ev.TargetZone); z != "" {
-			out.What += " on the " + z + " network"
+			where = "on the " + z + " network, outside the lab"
+		}
+		if len(ev.Hosts) > 1 {
+			out.What = fmt.Sprintf("%s on lab host %s reached %d hosts %s", who, host, len(ev.Hosts), where)
+		} else {
+			out.What = fmt.Sprintf("%s on lab host %s connected to %s %s", who, host, destPhrase("", a.DstIP, a.DstPort, ""), where)
 		}
 	case "NEW_PLACE_UPLOAD":
 		name := firstName(ev.SNI, ev.Domain, ev.Destination)
@@ -258,7 +266,7 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		}
 		out.What = fmt.Sprintf("%s on %s sent %s to %s, somewhere this device never sent anything before", who, host, sent, destPhrase(name, a.DstIP, a.DstPort, ev.Owner))
 	case "COLLECTOR_HEALTH":
-		out.What = fmt.Sprintf("The OmniNull agent on %s reported an impossible transfer rate; those samples were left out of the figures", host)
+		out.What = fmt.Sprintf("The OmniNull agent on %s reported an impossible transfer rate, a counter glitch left out of the figures (nothing to do)", host)
 	case "AGENT_UPLOAD_VOLUME":
 		out.What = fmt.Sprintf("%s on %s uploaded much more than in an ordinary hour", who, host)
 	case "AGENT_DNS_BYPASS":
@@ -327,6 +335,53 @@ func touchesFloorPort(ports []int, dstPort uint16) bool {
 		}
 	}
 	return false
+}
+
+var intelInDescription = regexp.MustCompile(`\(([^,()]+), confidence (\d+)%\)\. Endpoint reported action: (\w+)`)
+
+// intelWhat describes a threat-list match: who connected where, what the list
+// calls the address and how sure it is, and whether it was let through. A
+// match below intel_page_confidence says so (it is recorded, not paged). A
+// match stored before the evidence carried these is read from its
+// description.
+func intelWhat(a storage.AnomalyAlert, ev alertEvidence, who string, named bool, host string) string {
+	kind, action := ev.IntelType, ev.Action
+	conf := -1
+	if ev.IntelConf != nil {
+		conf = *ev.IntelConf
+	}
+	if m := intelInDescription.FindStringSubmatch(a.Description); m != nil {
+		if kind == "" {
+			kind = m[1]
+		}
+		if conf < 0 {
+			fmt.Sscanf(m[2], "%d", &conf)
+		}
+		if action == "" {
+			action = m[3]
+		}
+	}
+	subject := host
+	if named {
+		subject = who + " on " + host
+	}
+	out := fmt.Sprintf("%s connected to %s, an address on a threat list", subject, orUnknown(a.DstIP))
+	switch {
+	case kind != "" && conf >= 0:
+		out += fmt.Sprintf(" (%s, %d%% sure)", kind, conf)
+	case conf >= 0:
+		out += fmt.Sprintf(" (%d%% sure)", conf)
+	}
+	switch strings.ToUpper(action) {
+	case "PERMIT":
+		out += "; it was let through"
+	case "BLOCK":
+		out += "; it was blocked"
+	}
+	if storage.AlertClass(a) != storage.ClassPage && conf >= 0 {
+		out += "; too weak a match to page"
+	}
+	return out
 }
 
 // zoneWord names a network zone in owner words ("" when unknown).

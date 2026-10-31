@@ -324,7 +324,7 @@ func TestNightshiftFeedDigestIsANote(t *testing.T) {
 	if f.StatusID != ocsfStatusNew || f.SeverityID != ocsfSevInformational {
 		t.Fatalf("digest = status %d severity %d", f.StatusID, f.SeverityID)
 	}
-	if !strings.HasPrefix(f.Message, "3 findings recorded in the last 24 h, none of them asking for you: ") ||
+	if !strings.HasPrefix(f.Message, "3 findings recorded in the last 24 h, none asking for you. Most common: ") ||
 		!strings.Contains(f.Message, "(2 times)") || strings.Contains(f.Message, "decoy") {
 		t.Fatalf("digest message = %q", f.Message)
 	}
@@ -363,7 +363,7 @@ func TestNightshiftFeedDetectionHealthNamesTheNoisiestRule(t *testing.T) {
 		}
 	}
 	page("a", "C2_BEACONING", "inc-a", "")
-	if f := find(); f.StatusID != ocsfStatusResolved || !strings.Contains(f.Message, "within the budget of 1") {
+	if f := find(); f.StatusID != ocsfStatusResolved || !strings.Contains(f.Message, "within the weekly page budget of 1") {
 		t.Fatalf("one incident = %d %q", f.StatusID, f.Message)
 	}
 	// A page that joined inc-a is the same incident; a drill page is not counted.
@@ -379,7 +379,7 @@ func TestNightshiftFeedDetectionHealthNamesTheNoisiestRule(t *testing.T) {
 	page("c", "DECOY_TOUCH", "inc-c", "")
 	f := find()
 	if f.StatusID != ocsfStatusNew || f.SeverityID != ocsfSevInformational ||
-		f.Message != "3 incidents paged in the last 7 days, over the budget of 1. The noisiest rule is beacon (2 incidents); if those were not worth a page, tune that rule. Nothing was held back." {
+		f.Message != "3 incidents paged in the last 7 days, more than the weekly page budget of 1. The noisiest rule is beacon (2 incidents); if those were not worth a page, tune that rule. Every page was still sent." {
 		t.Fatalf("over budget = %d/%d %q", f.StatusID, f.SeverityID, f.Message)
 	}
 }

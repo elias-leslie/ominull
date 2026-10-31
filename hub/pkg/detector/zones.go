@@ -134,9 +134,9 @@ func (e *Engine) NoteImplausibleRate(ev storage.Event, endpoint storage.Endpoint
 	e.recordAnomaly(ev, threatintel.GeoRecord{}, endpoint, storage.AnomalyAlert{
 		ID: uuid.New().String(), TenantID: ev.TenantID, EndpointID: ev.EndpointID, Hostname: endpoint.Hostname,
 		AnomalyType: "COLLECTOR_HEALTH", Severity: "LOW",
-		Title:       fmt.Sprintf("Sensor on %s reported an impossible transfer rate", firstNonEmpty(endpoint.Hostname, ev.EndpointID)),
-		Description: fmt.Sprintf("%s reported a connection from %s at %.0f Mbit/s, above the %.0f Mbit/s limit (max_plausible_rate_mbps). That is a byte counter that wrapped or went backwards, not real traffic. The connection is kept with its bytes marked unmeasured, so it does not reach the bandwidth figures or any baseline.", plural(count, "sample"), firstNonEmpty(ev.ProcessPath, "an unattributed process"), rate/125000, limit/125000),
-		Details:     fmt.Sprintf("Process: %s | Target: %s:%d | Bytes out as reported: %d | Bytes in as reported: %d | Samples dropped in this batch: %d", firstNonEmpty(ev.ProcessPath, "-"), ev.DstIP, ev.DstPort, ev.BytesOut, ev.BytesIn, count),
+		Title:       fmt.Sprintf("OmniNull agent on %s reported an impossible transfer rate", firstNonEmpty(endpoint.Hostname, ev.EndpointID)),
+		Description: fmt.Sprintf("The agent reported %s from %s at %.0f Mbit/s, more than any link here carries (the limit is %.0f Mbit/s). That is a byte counter that wrapped or ran backwards, not real traffic. The connection is kept, but its byte counts are left out of the bandwidth figures. Nothing to do.", plural(count, "reading"), firstNonEmpty(baseName(ev.ProcessPath), "an unattributed process"), rate/125000, limit/125000),
+		Details:     fmt.Sprintf("Process: %s | Target: %s:%d | Bytes out as reported: %d | Bytes in as reported: %d | Readings left out in this batch: %d", firstNonEmpty(ev.ProcessPath, "-"), ev.DstIP, ev.DstPort, ev.BytesOut, ev.BytesIn, count),
 		Evidence:    string(evidence),
 		ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
 	})

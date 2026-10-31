@@ -190,7 +190,7 @@ func TestNightshiftFeedOwnAutomationDoesNotPage(t *testing.T) {
 	f = read()
 	got = listed(f)
 	if f.SeverityID != ocsfSevHigh || len(got) != 2 || got[0].ID != "a-real" || got[1].ID != "a-own" ||
-		!strings.HasPrefix(f.Message, "srv-01 contacted 203.0.113.9") {
+		!strings.HasPrefix(f.Message, "srv-01 connected to 203.0.113.9") {
 		t.Fatalf("real alert not paging first: sev=%d msg=%q %+v", f.SeverityID, f.Message, got)
 	}
 }
@@ -635,12 +635,21 @@ func TestDescribeAlertCarriesClassAndIncident(t *testing.T) {
 			Evidence: `{"class":"page","incident":"inc-d"}`}, "page", "inc-d", "ssh on lap connected to 10.0.0.250, a decoy address nothing legitimate uses", false},
 		{storage.AnomalyAlert{ID: "l", AnomalyType: "LAB_ESCAPE", Severity: "CRITICAL", Hostname: "guest", ProcessPath: "/usr/bin/python3", DstIP: "10.0.0.77", DstPort: 8080,
 			Evidence: `{"class":"page","incident":"inc-x","escalation":true,"target_zone":"home","lab_escape_hosts":["10.0.0.77","10.0.0.78"]}`},
-			"page", "inc-x", "python3 on lab host guest reached 2 hosts outside the lab on the home network", true},
+			"page", "inc-x", "python3 on lab host guest reached 2 hosts on the home network, outside the lab", true},
 		{storage.AnomalyAlert{ID: "n", AnomalyType: "NEW_PLACE_UPLOAD", Severity: "HIGH", Hostname: "lap", ProcessPath: "/usr/bin/curl", DstIP: "198.51.100.40", DstPort: 443,
 			Evidence: `{"class":"page","incident":"inc-n","destination":"attacker.example","first_upload_bytes":2097152,"domain":"drop.attacker.example"}`},
 			"page", "inc-n", "curl on lap sent 2.0 MB to drop.attacker.example (198.51.100.40:443), somewhere this device never sent anything before", false},
 		{storage.AnomalyAlert{ID: "c", AnomalyType: "COLLECTOR_HEALTH", Severity: "LOW", Hostname: "win", HeldReason: storage.HeldHunt, Evidence: `{"class":"record"}`},
-			"record", "", "The OmniNull agent on win reported an impossible transfer rate; those samples were left out of the figures", false},
+			"record", "", "The OmniNull agent on win reported an impossible transfer rate, a counter glitch left out of the figures (nothing to do)", false},
+		{storage.AnomalyAlert{ID: "l1", AnomalyType: "LAB_ESCAPE", Severity: "CRITICAL", Hostname: "guest", ProcessPath: "/usr/bin/curl", DstIP: "10.0.0.5", DstPort: 445,
+			Evidence: `{"class":"page","incident":"inc-l1","target_zone":"infra","lab_escape_hosts":["10.0.0.5"]}`},
+			"page", "inc-l1", "curl on lab host guest connected to 10.0.0.5:445 on the infrastructure network, outside the lab", false},
+		{storage.AnomalyAlert{ID: "ti", AnomalyType: "THREAT_INTEL_MATCH", Severity: "CRITICAL", Hostname: "lap", ProcessPath: "/usr/bin/curl", DstIP: "203.0.113.9",
+			Evidence: `{"class":"page","incident":"inc-ti","intel_confidence":90,"intel_type":"botnet_c2","action":"PERMIT"}`},
+			"page", "inc-ti", "curl on lap connected to 203.0.113.9, an address on a threat list (botnet_c2, 90% sure); it was let through", false},
+		{storage.AnomalyAlert{ID: "ti-low", AnomalyType: "THREAT_INTEL_MATCH", Severity: "HIGH", Hostname: "lap", DstIP: "203.0.113.9", HeldReason: storage.HeldHunt,
+			Description: "Traffic matched indicator 203.0.113.9 from feed (scanner, confidence 40%). Endpoint reported action: BLOCK.", Evidence: `{"class":"record"}`},
+			"record", "", "lap connected to 203.0.113.9, an address on a threat list (scanner, 40% sure); it was blocked; too weak a match to page", false},
 		{storage.AnomalyAlert{ID: "o", AnomalyType: "OFF_HOURS_ACTIVITY", Severity: "LOW", Hostname: "ws", Title: "Off-hours", HeldReason: storage.HeldHunt},
 			"record", "", "Off-hours on ws", false},
 		{storage.AnomalyAlert{ID: "old", AnomalyType: "C2_BEACONING", Severity: "MEDIUM", Hostname: "ws", DstIP: "203.0.113.9"},

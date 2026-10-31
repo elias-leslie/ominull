@@ -452,7 +452,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Timestamp:   now,
-				Title:       "Threat Intelligence Match",
+				Title:       fmt.Sprintf("%s connected to threat-listed %s", firstNonEmpty(endpoint.Hostname, ev.EndpointID), ev.DstIP),
 				Description: fmt.Sprintf("Traffic matched indicator %s from %s (%s, confidence %d%%). Endpoint reported action: %s.", ev.ThreatMatch.Value, ev.ThreatMatch.Source, ev.ThreatMatch.ThreatType, ev.ThreatMatch.Confidence, ev.Action),
 				Severity:    "CRITICAL",
 				Mitigated:   ev.Action == "BLOCK",
@@ -462,7 +462,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
-				Evidence:    fmt.Sprintf(`{"intel_confidence":%d}`, ev.ThreatMatch.Confidence),
+				Evidence:    intelEvidence(ev),
 				AnomalyType: "THREAT_INTEL_MATCH",
 				Technique:   "T1071",
 				Severity:    "CRITICAL",
@@ -1171,6 +1171,15 @@ func describeStorageService(geo threatintel.GeoRecord, ev storage.Event) string 
 }
 
 // humanBytes renders a transfer the way the finding reads out loud.
+// intelEvidence is what a threat-list match carries for the classifier and
+// the feed: the list's confidence and threat type, and whether the endpoint
+// let the connection through.
+func intelEvidence(ev storage.Event) string {
+	raw, _ := json.Marshal(map[string]any{"intel_confidence": ev.ThreatMatch.Confidence, "intel_type": ev.ThreatMatch.ThreatType,
+		"intel_source": ev.ThreatMatch.Source, "action": ev.Action})
+	return string(raw)
+}
+
 func humanBytes(n int64) string {
 	switch {
 	case n >= 1<<30:
