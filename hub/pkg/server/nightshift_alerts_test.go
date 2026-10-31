@@ -665,3 +665,101 @@ func TestDescribeAlertCarriesClassAndIncident(t *testing.T) {
 		t.Fatalf("class is always in the feed: %s", raw)
 	}
 }
+
+// Nightshift pages by class: each paging incident's newest alert is listed
+// before any incident's repeats, so a medium incident is never hidden behind
+// another's high repeats, and more_paging counts unlisted classed pages at any
+// severity.
+func TestNightshiftFeedListsEachIncidentBeforeRepeats(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	add := func(id, sev, incident string, age time.Duration) {
+		t.Helper()
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "srv-01", Hostname: "srv-01",
+			AnomalyType: "LATERAL_PORT_SWEEP", Severity: sev, Title: "sweep", Description: "d", Timestamp: now.Add(-age),
+			Evidence: `{"class":"page","incident":"` + incident + `"}`}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		add(fmt.Sprintf("a-%d", i), "HIGH", "inc-a", time.Duration(i+1)*time.Minute)
+	}
+	add("b-0", "MEDIUM", "inc-b", time.Hour)
+	key := issueFeedKey(t, srv)
+	summary := func() (map[string]any, []feedAlert) {
+		t.Helper()
+		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", key)
+		var doc feedDoc
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range doc.Findings {
+			if f.FindingInfo.UID == "ominull.anomalies.summary" {
+				raw, _ := json.Marshal(f.Unmapped["alerts"])
+				var got []feedAlert
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				return f.Unmapped, got
+			}
+		}
+		t.Fatal("no summary finding")
+		return nil, nil
+	}
+	um, got := summary()
+	if len(got) != feedAlertMax || got[0].ID != "a-0" || got[1].ID != "b-0" || um["more_paging"] != float64(1) {
+		t.Fatalf("first=%s second=%s more_paging=%v", got[0].ID, got[1].ID, um["more_paging"])
+	}
+	// Five high incidents fill the list: the medium incident left out is
+	// still counted as a page.
+	for i := 1; i < 5; i++ {
+		add(fmt.Sprintf("c-%d", i), "HIGH", fmt.Sprintf("inc-c%d", i), time.Duration(10+i)*time.Minute)
+	}
+	um, got = summary()
+	for _, a := range got {
+		if a.Incident == "inc-a" && a.ID != "a-0" {
+			t.Fatalf("a repeat (%s) listed while an incident was left out", a.ID)
+		}
+	}
+	if um["more_paging"] != float64(5) { // b-0 and inc-a's four repeats
+		t.Fatalf("more_paging = %v", um["more_paging"])
+	}
+}
+
+// "That was me" confirms the alerts the feed says ask: a classed page at any
+// severity; a record never, an unclassed medium never.
+func TestRelayAlertVerdictFollowsTheClass(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	hour := time.Now().UTC().Add(-time.Hour)
+	add := func(id, sev, evidence string) {
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "ws", Hostname: "ws",
+			AnomalyType: "LATERAL_PORT_SWEEP", Severity: sev, Title: "alert", Timestamp: hour, Evidence: evidence}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("medpage", "MEDIUM", `{"class":"page","incident":"inc-m"}`)
+	add("record", "HIGH", `{"class":"record"}`)
+	add("legacy", "MEDIUM", "")
+	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
+	var k struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(issue.Body.Bytes(), &k)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/nightshift/alerts/verdict",
+		strings.NewReader(`{"ids":["medpage","record","legacy"]}`))
+	req.Header.Set("X-API-Key", k.Key)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if w.Code != http.StatusOK || out["confirmed"] != float64(1) || len(out["skipped"].([]any)) != 2 {
+		t.Fatalf("verdict = %d %v", w.Code, out)
+	}
+	if _, _, _, ok := store.AnomalyResolution("medpage"); !ok {
+		t.Fatal("the classed medium page was not confirmed")
+	}
+}

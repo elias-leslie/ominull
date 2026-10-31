@@ -19,8 +19,9 @@ import (
 // Nightshift escalates it.
 //
 // The relay key carries it, like the approvals it already carries. With it the
-// relay can confirm benign only what Nightshift asks about: an open, high or
-// critical paging alert of the last 24 hours that the hub does not explain,
+// relay can confirm benign only what Nightshift asks about: an open paging
+// alert (a classed page at any severity, or high or critical from before the
+// classes) of the last 24 hours that the hub does not explain,
 // never a held or older one, a threat-list or beacon match (those the owner
 // closes in the console), or a malicious verdict. Each confirmation is
 // audited with the ids.
@@ -54,7 +55,10 @@ func (s *Server) handleRelayAlertVerdict(w http.ResponseWriter, r *http.Request)
 	tuning := s.store.GetDetectionTuning()
 	listed := map[string]bool{}
 	for _, a := range open {
-		if (a.Severity == "HIGH" || a.Severity == "CRITICAL") && !consoleOnly[a.AnomalyType] && describeAlert(a, tuning).Expected == "" {
+		// The alerts the feed says ask for the owner (feedAlert.pages: a
+		// classed page at any severity, or high or critical from before the
+		// classes), so "That was me" on any of them is Confirm benign.
+		if !consoleOnly[a.AnomalyType] && describeAlert(a, tuning).pages() {
 			listed[a.ID] = true
 		}
 	}

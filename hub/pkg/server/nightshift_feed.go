@@ -250,21 +250,25 @@ func (s *Server) anomalyDetailFinding(now time.Time, win storage.AnomalyWindow) 
 		beyond = win.Total - len(list)
 	}
 	// The alerts that page come first, so the list never hides one behind
-	// report-only alerts; within a severity the newest stay first.
+	// report-only alerts; within a severity the newest stay first. Among the
+	// pages, each incident's newest alert leads and its repeats follow, so a
+	// lower-severity incident is never hidden behind another's repeats.
 	slices.SortStableFunc(needs, func(a, b feedAlert) int { return alertSeverity(b.Severity) - alertSeverity(a.Severity) })
+	needs = incidentsFirst(needs)
 	alerts := append(needs, explained...)
 	if len(alerts) > feedAlertMax {
 		alerts = alerts[:feedAlertMax]
 	}
 	alerts = fitAlerts(alerts)
 	more := max(0, win.Total-len(alerts))
-	// more_paging counts the unlisted alerts that page (high or critical, not
-	// explained), so a reader that explains every listed one knows whether
+	// more_paging counts the unlisted alerts that page (feedAlert.pages: a
+	// classed page, or high or critical from before the classes; never one the
+	// hub explains), so a reader that explains every listed one knows whether
 	// anything it cannot see still asks. Alerts beyond the scan are unknown and
 	// counted as paging.
 	morePaging := beyond
 	for _, d := range needs[min(len(alerts), len(needs)):] {
-		if alertSeverity(d.Severity) >= ocsfSevHigh {
+		if d.pages() {
 			morePaging++
 		}
 	}
@@ -731,4 +735,24 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, doc)
+}
+
+// incidentsFirst orders described alerts (already worst first): the newest
+// alert of each paging incident, then every other alert that pages, then the
+// rest, each group keeping its order.
+func incidentsFirst(in []feedAlert) []feedAlert {
+	var lead, pages, rest []feedAlert
+	seen := map[string]bool{}
+	for _, d := range in {
+		switch {
+		case !d.pages():
+			rest = append(rest, d)
+		case d.Incident != "" && !seen[d.Incident]:
+			seen[d.Incident] = true
+			lead = append(lead, d)
+		default:
+			pages = append(pages, d)
+		}
+	}
+	return append(append(lead, pages...), rest...)
 }

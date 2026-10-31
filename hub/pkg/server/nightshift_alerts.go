@@ -68,6 +68,23 @@ type feedAlert struct {
 	Escalation bool   `json:"escalation,omitempty"`
 }
 
+// pages is whether a described alert asks for the owner, the rule Nightshift
+// applies to the feed: a page the hub classed (it carries its incident), or
+// an alert written before the classes (no incident) that is high or
+// critical. An alert the hub explains (Expected) never asks.
+func (d feedAlert) pages() bool {
+	if d.Expected != "" {
+		return false
+	}
+	switch {
+	case d.Class == storage.ClassRecord || d.Class == storage.ClassDigest:
+		return false
+	case d.Incident != "":
+		return d.Class == storage.ClassPage
+	}
+	return alertSeverity(d.Severity) >= ocsfSevHigh
+}
+
 const secretWord = `(?:pass(?:word|wd|phrase)?|pwd|token|secret|api[_-]?key|auth|bearer|credential|private[_-]?key)`
 
 var (
