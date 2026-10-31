@@ -7,6 +7,7 @@
 #include <aclapi.h>
 #include "../include/agent.h"
 #include "../include/hub_reply.h"
+#include "../include/cert_renewal.h"
 #include "../windows/udp_collector.h"
 #include "../windows/tcp_pending.h"
 #include "../include/forensics_windows.h"
@@ -932,6 +933,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             HubContact(accepted);
 
             Service_AdoptDeviceCredential(config, reply);
+            if (accepted) Service_AdoptRenewedClientCert(config, reply);
             if (accepted) Agent_TrustProcessHeartbeat(reply);
 
             // The hub answers with an agent_update descriptor when a newer
@@ -1201,6 +1203,74 @@ bool Service_AdoptDeviceCredential(AGENT_CONFIG* config, const char* responseJso
         fprintf(stderr, "[!] The unique credential is active, but the old inline agent configuration could not be rewritten.\n");
     }
     printf("[+] Hub-issued unique device credential installed; legacy shared-key authentication is no longer used by this agent.\n");
+    return true;
+}
+
+/* WriteProtectedBlob writes bytes into a file that is SYSTEM and Administrators
+ * only from the moment it exists (WriteProtectedFile restricts after writing,
+ * which is fine for a credential it then rewrites, less so for a key archive). */
+static bool WriteProtectedBlob(const char* path, const unsigned char* data, DWORD len) {
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, NULL)) {
+        return false;
+    }
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    LocalFree(sd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    BOOL ok = WriteFile(h, data, len, &wrote, NULL) && wrote == len && FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok) DeleteFileA(path);
+    return ok;
+}
+
+/* Service_AdoptRenewedClientCert installs the client certificate the hub
+ * renews in a heartbeat reply before the current one expires (cert_renewal.h,
+ * hub server/agent_cert.go). The new certificate is used only once the hub has
+ * accepted it on a connection of its own; until then, and on any failure, the
+ * endpoint keeps the certificate it has and the hub offers again later. The
+ * archive on disk is replaced too, so a restart that cannot reach the machine
+ * store still loads the renewed one. */
+bool Service_AdoptRenewedClientCert(const AGENT_CONFIG* config, const char* replyJson) {
+    if (!config || !replyJson || !config->client_pfx_path[0]) return false;
+    if (!strstr(replyJson, "\"client_certificate\":{")) return false;
+
+    static char b64[CERT_RENEWAL_B64_MAX];
+    static unsigned char pfx[CERT_RENEWAL_B64_MAX];
+    if (!CertRenewal_Field(replyJson, "pfx_b64", b64, sizeof(b64))) {
+        fprintf(stderr, "[!] The hub offered a renewed client certificate this agent could not read; keeping the current one.\n");
+        return false;
+    }
+    size_t n = Response_Base64Decode(b64, strlen(b64), pfx, sizeof(pfx));
+    SecureZeroMemory(b64, sizeof(b64));
+    const void* cert = n ? Hub_ImportClientCertPFX(config, pfx, (unsigned long)n) : NULL;
+    if (!cert) {
+        SecureZeroMemory(pfx, sizeof(pfx));
+        fprintf(stderr, "[!] The renewed client certificate from the hub did not import; keeping the current one.\n");
+        return false;
+    }
+    if (!Hub_ProbeClientCert(config, cert)) {
+        SecureZeroMemory(pfx, sizeof(pfx));
+        Hub_DiscardClientCert(cert);
+        fprintf(stderr, "[!] The hub did not accept the renewed client certificate on a test connection; keeping the current one.\n");
+        return false;
+    }
+
+    char staged[MAX_PATH + 8];
+    snprintf(staged, sizeof(staged), "%s.new", config->client_pfx_path);
+    bool onDisk = WriteProtectedBlob(staged, pfx, (DWORD)n) &&
+                  MoveFileExA(staged, config->client_pfx_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    SecureZeroMemory(pfx, sizeof(pfx));
+    if (!onDisk) {
+        DeleteFileA(staged);
+        fprintf(stderr, "[!] The renewed client certificate is in use, but %s could not be replaced (Error: %lu).\n",
+                config->client_pfx_path, GetLastError());
+    }
+    Hub_UseClientCert(cert);
+    Hub_ResetConnections();
+    printf("[+] Client certificate renewed by the hub and in use.\n");
     return true;
 }
 

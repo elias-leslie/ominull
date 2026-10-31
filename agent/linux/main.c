@@ -53,6 +53,7 @@
 #include "../include/gzip_encode.h"
 #include "../include/upload_queue.h"
 #include "../include/agent_update_linux.h"
+#include "../include/cert_renewal.h"
 
 #ifndef OMINULL_PROC_ROOT
 #define OMINULL_PROC_ROOT "/proc"
@@ -522,6 +523,13 @@ static bool WritePrivateFile(const char* path, const char* data, mode_t mode) {
         written += (size_t)n;
     }
     fchmod(fd, mode);
+    /* Callers rename these files over live credentials; what is renamed has
+     * to be on disk first, or a power cut leaves an empty key behind. */
+    if (fsync(fd) != 0) {
+        close(fd);
+        unlink(path);
+        return false;
+    }
     return close(fd) == 0;
 }
 
@@ -1530,11 +1538,22 @@ static struct curl_slist* SetupHubCurl(CURL* curl, const LINUX_AGENT_CONFIG* con
     return headers;
 }
 
+/* Set once the client certificate files have been replaced. The heartbeat
+ * handle keeps its connection and TLS session for as long as the hub keeps it
+ * open, so without a reset it would go on presenting the old certificate for
+ * as long as the connection lived. */
+static bool g_HubTlsReset = false;
+
 static bool RunHubCurlBody(const LINUX_AGENT_CONFIG* config, const char* url, const char* body,
                            size_t bodyLength, const char* const* extraHeaders, char* out, size_t outCap,
                            long timeoutMs) {
     if (out && outCap) out[0] = '\0';
     static CURL* curl = NULL;
+    if (curl && g_HubTlsReset) {
+        curl_easy_cleanup(curl);
+        curl = NULL;
+    }
+    g_HubTlsReset = false;
     if (!curl) {
         curl = curl_easy_init();
         if (!curl) return false;
@@ -2359,6 +2378,93 @@ static void AdoptDeviceCredential(LINUX_AGENT_CONFIG* config, const char* respJs
     printf("[+] Hub-issued unique device credential installed; legacy shared-key authentication is no longer used by this agent.\n");
 }
 
+/* ProbeClientCert proves a certificate and key complete a handshake the hub
+ * accepts, on a fresh handle so no pooled connection or resumed TLS session
+ * can stand in for the new pair. The hub verifies any certificate offered and
+ * refuses the handshake on one it does not trust, so a 200 here means it took
+ * this one. */
+static bool ProbeClientCert(const LINUX_AGENT_CONFIG* config, const char* certPath, const char* keyPath) {
+    LINUX_AGENT_CONFIG probe = *config;
+    size_t certLen = strlen(certPath), keyLen = strlen(keyPath);
+    if (certLen >= sizeof(probe.client_cert_path) || keyLen >= sizeof(probe.client_key_path)) return false;
+    memcpy(probe.client_cert_path, certPath, certLen + 1);
+    memcpy(probe.client_key_path, keyPath, keyLen + 1);
+    char url[sizeof(config->hub_url) + sizeof(config->endpoint_id) + 48];
+    snprintf(url, sizeof(url), "%s/api/v1/agent/config?endpoint_id=%s", config->hub_url, config->endpoint_id);
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+    char reply[4096];
+    HUB_RESPONSE_BUFFER response = { .data = reply, .cap = sizeof(reply), .len = 0, .overflow = false };
+    bool ok = false;
+    struct curl_slist* headers = SetupHubCurl(curl, &probe, url, NULL, 0, NULL, &response, 10000L);
+    if (headers) {
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        long status = 0;
+        if (curl_easy_perform(curl) == CURLE_OK &&
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status) == CURLE_OK)
+            ok = status == 200;
+        curl_slist_free_all(headers);
+    }
+    curl_easy_cleanup(curl);
+    return ok;
+}
+
+/* AdoptRenewedClientCert installs the client certificate the hub renewed in
+ * this heartbeat reply (cert_renewal.h). The new pair is written beside the
+ * old one, proved against the hub, and only then renamed into place, key
+ * first; if the certificate cannot follow, the old key is put back. Anything
+ * short of that keeps the current certificate, which stays valid until its own
+ * expiry, and the hub offers again later. */
+static void AdoptRenewedClientCert(const LINUX_AGENT_CONFIG* config, const char* respJson) {
+    if (!config || !respJson || !config->client_cert_path[0] || !config->client_key_path[0] ||
+        !strstr(respJson, "\"client_certificate\":{"))
+        return;
+    static char b64[CERT_RENEWAL_B64_MAX];
+    static char certPem[CERT_RENEWAL_PEM_MAX], keyPem[CERT_RENEWAL_PEM_MAX];
+    char newCert[sizeof(config->client_cert_path) + 8], newKey[sizeof(config->client_key_path) + 8];
+    char oldKey[sizeof(config->client_key_path) + 8];
+    snprintf(newCert, sizeof(newCert), "%s.new", config->client_cert_path);
+    snprintf(newKey, sizeof(newKey), "%s.new", config->client_key_path);
+    snprintf(oldKey, sizeof(oldKey), "%s.old", config->client_key_path);
+    bool parsed = CertRenewal_Field(respJson, "cert_pem_b64", b64, sizeof(b64)) &&
+                  CertRenewal_DecodePEM(b64, "-----BEGIN CERTIFICATE-----", certPem, sizeof(certPem)) > 0 &&
+                  CertRenewal_Field(respJson, "key_pem_b64", b64, sizeof(b64)) &&
+                  CertRenewal_DecodePEM(b64, "-----BEGIN ", keyPem, sizeof(keyPem)) > 0 &&
+                  strstr(keyPem, "PRIVATE KEY-----") != NULL;
+    if (!parsed) {
+        printf("[!] The hub sent a renewed client certificate that could not be read; keeping the current one.\n");
+    } else if (!WritePrivateFile(newKey, keyPem, 0600) || !WritePrivateFile(newCert, certPem, 0600)) {
+        printf("[!] A renewed client certificate could not be written beside %s; keeping the current one.\n",
+               config->client_cert_path);
+    } else if (!ProbeClientCert(config, newCert, newKey)) {
+        printf("[!] The hub did not accept the renewed client certificate on a test request; keeping the current one.\n");
+    } else {
+        unlink(oldKey);
+        bool keptOld = link(config->client_key_path, oldKey) == 0;
+        if (rename(newKey, config->client_key_path) != 0) {
+            printf("[!] The renewed client key could not replace %s; keeping the current certificate.\n",
+                   config->client_key_path);
+        } else if (rename(newCert, config->client_cert_path) != 0) {
+            if (keptOld && rename(oldKey, config->client_key_path) == 0) {
+                printf("[!] The renewed certificate could not replace %s; the previous key was restored.\n",
+                       config->client_cert_path);
+            } else {
+                printf("[-] The renewed certificate could not replace %s and the previous key could not be "
+                       "restored; this endpoint may need re-enrolment.\n", config->client_cert_path);
+            }
+        } else {
+            g_HubTlsReset = true;
+            printf("[+] Installed the client certificate the hub renewed; the previous one is no longer used.\n");
+        }
+        unlink(oldKey);
+    }
+    unlink(newKey);
+    unlink(newCert);
+    memset(b64, 0, sizeof(b64));
+    memset(keyPem, 0, sizeof(keyPem));
+    memset(certPem, 0, sizeof(certPem));
+}
+
 // IsSafeToken rejects anything outside the character set a package URL or version can
 // legitimately use, so a malformed hub response can never reach the shell as an operator.
 static bool IsSafeToken(const char* s, bool allowUrlChars) {
@@ -3148,10 +3254,12 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
                  "\"%s\",\"role\":\"%s\",\"hostname\":\"%s\",\"os\":\"%s\",\"ip\":\"%s\",\"mac\":\"%s\","
                  "\"driver_version\":\"%s\",\"update_capability\":\"deb\",\"install_type\":\"%s\",\"package_"
                  "identifier\":\"%s\",\"registered_package_version\":\"%s\",\"provenance_status\":\"%s\","
-                 "\"evidence_signing_key\":\"%s\",\"batch_id\":\"%s\",\"response_capabilities\":%s,\"trust\":%s,\"events\":[",
+                 "\"evidence_signing_key\":\"%s\",\"batch_id\":\"%s\",\"response_capabilities\":%s,\"trust\":%s,"
+                 "\"cert_renewal\":%s,\"events\":[",
                  header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
                  header[8], header[9], header[10], header[11], header[12], batchID,
-                 g_Trust.have_key[TRUST_KEY_RESPONSE] ? OMINULL_CAPS_LINUX : OMINULL_CAPS_NO_RESPONSE_KEY, trustReport);
+                 g_Trust.have_key[TRUST_KEY_RESPONSE] ? OMINULL_CAPS_LINUX : OMINULL_CAPS_NO_RESPONSE_KEY, trustReport,
+                 config->client_cert_path[0] && config->client_key_path[0] ? "true" : "false");
 
     for (size_t i = 0; i < flowCount; i++) {
         const LINUX_FLOW_EVENT* f = &flows[i];
@@ -3288,6 +3396,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
     if (accepted && !g_FinalBatch) {
         g_HubTakesGzip = Upload_HubAcceptsGzip(respBuf);
         AdoptDeviceCredential(config, respBuf);
+        AdoptRenewedClientCert(config, respBuf);
         Trust_ProcessHeartbeat(&g_Trust, respBuf, strlen(respBuf), (int64_t)time(NULL));
         SyncEnforcement(config, respBuf);
         ApplyAgentUpdate(config, respBuf);

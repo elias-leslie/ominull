@@ -453,6 +453,8 @@ char *Hub_BuildTelemetryJSON(const AGENT_CONFIG *config, const OMINULL_EVENT *ev
     FIELD("mac", config->primary_mac);
     FIELD("driver_version", OMINULL_AGENT_VERSION);
     FIELD("update_capability", "msi");
+    if (config->client_pfx_path[0])
+        APPEND(",\"cert_renewal\":true");
     FIELD("install_type", config->install_type);
     FIELD("package_identifier", config->package_identifier);
     FIELD("registered_package_version", config->registered_package_version);
@@ -917,6 +919,67 @@ bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const cha
     LeaveCriticalSection(&g_http.lock);
 
     return (bResults && (dwStatusCode >= 200 && dwStatusCode < 300));
+}
+
+void Hub_ResetConnections(void) {
+    if (!HubHTTPEnter()) return;
+    HubHTTPDropConnection();
+    /* WinHTTP pools sockets per session, so the session goes too; the next
+     * request opens a new one and handshakes again. */
+    if (g_http.session) {
+        WinHttpCloseHandle(g_http.session);
+        g_http.session = NULL;
+    }
+    LeaveCriticalSection(&g_http.lock);
+}
+
+/* Hub_ProbeClientCert proves the hub accepts a certificate before it replaces
+ * the one in use: one GET of this endpoint's config on a session of its own,
+ * so no pooled connection or cached TLS session can stand in for it. The hub
+ * verifies any certificate offered and refuses the handshake on one it does
+ * not trust, so a 200 means it took this one. No fallback without the
+ * certificate here: that would prove nothing. */
+bool Hub_ProbeClientCert(const AGENT_CONFIG* config, const void* certContext) {
+    if (!certContext || !Hub_TransportReady(config) || !Hub_UsesTLS(config)) return false;
+    char host[256] = {0};
+    WORD port = 0;
+    BOOL isHttps = FALSE;
+    Hub_SplitURL(config->hub_url, host, sizeof(host), &port, &isHttps);
+    WCHAR wHost[256] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, host, -1, wHost, 256);
+    char path[256];
+    snprintf(path, sizeof(path), "/api/v1/agent/config?endpoint_id=%s", config->endpoint_id);
+    WCHAR wPath[256] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wPath, 256);
+
+    bool ok = false;
+    HINTERNET session = WinHttpOpen(L"OminullAgent/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET connect = session ? WinHttpConnect(session, wHost, port, 0) : NULL;
+    HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", wPath, NULL, WINHTTP_NO_REFERER,
+                                                     WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : NULL;
+    if (request && session) {
+        WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
+        WCHAR wKey[128] = {0}, wHeaders[256] = {0};
+        MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
+        swprintf(wHeaders, 256, L"%ls: %ls\r\n", strncmp(config->api_key, "omd_", 4) == 0
+                 ? L"X-Ominull-Device-Credential" : L"X-API-Key", wKey);
+        DWORD status = 0, size = sizeof(status);
+        if (WinHttpSetOption(request, WINHTTP_OPTION_CLIENT_CERT_CONTEXT, (LPVOID)certContext, sizeof(CERT_CONTEXT)) &&
+            WinHttpAddRequestHeaders(request, wHeaders, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE) &&
+            WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+            WinHttpReceiveResponse(request, NULL) && Hub_VerifyRequestPin(request, config) &&
+            WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) {
+            ok = status == 200;
+        }
+        SecureZeroMemory(wKey, sizeof(wKey));
+        SecureZeroMemory(wHeaders, sizeof(wHeaders));
+    }
+    if (request) WinHttpCloseHandle(request);
+    if (connect) WinHttpCloseHandle(connect);
+    if (session) WinHttpCloseHandle(session);
+    return ok;
 }
 
 bool Hub_PostPathJSON(const AGENT_CONFIG* config, const char* apiPath, const char* jsonBody, char* respOut, size_t respCap) {

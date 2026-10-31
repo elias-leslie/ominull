@@ -138,6 +138,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_agent_update_linux" "${ROOT_DIR}/agent/tests/test_agent_update_linux.c"
     "${ROOT_DIR}/build/test_agent_update_linux"
+    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
+        -o "${ROOT_DIR}/build/test_cert_renewal" "${ROOT_DIR}/agent/tests/test_cert_renewal.c"
+    "${ROOT_DIR}/build/test_cert_renewal"
 fi
 
 if [ "${DO_HUB}" -eq 1 ]; then

@@ -337,15 +337,18 @@ static PCCERT_CONTEXT FindInMachineStore(const char* endpointID) {
         NCRYPT_KEY_HANDLE key = 0;
         DWORD keySpec = 0;
         BOOL owned = FALSE;
+        /* After a renewal the store holds the old certificate and the new
+         * one, both in date for a while. The one that expires last is the
+         * renewed one. */
+        if (out && CompareFileTime(&cur->pCertInfo->NotAfter, &out->pCertInfo->NotAfter) <= 0) continue;
         if (CryptAcquireCertificatePrivateKey(cur, CRYPT_ACQUIRE_SILENT_FLAG, NULL,
                                               &key, &keySpec, &owned)) {
             if (owned) {
                 if (keySpec == CERT_NCRYPT_KEY_SPEC) NCryptFreeObject(key);
                 else CryptReleaseContext((HCRYPTPROV)key, 0);
             }
+            if (out) CertFreeCertificateContext(out);
             out = CertDuplicateCertificateContext(cur);
-            CertFreeCertificateContext(cur);
-            break;
         }
     }
 
@@ -542,3 +545,73 @@ bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
 
     return false;
 }
+
+/* ---------------------------------------------------------------------------
+ * Renewal (Service_AdoptRenewedClientCert drives these).
+ * ------------------------------------------------------------------------- */
+
+const void* Hub_ImportClientCertPFX(const AGENT_CONFIG* config, const unsigned char* pfx, unsigned long len) {
+    if (!config || !pfx || len == 0) return NULL;
+    CRYPT_DATA_BLOB blob;
+    blob.cbData = (DWORD)len;
+    blob.pbData = (BYTE*)pfx;
+    /* Persisted in the machine keyset for the reason given above
+     * LoadClientCertFromPFX: schannel cannot sign with an ephemeral key. */
+    HCERTSTORE store = PFXImportCertStore(&blob, L"", CRYPT_MACHINE_KEYSET);
+    if (!store) store = PFXImportCertStore(&blob, NULL, CRYPT_MACHINE_KEYSET);
+    if (!store) return NULL;
+    PCCERT_CONTEXT found = CertFindCertificateInStore(store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                                      0, CERT_FIND_HAS_PRIVATE_KEY, NULL, NULL);
+    PCCERT_CONTEXT out = NULL;
+    if (found) {
+        char name[128] = {0};
+        CertGetNameStringA(found, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, name, sizeof(name));
+        if (_stricmp(name, config->endpoint_id) == 0 && CertVerifyTimeValidity(NULL, found->pCertInfo) == 0)
+            out = CertDuplicateCertificateContext(found);
+        CertFreeCertificateContext(found);
+    }
+    CertCloseStore(store, 0);
+    return out;
+}
+
+void Hub_UseClientCert(const void* certContext) {
+    if (!certContext) return;
+    FileInMachineStore((PCCERT_CONTEXT)certContext);
+    /* The context it replaces is not freed: another thread may be handing it
+     * to WinHTTP at this moment. One small context a year is the price. */
+    InterlockedExchangePointer((PVOID volatile*)&g_cached, (PVOID)certContext);
+    g_certUnusable = false;
+    g_clientCertLoaded = true;
+}
+
+/* Hub_DiscardClientCert drops a renewed certificate the hub would not accept,
+ * key container included: the import persisted it in the machine keyset, and
+ * the hub offers again an hour later. */
+void Hub_DiscardClientCert(const void* certContext) {
+    PCCERT_CONTEXT cert = (PCCERT_CONTEXT)certContext;
+    if (!cert) return;
+    DWORD size = 0;
+    if (CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, NULL, &size) && size > 0) {
+        CRYPT_KEY_PROV_INFO* info = (CRYPT_KEY_PROV_INFO*)malloc(size);
+        if (info && CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, info, &size)) {
+            if (info->dwProvType == 0) {
+                NCRYPT_PROV_HANDLE prov = 0;
+                NCRYPT_KEY_HANDLE key = 0;
+                if (NCryptOpenStorageProvider(&prov, info->pwszProvName, 0) == ERROR_SUCCESS) {
+                    if (NCryptOpenKey(prov, &key, info->pwszContainerName, 0,
+                                      info->dwFlags & NCRYPT_MACHINE_KEY_FLAG) == ERROR_SUCCESS) {
+                        NCryptDeleteKey(key, 0); /* frees the handle */
+                    }
+                    NCryptFreeObject(prov);
+                }
+            } else {
+                HCRYPTPROV gone = 0;
+                CryptAcquireContextW(&gone, info->pwszContainerName, info->pwszProvName, info->dwProvType,
+                                     CRYPT_DELETE_KEYSET | (info->dwFlags & CRYPT_MACHINE_KEYSET));
+            }
+        }
+        free(info);
+    }
+    CertFreeCertificateContext(cert);
+}
+

@@ -209,6 +209,18 @@ bool Hub_HasClientCert(void);
 // err was ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED and the request has been told
 // there is no certificate, so the caller should send it once more.
 bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err);
+/* Client certificate renewal (cert_renewal.h, Service_AdoptRenewedClientCert).
+ * Hub_ImportClientCertPFX imports an archive the hub issued and returns its
+ * context only when it carries its key, names this endpoint and is in date;
+ * Hub_ProbeClientCert proves the hub accepts it; Hub_UseClientCert files it in
+ * the machine store and presents it from then on; Hub_ResetConnections drops
+ * pooled connections so the next request handshakes with it. */
+const void* Hub_ImportClientCertPFX(const AGENT_CONFIG* config, const unsigned char* pfx, unsigned long len);
+bool Hub_ProbeClientCert(const AGENT_CONFIG* config, const void* certContext);
+void Hub_UseClientCert(const void* certContext);
+void Hub_DiscardClientCert(const void* certContext);
+void Hub_ResetConnections(void);
+bool Service_AdoptRenewedClientCert(const AGENT_CONFIG* config, const char* replyJson);
 // Splits a hub URL into host, port and scheme. port is WinHTTP's INTERNET_PORT,
 // spelled as the WORD it is so this header stays usable without winhttp.h.
 void Hub_SplitURL(const char* hubUrl, char* host, size_t hostLen, WORD* port, BOOL* isHttps);
