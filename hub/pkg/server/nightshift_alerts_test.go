@@ -343,8 +343,8 @@ func TestDescribeAlertActor(t *testing.T) {
 	}
 }
 
-// The agent egress digest names what happened and never asks: the alerts it
-// names are rated in the Open alerts summary.
+// The digest names what the agent runtimes did (recorded findings) and never
+// asks.
 func TestAgentEgressDigestIsInformationalAndNamed(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
@@ -354,7 +354,7 @@ func TestAgentEgressDigestIsInformationalAndNamed(t *testing.T) {
 		ev, _ := json.Marshal(map[string]any{"command_line": "bash -c </dev/tcp/" + ip + "/443", "protocol": 6, "bytes_out": 0})
 		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: fmt.Sprintf("p%d", i), TenantID: "t-01", EndpointID: "lab", Hostname: "ominull-target-linux",
 			AnomalyType: "AGENT_DNS_BYPASS", Severity: "HIGH", Title: "bash resolving names outside the estate's resolvers", ProcessPath: "/usr/bin/bash",
-			DstIP: ip, DstPort: 443, Evidence: string(ev), Timestamp: now.Add(-time.Minute)}); err != nil {
+			DstIP: ip, DstPort: 443, Evidence: string(ev), HeldReason: storage.HeldHunt, Timestamp: now.Add(-time.Minute)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -367,10 +367,10 @@ func TestAgentEgressDigestIsInformationalAndNamed(t *testing.T) {
 	seen := 0
 	for _, f := range doc.Findings {
 		switch f.FindingInfo.UID {
-		case "ominull.anomalies.agent_egress":
+		case "ominull.anomalies.digest":
 			seen++
 			if f.SeverityID != ocsfSevInformational || f.StatusID != ocsfStatusNew ||
-				!strings.Contains(f.Message, "bash on ominull-target-linux connected straight to Cloudflare DNS (1.0.0.1:443)") ||
+				!strings.Contains(f.Message, "bash on ominull-target-linux connected straight to") ||
 				!strings.Contains(f.Message, "(connection test)") || strings.Contains(f.Message, "resolver bypasses") {
 				t.Errorf("digest = %d %q", f.SeverityID, f.Message)
 			}
@@ -618,5 +618,41 @@ func TestNightshiftFeedListsPagesFirstAndCountsUnlistedPages(t *testing.T) {
 		if a.Severity != "HIGH" {
 			t.Fatalf("a %s alert listed while a page was left out", a.Severity)
 		}
+	}
+}
+
+// Each alert carries its class and incident, and the new rules read in owner
+// words.
+func TestDescribeAlertCarriesClassAndIncident(t *testing.T) {
+	t.Parallel()
+	tuning := storage.DefaultDetectionTuning()
+	for _, c := range []struct {
+		a                     storage.AnomalyAlert
+		class, incident, what string
+		escalation            bool
+	}{
+		{storage.AnomalyAlert{ID: "d", AnomalyType: "DECOY_TOUCH", Severity: "CRITICAL", Hostname: "lap", ProcessPath: "/usr/bin/ssh", DstIP: "10.0.0.250", DstPort: 22,
+			Evidence: `{"class":"page","incident":"inc-d"}`}, "page", "inc-d", "ssh on lap connected to 10.0.0.250, a decoy address nothing legitimate uses", false},
+		{storage.AnomalyAlert{ID: "l", AnomalyType: "LAB_ESCAPE", Severity: "CRITICAL", Hostname: "guest", ProcessPath: "/usr/bin/python3", DstIP: "10.0.0.77", DstPort: 8080,
+			Evidence: `{"class":"page","incident":"inc-x","escalation":true,"target_zone":"home","lab_escape_hosts":["10.0.0.77","10.0.0.78"]}`},
+			"page", "inc-x", "python3 on lab host guest reached 2 hosts outside the lab on the home network", true},
+		{storage.AnomalyAlert{ID: "n", AnomalyType: "NEW_PLACE_UPLOAD", Severity: "HIGH", Hostname: "lap", ProcessPath: "/usr/bin/curl", DstIP: "198.51.100.40", DstPort: 443,
+			Evidence: `{"class":"page","incident":"inc-n","destination":"attacker.example","first_upload_bytes":2097152,"domain":"drop.attacker.example"}`},
+			"page", "inc-n", "curl on lap sent 2.0 MB to drop.attacker.example (198.51.100.40:443), somewhere this device never sent anything before", false},
+		{storage.AnomalyAlert{ID: "c", AnomalyType: "COLLECTOR_HEALTH", Severity: "LOW", Hostname: "win", HeldReason: storage.HeldHunt, Evidence: `{"class":"record"}`},
+			"record", "", "The OmniNull agent on win reported an impossible transfer rate; those samples were left out of the figures", false},
+		{storage.AnomalyAlert{ID: "o", AnomalyType: "OFF_HOURS_ACTIVITY", Severity: "LOW", Hostname: "ws", Title: "Off-hours", HeldReason: storage.HeldHunt},
+			"record", "", "Off-hours on ws", false},
+		{storage.AnomalyAlert{ID: "old", AnomalyType: "C2_BEACONING", Severity: "MEDIUM", Hostname: "ws", DstIP: "203.0.113.9"},
+			"page", "", "A program on ws contacted 203.0.113.9 on a steady timer, the way remote-control malware checks in", false},
+	} {
+		got := describeAlert(c.a, tuning)
+		if got.Class != c.class || got.Incident != c.incident || got.What != c.what || got.Escalation != c.escalation {
+			t.Errorf("%s: class %q incident %q escalation %v what %q", c.a.ID, got.Class, got.Incident, got.Escalation, got.What)
+		}
+	}
+	raw, _ := json.Marshal(describeAlert(storage.AnomalyAlert{ID: "x", AnomalyType: "DECOY_TOUCH"}, tuning))
+	if !strings.Contains(string(raw), `"class":"page"`) {
+		t.Fatalf("class is always in the feed: %s", raw)
 	}
 }

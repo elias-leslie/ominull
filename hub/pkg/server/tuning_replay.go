@@ -93,7 +93,12 @@ func (s *Server) handleTuningReplay(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	res := detector.Replay(alerts, tuning)
+	endpoints, observed, err := s.replayEndpoints()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	res := detector.ReplayClassified(alerts, tuning, endpoints, observed)
 	sigs := res.Signatures
 	if len(sigs) > replayTopSignature {
 		sigs = sigs[:replayTopSignature]
@@ -113,6 +118,22 @@ func (s *Server) handleTuningReplay(w http.ResponseWriter, r *http.Request) {
 		"signatures": sigs,
 		"truncated":  len(alerts) >= storage.MaxReplayAlerts,
 	})
+}
+
+// replayEndpoints is what the replay classifies with: the endpoints and those
+// whose telemetry has shown an agent runtime.
+func (s *Server) replayEndpoints() ([]storage.Endpoint, map[string]bool, error) {
+	eps, err := s.store.ListEndpoints("")
+	if err != nil {
+		return nil, nil, err
+	}
+	observed := map[string]bool{}
+	for _, ep := range eps {
+		if s.store.RunsAgentRuntimes(ep.TenantID, ep.ID) {
+			observed[ep.ID] = true
+		}
+	}
+	return eps, observed, nil
 }
 
 // handleResolveAnomalies closes findings with a recorded reason. Either name

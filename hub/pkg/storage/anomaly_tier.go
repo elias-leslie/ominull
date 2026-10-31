@@ -28,6 +28,12 @@ const (
 	// HeldHunt is the held reason of a hunt lead.
 	HeldHunt = "hunt"
 
+	// HeldIncident is the held reason of a page that joined an incident
+	// already open (same device, rule family and counterparty within
+	// page_incident_hours) without raising its severity: it is kept with the
+	// incident, not pushed again.
+	HeldIncident = "incident"
+
 	// HeldHuntOnly is the Hunt leads view of QueryAnomalyAlerts.
 	HeldHuntOnly = "hunt"
 
@@ -141,33 +147,36 @@ func (s *Store) execBatch(stmt string, args []any) (int64, error) {
 
 // HuntWindow counts the hunt leads raised since a point in time.
 type HuntWindow struct {
-	Total  int            `json:"total"`
-	Muted  int            `json:"muted"`
-	ByType map[string]int `json:"by_type"`
-	ByHost map[string]int `json:"by_host"`
+	Total   int            `json:"total"`
+	Muted   int            `json:"muted"`
+	ByType  map[string]int `json:"by_type"`
+	ByHost  map[string]int `json:"by_host"`
+	ByClass map[string]int `json:"by_class"`
 }
 
 // SummariseHuntLeads returns the hunt-lead counts the Nightshift feed reports.
 func (s *Store) SummariseHuntLeads(since time.Time) (HuntWindow, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := HuntWindow{ByType: map[string]int{}, ByHost: map[string]int{}}
+	out := HuntWindow{ByType: map[string]int{}, ByHost: map[string]int{}, ByClass: map[string]int{}}
 	rows, err := s.db.Query(`SELECT anomaly_type, hostname,
+			CASE WHEN json_valid(evidence) AND json_extract(evidence, '$.class') = ? THEN ? ELSE ? END,
 			SUM(CASE WHEN json_valid(evidence) AND json_extract(evidence, '$.muted') = ? THEN 1 ELSE 0 END), COUNT(*)
 		FROM anomaly_alerts WHERE held_reason = ? AND timestamp >= ?
-		GROUP BY anomaly_type, hostname`, MutedAgentHeavy, HeldHunt, since.UTC())
+		GROUP BY 1, 2, 3`, ClassDigest, ClassDigest, ClassRecord, MutedAgentHeavy, HeldHunt, since.UTC())
 	if err != nil {
 		return out, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var typ, host string
+		var typ, host, class string
 		var muted, n int
-		if err := rows.Scan(&typ, &host, &muted, &n); err != nil {
+		if err := rows.Scan(&typ, &host, &class, &muted, &n); err != nil {
 			return out, err
 		}
 		out.Total += n
 		out.Muted += muted
+		out.ByClass[class] += n
 		out.ByType[typ] += n
 		out.ByHost[host] += n
 	}
@@ -261,9 +270,9 @@ func (s *Store) PagedIncidents(since time.Time, excludeEndpoint string) ([]Paged
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rows, err := s.db.Query(`SELECT COALESCE(json_extract(evidence, '$.incident'), id), anomaly_type, hostname, COUNT(*) FROM anomaly_alerts
-		WHERE timestamp >= ? AND held_reason = '' AND endpoint_id != ? AND json_valid(evidence)
+		WHERE timestamp >= ? AND held_reason IN ('', ?) AND endpoint_id != ? AND json_valid(evidence)
 			AND json_extract(evidence, '$.class') = ?
-		GROUP BY 1 ORDER BY 4 DESC`, since.UTC(), excludeEndpoint, ClassPage)
+		GROUP BY 1 ORDER BY 4 DESC`, since.UTC(), HeldIncident, excludeEndpoint, ClassPage)
 	if err != nil {
 		return nil, err
 	}
@@ -279,47 +288,15 @@ func (s *Store) PagedIncidents(since time.Time, excludeEndpoint string) ([]Paged
 	return out, rows.Err()
 }
 
-// ClassWindow counts the record and digest findings since a point in time.
-type ClassWindow struct {
-	Total  int            `json:"total"`
-	ByType map[string]int `json:"by_type"`
-	ByHost map[string]int `json:"by_host"`
-}
-
-// SummariseClass counts one class's findings raised since a point in time.
-func (s *Store) SummariseClass(class string, since time.Time) (ClassWindow, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := ClassWindow{ByType: map[string]int{}, ByHost: map[string]int{}}
-	rows, err := s.db.Query(`SELECT anomaly_type, hostname, COUNT(*) FROM anomaly_alerts
-		WHERE timestamp >= ? AND json_valid(evidence) AND json_extract(evidence, '$.class') = ?
-		GROUP BY 1, 2`, since.UTC(), class)
-	if err != nil {
-		return out, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var typ, host string
-		var n int
-		if err := rows.Scan(&typ, &host, &n); err != nil {
-			return out, err
-		}
-		out.Total += n
-		out.ByType[typ] += n
-		out.ByHost[host] += n
-	}
-	return out, rows.Err()
-}
-
-// ClassAlerts returns the newest findings of one class since a point in
-// time, at most limit of them.
-func (s *Store) ClassAlerts(class string, since time.Time, limit int) ([]AnomalyAlert, error) {
+// RecordedAlerts returns the newest record and digest findings (held as
+// hunt leads) raised since a point in time, at most limit of them.
+func (s *Store) RecordedAlerts(since time.Time, limit int) ([]AnomalyAlert, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rows, err := s.db.Query(`SELECT id, tenant_id, endpoint_id, hostname, anomaly_type, severity, title, description,
 		COALESCE(evidence, ''), held_reason, process_path, dst_ip, dst_port, timestamp FROM anomaly_alerts
-		WHERE timestamp >= ? AND json_valid(evidence) AND json_extract(evidence, '$.class') = ?
-		ORDER BY timestamp DESC LIMIT ?`, since.UTC(), class, limit)
+		WHERE held_reason = ? AND timestamp >= ?
+		ORDER BY timestamp DESC LIMIT ?`, HeldHunt, since.UTC(), limit)
 	if err != nil {
 		return nil, err
 	}

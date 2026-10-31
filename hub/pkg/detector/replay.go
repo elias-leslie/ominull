@@ -49,29 +49,72 @@ type ReplayResult struct {
 	Signatures []ReplaySignature `json:"signatures"`
 	Decisions  []ReplayDecision  `json:"-"`
 	// Paging compares what reached the open alert list before detection
-	// tiers (every finding the tuning keeps, learning-held ones aside) with
-	// what pages now (the kept findings of paging detectors). It is judged
-	// from the detector type, so findings recorded before the tiers count.
+	// classes (every finding the tuning keeps, learning-held ones aside) with
+	// what pages now: the kept findings Classify names page, grouped into
+	// incidents. It is judged by Classify from what each finding carries, so
+	// findings recorded before the classes count.
 	Paging ReplayPaging `json:"paging"`
 }
 
-// ReplayPaging is paging volume before and after the detection tiers.
+// ReplayPaging is paging volume before and after the detection classes.
 type ReplayPaging struct {
 	Before int               `json:"before"`
 	After  int               `json:"after"`
-	Hunt   int               `json:"hunt"` // kept findings that are now hunt leads
+	Hunt   int               `json:"hunt"` // kept findings that are now records or digests
 	ByType map[string][2]int `json:"by_type"`
 	ByHost map[string][2]int `json:"by_host"`
+	// ByClass counts the kept findings per class.
+	ByClass map[string]int `json:"by_class"`
+	// Incidents is how many incidents the pages form (device + rule family
+	// + counterparty within page_incident_hours); Pushes adds the
+	// escalations, each pushed again.
+	Incidents int `json:"incidents"`
+	Pushes    int `json:"pushes"`
+	// Pages lists the pushes, oldest first, at most replayPageList.
+	Pages []ReplayPage `json:"pages"`
 }
 
+// ReplayPage is one push the classes would have sent.
+type ReplayPage struct {
+	ID         string    `json:"id"`
+	Type       string    `json:"type"`
+	Host       string    `json:"host"`
+	Severity   string    `json:"severity"`
+	At         time.Time `json:"at"`
+	Title      string    `json:"title"`
+	Reason     string    `json:"reason"`
+	Escalation bool      `json:"escalation,omitempty"`
+	// Alerts is how many pages the incident held in the replay window.
+	Alerts int `json:"alerts"`
+}
+
+const replayPageList = 200
+
+// Replay judges findings through a tuning, classifying them with no
+// knowledge of the endpoints (ReplayClassified has it).
 func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResult {
+	return ReplayClassified(alerts, t, nil, nil)
+}
+
+// ReplayClassified is Replay with the endpoints and the endpoints observed
+// running an agent runtime, so roles and zones are the live ones.
+func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, endpoints []storage.Endpoint, observed map[string]bool) ReplayResult {
+	cx := NewClassContext(t, endpoints, observed)
+	incidentWindow := time.Duration(t.PageIncidentHours) * time.Hour
+	type openIncident struct {
+		last  time.Time
+		worst string
+		page  int // index in Paging.Pages, -1 past the list
+	}
+	incidents := map[string]*openIncident{}
 	sorted := append([]storage.AnomalyAlert(nil), alerts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Timestamp.Before(sorted[j].Timestamp) })
 	cooldown := time.Duration(t.FirstSeenCooldown) * time.Minute
 	lastOffHours := map[string]time.Time{}
 	lastNovel := map[string]time.Time{}
 	lastSilenced := map[string]time.Time{}
-	res := ReplayResult{ByType: map[string][2]int{}, Paging: ReplayPaging{ByType: map[string][2]int{}, ByHost: map[string][2]int{}}}
+	res := ReplayResult{ByType: map[string][2]int{}, Paging: ReplayPaging{ByType: map[string][2]int{}, ByHost: map[string][2]int{},
+		ByClass: map[string]int{}, Pages: []ReplayPage{}}}
 	sigs := map[string]*ReplaySignature{}
 
 	for _, a := range sorted {
@@ -152,10 +195,40 @@ func Replay(alerts []storage.AnomalyAlert, t storage.DetectionTuning) ReplayResu
 				pt[0]++
 				ph[0]++
 				res.Paging.Before++
-				if tierOfFinding(a) == storage.TierPage {
+				class, why := cx.Classify(a)
+				res.Paging.ByClass[class]++
+				if class == storage.ClassPage {
 					pt[1]++
 					ph[1]++
 					res.Paging.After++
+					var cev classEvidence
+					_ = json.Unmarshal([]byte(a.Evidence), &cev)
+					key := incidentKey(a, cev)
+					inc := incidents[key]
+					push, escalation := false, false
+					switch {
+					case inc == nil || a.Timestamp.Sub(inc.last) >= incidentWindow:
+						inc = &openIncident{worst: a.Severity, page: -1}
+						incidents[key] = inc
+						res.Paging.Incidents++
+						push = true
+					case sevRank[a.Severity] > sevRank[inc.worst]:
+						inc.worst = a.Severity
+						push, escalation = true, true
+					}
+					inc.last = a.Timestamp
+					if push {
+						res.Paging.Pushes++
+						inc.page = -1
+						if len(res.Paging.Pages) < replayPageList {
+							inc.page = len(res.Paging.Pages)
+							res.Paging.Pages = append(res.Paging.Pages, ReplayPage{ID: a.ID, Type: a.AnomalyType, Host: host,
+								Severity: a.Severity, At: a.Timestamp, Title: a.Title, Reason: why, Escalation: escalation})
+						}
+					}
+					if inc.page >= 0 {
+						res.Paging.Pages[inc.page].Alerts++
+					}
 				} else {
 					res.Paging.Hunt++
 				}

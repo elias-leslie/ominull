@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/auth"
+	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/storage"
 )
@@ -270,17 +271,26 @@ func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
 			t.Fatalf("%s is not resolved on a quiet fleet: %q", f.FindingInfo.UID, f.Message)
 		}
 	}
-	if len(doc.Findings) != 14 {
-		t.Fatalf("findings = %d, want hub, anomalies, hunt leads, agent egress, agents, agent certificates, inventory, router collector, router certificate, maintenance runs, maintenance schedule, detection policy soundness, floor drill and changes", len(doc.Findings))
+	if len(doc.Findings) != 15 {
+		t.Fatalf("findings = %d, want hub, anomalies, hunt leads, digest, detection health, agents, agent certificates, inventory, router collector, router certificate, maintenance runs, maintenance schedule, detection policy soundness, floor drill and changes", len(doc.Findings))
 	}
 }
 
-func TestNightshiftFeedAgentEgressDigestIsANote(t *testing.T) {
+// feedRead is one finding as a test reads it.
+type feedRead struct {
+	StatusID, SeverityID int
+	Message              string
+	Unmapped             map[string]any
+}
+
+// The digest names the recorded findings, one line per group, and never
+// asks; pages stay out of it.
+func TestNightshiftFeedDigestIsANote(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	now := time.Now().UTC()
-	find := func() (status, severity int) {
+	find := func() feedRead {
 		t.Helper()
 		var doc feedDoc
 		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", "mock_admin_token")
@@ -288,31 +298,89 @@ func TestNightshiftFeedAgentEgressDigestIsANote(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, f := range doc.Findings {
-			if f.FindingInfo.UID == "ominull.anomalies.agent_egress" {
-				return f.StatusID, f.SeverityID
+			if f.FindingInfo.UID == "ominull.anomalies.digest" {
+				return feedRead{f.StatusID, f.SeverityID, f.Message, f.Unmapped}
 			}
 		}
-		t.Fatal("no agent egress finding in the feed")
-		return 0, 0
+		t.Fatal("no digest finding in the feed")
+		return feedRead{}
 	}
-	add := func(id, typ, sev string) {
+	add := func(id, typ, sev, class, held string, at time.Time) {
 		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "e", Hostname: "dev",
-			AnomalyType: typ, Severity: sev, Title: typ, Timestamp: now.Add(-time.Hour)}); err != nil {
+			AnomalyType: typ, Severity: sev, Title: typ, ProcessPath: "/usr/bin/curl", DstIP: "203.0.113.5", DstPort: 443,
+			Evidence: `{"class":"` + class + `"}`, HeldReason: held, Timestamp: at}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if st, _ := find(); st != ocsfStatusResolved {
-		t.Fatalf("no agent findings should be resolved, got %d", st)
+	if f := find(); f.StatusID != ocsfStatusResolved || f.Message != "Nothing recorded in the last 24 h" {
+		t.Fatalf("quiet digest = %d %q", f.StatusID, f.Message)
 	}
-	add("a1", "AGENT_NEW_DESTINATION", "MEDIUM")
-	if st, sev := find(); st != ocsfStatusNew || sev != ocsfSevInformational {
-		t.Fatalf("an ordinary new destination = status %d severity %d", st, sev)
+	add("r1", "OFF_HOURS_ACTIVITY", "LOW", storage.ClassRecord, storage.HeldHunt, now.Add(-time.Hour))
+	add("r2", "OFF_HOURS_ACTIVITY", "LOW", storage.ClassRecord, storage.HeldHunt, now.Add(-2*time.Hour))
+	add("d1", "C2_BEACONING", "MEDIUM", storage.ClassDigest, storage.HeldHunt, now.Add(-3*time.Hour))
+	add("old", "C2_BEACONING", "MEDIUM", storage.ClassDigest, storage.HeldHunt, now.Add(-30*time.Hour))
+	add("p1", "DECOY_TOUCH", "CRITICAL", storage.ClassPage, "", now.Add(-time.Hour))
+	f := find()
+	if f.StatusID != ocsfStatusNew || f.SeverityID != ocsfSevInformational {
+		t.Fatalf("digest = status %d severity %d", f.StatusID, f.SeverityID)
 	}
-	// A HIGH one is rated (and asks) in the Open alerts summary; the digest
-	// stays a note so the owner is not asked twice.
-	add("a2", "AGENT_NEW_DESTINATION", "HIGH")
-	if _, sev := find(); sev != ocsfSevInformational {
-		t.Fatalf("a HIGH new destination raised the digest to severity %d", sev)
+	if !strings.HasPrefix(f.Message, "3 findings recorded in the last 24 h, none of them asking for you: ") ||
+		!strings.Contains(f.Message, "(2 times)") || strings.Contains(f.Message, "decoy") {
+		t.Fatalf("digest message = %q", f.Message)
+	}
+	byClass, _ := f.Unmapped["by_class"].(map[string]any)
+	if byClass["record"] != float64(2) || byClass["digest"] != float64(1) || f.Unmapped["groups"] != float64(2) {
+		t.Fatalf("digest unmapped = %v", f.Unmapped)
+	}
+}
+
+// Over the weekly page budget the feed says which rule is noisiest, as a note.
+func TestNightshiftFeedDetectionHealthNamesTheNoisiestRule(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	find := func() feedRead {
+		t.Helper()
+		var doc feedDoc
+		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", "mock_admin_token")
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range doc.Findings {
+			if f.FindingInfo.UID == "ominull.detection.health" {
+				return feedRead{f.StatusID, f.SeverityID, f.Message, f.Unmapped}
+			}
+		}
+		t.Fatal("no detection health finding in the feed")
+		return feedRead{}
+	}
+	page := func(id, typ, incident, held string) {
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "e", Hostname: "dev",
+			AnomalyType: typ, Severity: "HIGH", Title: typ, HeldReason: held,
+			Evidence: `{"class":"page","incident":"` + incident + `"}`, Timestamp: now.Add(-time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page("a", "C2_BEACONING", "inc-a", "")
+	if f := find(); f.StatusID != ocsfStatusResolved || !strings.Contains(f.Message, "within the budget of 1") {
+		t.Fatalf("one incident = %d %q", f.StatusID, f.Message)
+	}
+	// A page that joined inc-a is the same incident; a drill page is not counted.
+	page("a2", "C2_BEACONING", "inc-a", storage.HeldIncident)
+	if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: "drill", TenantID: "t-01", EndpointID: detector.DrillEndpointID,
+		AnomalyType: "DECOY_TOUCH", Severity: "CRITICAL", Evidence: `{"class":"page"}`, Timestamp: now.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if f := find(); f.StatusID != ocsfStatusResolved {
+		t.Fatalf("a joined page or the drill counted: %q", f.Message)
+	}
+	page("b", "C2_BEACONING", "inc-b", "")
+	page("c", "DECOY_TOUCH", "inc-c", "")
+	f := find()
+	if f.StatusID != ocsfStatusNew || f.SeverityID != ocsfSevInformational ||
+		f.Message != "3 incidents paged in the last 7 days, over the budget of 1. The noisiest rule is beacon (2 incidents); if those were not worth a page, tune that rule. Nothing was held back." {
+		t.Fatalf("over budget = %d/%d %q", f.StatusID, f.SeverityID, f.Message)
 	}
 }
 

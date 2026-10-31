@@ -49,10 +49,10 @@ func (s *Store) ListAnomalyOutcomeDays(since time.Time, limit int) (days []Anoma
 			SUM(CASE WHEN r.verdict = ? THEN 1 ELSE 0 END),
 			SUM(CASE WHEN a.held_reason = ? THEN 1 ELSE 0 END)
 		FROM anomaly_alerts a LEFT JOIN anomaly_resolutions r ON r.anomaly_id = a.id
-		WHERE a.timestamp >= ? AND a.held_reason IN ('', ?)
+		WHERE a.timestamp >= ? AND a.held_reason IN ('', ?, ?)
 		GROUP BY a.endpoint_id, a.anomaly_type, substr(a.timestamp, 1, 10)
 		ORDER BY MAX(a.timestamp) DESC LIMIT ?`,
-		MethodTuning, MethodTuning, VerdictBenign, VerdictMalicious, HeldHunt, since.UTC(), HeldHunt, limit+1)
+		MethodTuning, MethodTuning, VerdictBenign, VerdictMalicious, HeldHunt, since.UTC(), HeldHunt, HeldIncident, limit+1)
 	if err != nil {
 		return nil, false, err
 	}

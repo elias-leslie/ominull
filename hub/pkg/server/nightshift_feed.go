@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/storage"
 )
@@ -288,7 +289,7 @@ func (s *Server) huntFinding(now time.Time) (feedFinding, error) {
 		return feedFinding{}, err
 	}
 	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "tier": storage.TierHunt,
-		"by_type": win.ByType, "by_host": win.ByHost, "muted_agent_heavy": win.Muted}
+		"by_type": win.ByType, "by_host": win.ByHost, "by_class": win.ByClass, "muted_agent_heavy": win.Muted}
 	const uid, title = "ominull.anomalies.hunt", "Hunt leads"
 	if win.Total == 0 {
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
@@ -299,56 +300,127 @@ func (s *Server) huntFinding(now time.Time) (feedFinding, error) {
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
-// agentEgressTypes are the findings of the per-runtime agent egress detector.
-var agentEgressTypes = []string{"AGENT_NEW_DESTINATION", "AGENT_UPLOAD_VOLUME", "AGENT_DNS_BYPASS"}
+// feedDigestScan bounds the recorded findings the digest reads; feedDigestLines
+// is how many groups it names.
+const (
+	feedDigestScan  = 2000
+	feedDigestLines = 3
+)
 
-// agentEgressFinding is the day's digest of what the agent runtimes did
-// outside their own baselines, each alert named (host, program, where). It is
-// informational: every one of these alerts is also listed, and rated, in the
-// Open alerts summary, which is where Nightshift asks. A digest that asked as
-// well made the owner answer the same alerts twice, by counts.
-func (s *Server) agentEgressFinding(now time.Time) (feedFinding, error) {
-	win, err := s.store.SummariseOpenAnomalies(now.Add(-feedAnomalyWindow))
+// digestFinding is the day's digest of the record and digest findings: one
+// line per group (rule, host and program), the largest groups first, each
+// named the way the alert list names an alert. It never asks: these findings
+// are kept with their evidence for the record, and only pages ask. It took
+// over the agent egress digest (ominull.anomalies.agent_egress), whose
+// findings are records now.
+func (s *Server) digestFinding(now time.Time) (feedFinding, error) {
+	list, err := s.store.RecordedAlerts(now.Add(-feedAnomalyWindow), feedDigestScan)
 	if err != nil {
 		return feedFinding{}, err
 	}
-	counts := map[string]int{}
-	total := 0
-	for _, t := range agentEgressTypes {
-		counts[t] = win.ByType[t]
-		total += win.ByType[t]
-	}
-	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_type": counts}
-	const uid, title = "ominull.anomalies.agent_egress", "Agent egress"
-	if total == 0 {
-		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-			"Agent runtimes stayed inside their baselines in the last 24 h", nil, unmapped), nil
-	}
-	list, err := s.store.NewOpenAlerts(now.Add(-feedAnomalyWindow), feedAlertScan)
-	if err != nil {
-		return feedFinding{}, err
+	type group struct {
+		line  feedAlert
+		count int
 	}
 	tuning := s.store.GetDetectionTuning()
-	var named []string
+	groups := map[string]*group{}
+	var order []string
+	byClass := map[string]int{}
+	byType := map[string]int{}
 	for _, a := range list {
-		if !slices.Contains(agentEgressTypes, a.AnomalyType) {
-			continue
-		}
-		if len(named) == 3 {
-			break
-		}
 		d := describeAlert(a, tuning)
-		line := d.What
-		if d.Expected != "" {
-			line += " (" + d.Expected + ")"
+		byClass[d.Class]++
+		byType[a.AnomalyType]++
+		key := a.AnomalyType + "|" + d.Host + "|" + d.Process
+		g := groups[key]
+		if g == nil {
+			// The newest finding of the group names it.
+			g = &group{line: d}
+			groups[key] = g
+			order = append(order, key)
 		}
-		named = append(named, line)
+		g.count++
 	}
-	msg := strings.Join(named, "; ")
-	if rest := total - len(named); rest > 0 {
-		msg += fmt.Sprintf("; +%d more", rest)
+	slices.SortStableFunc(order, func(a, b string) int { return groups[b].count - groups[a].count })
+	var lines []map[string]any
+	var named []string
+	for _, key := range order[:min(len(order), feedDigestLines)] {
+		g := groups[key]
+		text := g.line.What
+		if g.count > 1 {
+			text += fmt.Sprintf(" (%d times)", g.count)
+		}
+		if g.line.Expected != "" {
+			text += " (" + g.line.Expected + ")"
+		}
+		named = append(named, text)
+		lines = append(lines, map[string]any{"type": g.line.Type, "host": g.line.Host, "class": g.line.Class, "count": g.count, "what": text})
+	}
+	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_class": byClass, "by_type": byType,
+		"groups": len(order), "lines": lines, "truncated": len(list) == feedDigestScan}
+	const uid, title = "ominull.anomalies.digest", "Recorded today"
+	if len(list) == 0 {
+		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
+			"Nothing recorded in the last 24 h", nil, unmapped), nil
+	}
+	msg := fmt.Sprintf("%s recorded in the last 24 h, none of them asking for you: %s",
+		plural(len(list), "finding", "findings"), strings.Join(named, "; "))
+	if rest := len(order) - len(named); rest > 0 {
+		msg += fmt.Sprintf("; %s", plural(rest, "more group", "more groups"))
 	}
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
+}
+
+// detectionHealthFinding compares the incidents that paged in the last week
+// with the page budget (page_budget_per_week). Over budget it is a note naming
+// the noisiest rule, so the rule gets tuned; it never holds a page back.
+func (s *Server) detectionHealthFinding(now time.Time) (feedFinding, error) {
+	incidents, err := s.store.PagedIncidents(now.Add(-7*24*time.Hour), detector.DrillEndpointID)
+	if err != nil {
+		return feedFinding{}, err
+	}
+	budget := s.store.GetDetectionTuning().PageBudgetPerWeek
+	byType := map[string]int{}
+	for _, inc := range incidents {
+		byType[inc.Type]++
+	}
+	noisiest, most := "", 0
+	for typ, n := range byType {
+		if n > most || (n == most && typ < noisiest) {
+			noisiest, most = typ, n
+		}
+	}
+	unmapped := map[string]any{"window_days": 7, "incidents": len(incidents), "budget": budget, "by_type": byType}
+	const uid, title = "ominull.detection.health", "Detection health"
+	if len(incidents) <= budget {
+		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
+			fmt.Sprintf("%s paged in the last 7 days, within the budget of %d", plural(len(incidents), "incident", "incidents"), budget), nil, unmapped), nil
+	}
+	unmapped["noisiest"] = noisiest
+	msg := fmt.Sprintf("%s paged in the last 7 days, over the budget of %d. The noisiest rule is %s (%s); if those were not worth a page, tune that rule. Nothing was held back.",
+		plural(len(incidents), "incident", "incidents"), budget, ruleName(noisiest), plural(most, "incident", "incidents"))
+	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
+}
+
+// ruleName is a detector's type in owner words.
+func ruleName(typ string) string {
+	if name, ok := ruleNames[typ]; ok {
+		return name
+	}
+	return strings.ToLower(strings.ReplaceAll(typ, "_", " "))
+}
+
+var ruleNames = map[string]string{
+	"THREAT_INTEL_MATCH":    "threat list match",
+	"DECOY_TOUCH":           "decoy touch",
+	"NEW_PLACE_UPLOAD":      "upload to a new place",
+	"AGENT_UPLOAD_VOLUME":   "agent upload volume",
+	"C2_BEACONING":          "beacon",
+	"LAB_ESCAPE":            "lab escape",
+	"SENSITIVE_PORT_EGRESS": "sensitive port out",
+	"LATERAL_PORT_SWEEP":    "local network sweep",
+	"PORT_SCAN_RECON":       "port scan",
+	"ENDPOINT_SILENT":       "agent went quiet",
 }
 
 func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
@@ -552,8 +624,10 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	add("anomalies", []feedFinding{a}, err)
 	hl, err := s.huntFinding(now)
 	add("hunt_leads", []feedFinding{hl}, err)
-	ae, err := s.agentEgressFinding(now)
-	add("agent_egress", []feedFinding{ae}, err)
+	dg, err := s.digestFinding(now)
+	add("digest", []feedFinding{dg}, err)
+	dh, err := s.detectionHealthFinding(now)
+	add("detection_health", []feedFinding{dh}, err)
 	g, err := s.agentFinding(now)
 	add("agents", []feedFinding{g}, err)
 	acf, err := s.agentCertFinding(now)

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"sort"
-	"strings"
 
 	"ominull/hub/pkg/storage"
 )
@@ -28,16 +27,6 @@ func TierFor(anomalyType string) string {
 		return storage.TierHunt
 	}
 	return storage.TierPage
-}
-
-// tierOfFinding is TierFor for a recorded finding. The subnet sweep writes
-// its new-device findings (ids alert-disc-*) under NOVEL_DESTINATION without
-// passing through the detector; they are not behavioural and keep paging.
-func tierOfFinding(a storage.AnomalyAlert) string {
-	if strings.HasPrefix(a.ID, "alert-disc-") {
-		return storage.TierPage
-	}
-	return TierFor(a.AnomalyType)
 }
 
 // HuntTypes lists the hunt-tier detector types, sorted.

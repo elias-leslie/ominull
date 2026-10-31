@@ -437,7 +437,11 @@ func (e *Engine) stampClass(a *storage.AnomalyAlert) {
 		case sevRank[a.Severity] > sevRank[worst]:
 			fields["incident"], fields["escalation"] = id, true
 		default:
+			// Same incident, no worse: kept with it, not pushed again.
 			fields["incident"] = id
+			if a.HeldReason == "" {
+				a.HeldReason = storage.HeldIncident
+			}
 		}
 	}
 	raw, _ := json.Marshal(fields)

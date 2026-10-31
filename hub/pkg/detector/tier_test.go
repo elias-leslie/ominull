@@ -74,26 +74,39 @@ func TestBehaviouralFindingsAreHuntLeadsAndMutedOnAgentHeavyHosts(t *testing.T) 
 	}
 }
 
-func TestReplayReportsPagingBeforeAndAfterTheTiers(t *testing.T) {
+func TestReplayReportsPagingBeforeAndAfterTheClasses(t *testing.T) {
 	now := time.Now().UTC()
 	at := func(m int) time.Time { return now.Add(time.Duration(m) * time.Minute) }
 	alerts := []storage.AnomalyAlert{
 		{ID: "1", AnomalyType: "NOVEL_DESTINATION", Hostname: "ws", Timestamp: at(0), Evidence: `{"destination_owner":"a"}`},
 		{ID: "2", AnomalyType: "OFF_HOURS_ACTIVITY", Hostname: "ws", Timestamp: at(1), HeldReason: storage.HeldHunt},
-		{ID: "3", AnomalyType: "LATERAL_PORT_SWEEP", Hostname: "ws", Timestamp: at(2)},
+		{ID: "3", AnomalyType: "LATERAL_PORT_SWEEP", EndpointID: "ws", Hostname: "ws", Timestamp: at(2), DstPort: 445},
 		{ID: "4", AnomalyType: "ENDPOINT_SILENT", Hostname: "srv", Timestamp: at(3)},
 		{ID: "5", AnomalyType: "NOVEL_PROCESS_EGRESS", Hostname: "srv", Timestamp: at(4), HeldReason: storage.HeldLearning},
 		{ID: "alert-disc-1", AnomalyType: "NOVEL_DESTINATION", Hostname: "srv", Timestamp: at(5), Evidence: `{"destination_owner":"b"}`},
+		{ID: "6", AnomalyType: "THREAT_INTEL_MATCH", EndpointID: "srv", Hostname: "srv", Timestamp: at(6), DstIP: "203.0.113.9", Severity: "HIGH", Evidence: `{"intel_confidence":50}`},
+		// One incident: the same device, rule and decoy; the critical one escalates it.
+		{ID: "7", AnomalyType: "DECOY_TOUCH", EndpointID: "ws", Hostname: "ws", Timestamp: at(7), DstIP: "10.0.0.250", Severity: "HIGH"},
+		{ID: "8", AnomalyType: "DECOY_TOUCH", EndpointID: "ws", Hostname: "ws", Timestamp: at(8), DstIP: "10.0.0.250", Severity: "HIGH"},
+		{ID: "9", AnomalyType: "DECOY_TOUCH", EndpointID: "ws", Hostname: "ws", Timestamp: at(9), DstIP: "10.0.0.250", Severity: "CRITICAL"},
+		// A day later the same touch is a new incident.
+		{ID: "10", AnomalyType: "DECOY_TOUCH", EndpointID: "ws", Hostname: "ws", Timestamp: at(9 + 25*60), DstIP: "10.0.0.250", Severity: "CRITICAL"},
 	}
 	res := Replay(alerts, storage.DefaultDetectionTuning())
 	p := res.Paging
-	if p.Before != 5 || p.After != 3 || p.Hunt != 2 {
-		t.Fatalf("paging = %d -> %d (hunt %d), want 5 -> 3 (hunt 2)", p.Before, p.After, p.Hunt)
+	if p.Before != 10 || p.After != 5 || p.Hunt != 5 {
+		t.Fatalf("paging = %d -> %d (hunt %d), want 10 -> 5 (hunt 5)", p.Before, p.After, p.Hunt)
 	}
-	if p.ByHost["ws"] != [2]int{3, 1} || p.ByHost["srv"] != [2]int{2, 2} {
-		t.Fatalf("by host = %v", p.ByHost)
+	if p.ByClass[storage.ClassPage] != 5 || p.ByClass[storage.ClassRecord] != 4 || p.ByClass[storage.ClassDigest] != 1 {
+		t.Fatalf("by class = %v", p.ByClass)
 	}
-	if p.ByType["NOVEL_DESTINATION"] != [2]int{2, 1} || p.ByType["LATERAL_PORT_SWEEP"] != [2]int{1, 1} {
+	if p.Incidents != 3 || p.Pushes != 4 {
+		t.Fatalf("incidents %d, pushes %d; want 3 incidents (sweep, two decoy days) and 4 pushes (one escalation)", p.Incidents, p.Pushes)
+	}
+	if len(p.Pages) != 4 || p.Pages[1].ID != "7" || p.Pages[1].Alerts != 2 || !p.Pages[2].Escalation || p.Pages[2].Alerts != 1 {
+		t.Fatalf("pages = %+v", p.Pages)
+	}
+	if p.ByType["LATERAL_PORT_SWEEP"] != [2]int{1, 1} || p.ByType["THREAT_INTEL_MATCH"] != [2]int{1, 0} {
 		t.Fatalf("by type = %v", p.ByType)
 	}
 }

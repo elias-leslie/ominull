@@ -59,6 +59,13 @@ type feedAlert struct {
 	// process to ("Agent in Aico window fb39ca7b"), whether or not that
 	// explains the alert.
 	Actor string `json:"actor,omitempty"`
+	// Class is the alert's class (page, record or digest; storage.AlertClass):
+	// Nightshift pages from it. Incident groups the pages about one device,
+	// rule family and counterparty; Escalation marks the page that raised an
+	// open incident's severity, the only one pushed again.
+	Class      string `json:"class"`
+	Incident   string `json:"incident,omitempty"`
+	Escalation bool   `json:"escalation,omitempty"`
 }
 
 const secretWord = `(?:pass(?:word|wd|phrase)?|pwd|token|secret|api[_-]?key|auth|bearer|credential|private[_-]?key)`
@@ -120,7 +127,16 @@ type alertEvidence struct {
 	FloorPorts *[]int `json:"floor_ports"`
 	Protocol   int    `json:"protocol"`
 	// BytesOut is nil on findings raised before the hub recorded it.
-	BytesOut *int64 `json:"bytes_out"`
+	BytesOut   *int64   `json:"bytes_out"`
+	Incident   string   `json:"incident"`
+	Escalation bool     `json:"escalation"`
+	TargetZone string   `json:"target_zone"`
+	Hosts      []string `json:"lab_escape_hosts"`
+	Decoy      string   `json:"decoy"`
+	// Destination is the registrable domain or network owner a new-place
+	// upload went to; FirstUpload what was sent there since first contact.
+	Destination string `json:"destination"`
+	FirstUpload *int64 `json:"first_upload_bytes"`
 }
 
 func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedAlert {
@@ -141,7 +157,7 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	}
 	var dests []string
 	out := feedAlert{ID: a.ID, Type: a.AnomalyType, Severity: a.Severity, Host: host, At: a.Timestamp.UTC().Format(time.RFC3339),
-		Process: proc, Command: sanitizeCommand(ev.CommandLine)}
+		Process: proc, Command: sanitizeCommand(ev.CommandLine), Class: storage.AlertClass(a), Incident: ev.Incident, Escalation: ev.Escalation}
 
 	var ports []int
 	seenPort := map[int]bool{}
@@ -168,7 +184,14 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 	if n := len(ev.Targets); n > feedDestinationMax {
 		dests = append(dests, fmt.Sprintf("+%d more", n-feedDestinationMax))
 	}
-	if len(ev.Targets) == 0 && a.DstIP != "" {
+	if len(ev.Hosts) > 0 {
+		for _, h := range ev.Hosts[:min(len(ev.Hosts), feedDestinationMax)] {
+			dests = append(dests, h)
+		}
+		if n := len(ev.Hosts); n > feedDestinationMax {
+			dests = append(dests, fmt.Sprintf("+%d more", n-feedDestinationMax))
+		}
+	} else if len(ev.Targets) == 0 && a.DstIP != "" {
 		dests = []string{fmt.Sprintf("%s:%d", a.DstIP, a.DstPort)}
 	}
 	out.Destinations = strings.Join(dests, ", ")
@@ -219,6 +242,23 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 			// can be any other site's.
 			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", proc, name, vendor)
 		}
+	case "DECOY_TOUCH":
+		out.What = fmt.Sprintf("%s on %s connected to %s, a decoy address nothing legitimate uses", who, host, orUnknown(a.DstIP))
+	case "LAB_ESCAPE":
+		n := max(len(ev.Hosts), 1)
+		out.What = fmt.Sprintf("%s on lab host %s reached %s outside the lab", who, host, plural(n, "host", "hosts"))
+		if z := zoneWord(ev.TargetZone); z != "" {
+			out.What += " on the " + z + " network"
+		}
+	case "NEW_PLACE_UPLOAD":
+		name := firstName(ev.SNI, ev.Domain, ev.Destination)
+		sent := "data"
+		if ev.FirstUpload != nil && *ev.FirstUpload > 0 {
+			sent = humanBytes(*ev.FirstUpload)
+		}
+		out.What = fmt.Sprintf("%s on %s sent %s to %s, somewhere this device never sent anything before", who, host, sent, destPhrase(name, a.DstIP, a.DstPort, ev.Owner))
+	case "COLLECTOR_HEALTH":
+		out.What = fmt.Sprintf("The OmniNull agent on %s reported an impossible transfer rate; those samples were left out of the figures", host)
 	case "AGENT_UPLOAD_VOLUME":
 		out.What = fmt.Sprintf("%s on %s uploaded much more than in an ordinary hour", who, host)
 	case "AGENT_DNS_BYPASS":
@@ -287,6 +327,17 @@ func touchesFloorPort(ports []int, dstPort uint16) bool {
 		}
 	}
 	return false
+}
+
+// zoneWord names a network zone in owner words ("" when unknown).
+func zoneWord(zone string) string {
+	switch zone {
+	case "infra":
+		return "infrastructure"
+	case "home", "lab":
+		return zone
+	}
+	return ""
 }
 
 func riskyWhy(anomalyType string) string {
