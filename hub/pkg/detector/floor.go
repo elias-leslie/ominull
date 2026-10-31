@@ -75,13 +75,10 @@ const (
 	floorAdminFanoutMax = storage.AdminFanoutMaxDefault
 )
 
-// floorRuleEvidence marks a finding raised by a floor rule inside a detector
-// a learning window may otherwise hold (the bandwidth burst): it pages inside
-// the window like every other floor finding.
-const (
-	floorRuleKey      = `"floor_rule"`
-	floorRuleEvidence = `{"floor_rule":"bandwidth_burst"}`
-)
+// floorRuleEvidence marks a finding raised by a floor rule inside an
+// operator-tuned detector (the bandwidth burst), so the record says it was
+// the floor that raised it.
+const floorRuleEvidence = `{"floor_rule":"bandwidth_burst"}`
 
 // sweepCooldown is how long a port or lateral sweep from one process stays one
 // finding.

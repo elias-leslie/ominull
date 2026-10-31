@@ -203,3 +203,8 @@ func replayEvidence(raw string) replayFields {
 	}
 	return replayFields{CommandLine: f.CommandLine, Attribution: strings.TrimSpace(f.Attribution), ASN: strings.TrimSpace(f.ASN), Owner: strings.ToLower(strings.TrimSpace(f.Owner)), Tenancy: strings.TrimSpace(f.Tenancy)}
 }
+
+// processBase is the program's name without its path, lower-cased.
+func processBase(path string) string {
+	return strings.ToLower(strings.TrimSpace(baseName(path)))
+}

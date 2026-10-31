@@ -101,24 +101,3 @@ func TestTheEngineRunsTheFloorAndTheBurstSurvivesBandwidthOff(t *testing.T) {
 		t.Fatalf("a ten-megabyte burst with bandwidth off and a long warmup raised %d findings", len(got))
 	}
 }
-
-// The bandwidth burst is floor, so a learning window does not hold it.
-func TestALearningWindowDoesNotHoldTheBurst(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	if err := store.UpsertEndpoint(storage.Endpoint{ID: "lin-02", TenantID: "default", Hostname: "lin-02", RoleTag: "server",
-		Status: "online", CreatedAt: now.Add(-30 * 24 * time.Hour), LastSeenAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CreateLearningWindow(storage.LearningWindow{TenantID: "default", ScopeType: storage.LearningScopeEndpoint, ScopeID: "lin-02", StartedBy: "test"}); err != nil {
-		t.Fatal(err)
-	}
-	engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "lin-02", Timestamp: now, Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "203.0.113.9", DstPort: 443, BytesOut: 11 << 20, ProcessPath: "/usr/local/bin/uploader"})
-	got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE")
-	// Recorded (a bandwidth spike is a record, not a page), never held for
-	// learning.
-	if len(got) != 1 || got[0].HeldReason == storage.HeldLearning || storage.AlertClass(got[0]) != storage.ClassRecord {
-		t.Fatalf("a burst inside a learning window = %+v", got)
-	}
-}

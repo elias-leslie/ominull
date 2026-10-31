@@ -99,8 +99,6 @@ type Engine struct {
 	onAutoIsolate  IsolateFunc
 	eventsChan     <-chan storage.Event
 	mu             sync.Mutex
-	learnMu        sync.Mutex
-	learnBuf       map[learnKey]*learnCount           // learning observations not yet written
 	portHistory    map[string][]portAccess            // endpointID -> accesses
 	bwTracker      *windowCache[*bandwidthStats]      // bounded endpoint/process histories
 	beaconTracker  *windowCache[*beaconWindow]        // bounded endpoint/peer/process histories
@@ -115,8 +113,8 @@ type Engine struct {
 	tuningAt       time.Time
 	cancel         context.CancelFunc
 
-	// sink, when set, receives findings instead of the store, and no learning
-	// observation is recorded; pinned, when set, is the tuning used. Both are
+	// sink, when set, receives findings instead of the store, and no device
+	// memory is written; pinned, when set, is the tuning used. Both are
 	// for the floor drill (drill.go), which evaluates synthetic events through
 	// a throwaway engine and stores nothing.
 	sink   func(storage.AnomalyAlert)
@@ -214,7 +212,6 @@ func (e *Engine) Start(ctx context.Context) {
 	// Every finding is classified before it is written, whoever writes it.
 	e.store.SetAlertClassifier(e.stampClass)
 	e.StartSilenceWatch(subCtx)
-	e.startLearningFlush(subCtx.Done())
 	go e.backfillHuntTier()
 	// Events arriving meanwhile are safe: a runtime first seen live starts
 	// learning, and the seed then moves its baseline start back to when the
@@ -259,27 +256,12 @@ func (e *Engine) shouldSuppressAlert(key string, cooldown time.Duration) bool {
 	return false
 }
 
-// learningHolds are the paging detectors a learning window may hold: the
-// behavioural ones whose findings describe how an estate normally works.
-// Threat-intelligence matches, sensitive ports, sweeps and resolver bypass are
-// floors and page inside a window too; a detector added later pages unless it
-// is named here. (Hunt leads are held as hunt leads already.) The owner's
-// approval of a window says the same (responseauth.learningWindowHolds).
-var learningHolds = map[string]bool{
-	"C2_BEACONING":          true,
-	"BANDWIDTH_SPIKE":       true,
-	"CLOUD_STORAGE_EGRESS":  true,
-	"AGENT_NEW_DESTINATION": true,
-	"AGENT_UPLOAD_VOLUME":   true,
-}
-
-// recordAnomaly writes a finding, or holds it.
+// recordAnomaly writes a finding, classed (page, record or digest) and with
+// its hunt tier.
 //
-// Holding happens here rather than at each detector so that no branch can
-// forget to do it. A held finding is written in full - the evidence, the
-// severity, the technique - and only its visibility changes, because the host
-// that was already compromised when its learning window opened is the one host
-// whose findings must survive that window.
+// It happens here rather than at each detector so that no branch can forget
+// to do it. A held finding is written in full - the evidence, the severity,
+// the technique - and only its visibility changes.
 func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep storage.Endpoint, anomaly storage.AnomalyAlert) error {
 	anomaly.Evidence = withFlowContext(anomaly.Evidence, ev, geo)
 	if ev.SrcIP != "" {
@@ -294,11 +276,6 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 	}
 
 	applyTier(&anomaly, ep, e.settings(), func() bool { return e.store.RunsAgentRuntimes(anomaly.TenantID, anomaly.EndpointID) })
-	if anomaly.HeldReason == "" && learningHolds[anomaly.AnomalyType] && !strings.Contains(anomaly.Evidence, floorRuleKey) {
-		if _, learning := e.store.LearningWindowFor(ep); learning {
-			anomaly.HeldReason = storage.HeldLearning
-		}
-	}
 	// The role is the endpoint's as this event saw it, which the classifier's
 	// cached endpoint list may not hold yet (a new enrolment, the drill).
 	if ep.ID != "" {
@@ -571,13 +548,6 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 	isTrustedSys := cfg.IsQuietProcess(quietPath, ev.ExecutableSHA256, ev.UserIdentity)
 	isTrustedDst := cfg.IsQuietOrg(geo.ASN, geo.Tenancy)
-
-	// While a window is open the estate is being described. The findings below
-	// still run and are still written - recordAnomaly holds them - and this is
-	// the second, much cheaper record that the proposals are argued from.
-	if e.sink == nil {
-		e.observeForLearning(ev, endpoint, geo, hr, now)
-	}
 
 	// isVouched is the narrower question: this process, to this owner. A quiet
 	// org alone silenced every process on every port to networks that front a

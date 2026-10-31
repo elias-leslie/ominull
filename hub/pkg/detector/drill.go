@@ -21,8 +21,8 @@ import (
 // floor applied, as the live engine does) and the live exclusions, and checks
 // that each still raises. The sweeps run again as each quiet process, and the
 // floor cases again inside each exclusion scoped to one endpoint, location or
-// program. The throwaway engine stores no finding, records no
-// learning observation and isolates nothing: its isolate hook only notes that
+// program. The throwaway engine stores no finding, writes no device
+// memory and isolates nothing: its isolate hook only notes that
 // it was asked. The server judges the result and reports a miss, or a drill
 // that has stopped running, on the Nightshift feed (server/floor_drill.go).
 
