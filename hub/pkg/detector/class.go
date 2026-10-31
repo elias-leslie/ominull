@@ -206,11 +206,11 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 		case zone == zoneLocal:
 			return record("a scan of the host's own loopback")
 		case role != storage.RoleAgent && role != storage.RoleLab:
-			return page(fmt.Sprintf("a port scan from a %s host", role))
+			return page(fmt.Sprintf("a port scan from %s host", roleArticle(role)))
 		case zone == zoneHome || zone == zoneInfra:
 			return page(fmt.Sprintf("a port scan aimed at the %s zone", zone))
 		}
-		return record(fmt.Sprintf("a port scan from a %s host into the %s zone", role, zone))
+		return record(fmt.Sprintf("a port scan from %s host into the %s zone", roleArticle(role), zone))
 	case "LATERAL_PORT_SWEEP":
 		return cx.classifySweep(a, ev, role)
 	case "C2_BEACONING":
@@ -234,7 +234,7 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 		case cx.RoleOf(ep) == storage.RoleInfra:
 			return page("an always-on infrastructure host stopped reporting")
 		}
-		return record(fmt.Sprintf("a %s host stopped reporting; expected stops are Nightshift's to explain", cx.RoleOf(ep)))
+		return record(fmt.Sprintf("%s host stopped reporting; expected stops are Nightshift's to explain", roleArticle(cx.RoleOf(ep))))
 	case "ENDPOINT_RETURNED", "CLOUD_STORAGE_EGRESS":
 		return digest("reported in the daily digest")
 	case "BANDWIDTH_SPIKE":
@@ -303,7 +303,18 @@ func (cx *ClassContext) classifySweep(a storage.AnomalyAlert, ev classEvidence, 
 	case zones[zoneHome] >= cx.cfg.LANSweepHosts:
 		return storage.ClassPage, fmt.Sprintf("fan-out to %d home hosts (pages from %d)", zones[zoneHome], cx.cfg.LANSweepHosts)
 	}
-	return storage.ClassRecord, fmt.Sprintf("a %s host reaching %d lab, %d infrastructure and %d home host(s)", role, zones[zoneLab], zones[zoneInfra], zones[zoneHome])
+	return storage.ClassRecord, fmt.Sprintf("%s host reaching %d lab, %d infrastructure and %d home host(s)", roleArticle(role), zones[zoneLab], zones[zoneInfra], zones[zoneHome])
+}
+
+// roleArticle names a role with its article: "an agent", "an infrastructure".
+func roleArticle(role string) string {
+	switch role {
+	case storage.RoleAgent:
+		return "an agent"
+	case storage.RoleInfra:
+		return "an infrastructure"
+	}
+	return "a " + role
 }
 
 func joinPorts(ports []int) string {

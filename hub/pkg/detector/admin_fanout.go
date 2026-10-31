@@ -88,7 +88,8 @@ func adminFanout(cfg storage.DetectionTuning, src storage.Endpoint, procKey stri
 				return false, fmt.Sprintf("%s was reached on port %d", ip, p)
 			}
 		}
-		if !inventoried(ip) && !cfg.IsAdminFanoutTarget(ip) {
+		// The lab networks are the operator's own guests, enrolled or not.
+		if !inventoried(ip) && !cfg.IsAdminFanoutTarget(ip) && !cfg.IsLabAddress(ip) {
 			return false, fmt.Sprintf("%s is not an inventoried host", ip)
 		}
 	}

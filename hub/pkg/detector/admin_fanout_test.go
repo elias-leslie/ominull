@@ -96,6 +96,19 @@ func TestAdminFanoutToInventoriedHostsDoesNotPage(t *testing.T) {
 	}
 }
 
+// A lab guest nothing enrolled or listed is the operator's own once the lab
+// networks name it.
+func TestAdminFanoutToTheLabNetworkDoesNotPage(t *testing.T) {
+	engine, store := adminEngine(t, func(c *storage.DetectionTuning) {
+		c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31")
+		c.LabCIDRs = []string{"10.20.0.0/24"}
+	})
+	fanOut(engine, "ws-admin", "/usr/bin/ssh", hops(22, "10.0.0.1", "10.0.0.39", "10.0.0.234", "10.20.0.140", "10.0.0.50", "10.0.0.51"))
+	if got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP"); len(got) != 0 {
+		t.Fatalf("ssh to an unlisted lab guest paged: %+v", got[0].Title)
+	}
+}
+
 func TestSweepsThatAreNotRoutineAdministrationStillPage(t *testing.T) {
 	six := []string{"10.0.0.1", "10.0.0.39", "10.0.0.234", "10.20.0.102", "10.0.0.50", "10.0.0.51"}
 	cases := []struct {
