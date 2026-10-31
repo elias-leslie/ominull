@@ -479,6 +479,21 @@ endpoints. A canary that fails the provenance check, or is not healthy within
 lists the last rollouts under `staged_rollouts`. A hub without staged rollouts
 gets the older two-request sequence.
 
+### Release cadence
+
+Hub releases are batched: at most one a day, and none when nothing the hub or
+agents ship has changed. `release.sh` enforces both against the last
+`Release X.Y.Z` commit (tests, test data and Markdown do not count as a change)
+and refuses otherwise. A change that cannot wait for the next batch, such as a
+live outage, an alert paging the owner in error or a security fix, is released
+with `--urgent "<why>"`, and the reason goes in the release commit and the
+operations brief. `--agents-only` rolls an already published release and is not
+held back.
+
+Detection thresholds, exemptions and vendor lists are tuning data on the hub
+(`hub/pkg/storage/detection_tuning.go`, changed through the detection policy
+API), so changing one needs no release at all.
+
 An agent update is authorized on the first request (no rule, no tap). The
 authority checks the payload and the release evidence: every agent package's
 release statement should verify under the release key the authority pins (or
@@ -507,9 +522,9 @@ and a standards check, run as authorized script jobs with a Maintenance card on
 the asset view) are described in
 [`docs/MAINTENANCE_PACKAGES.md`](../docs/MAINTENANCE_PACKAGES.md).
 
-Proposed future forensics and remote-response work is tracked in
-[`docs/NEXTGEN_FORENSICS_AND_RESPONSE_PLAN.md`](../docs/NEXTGEN_FORENSICS_AND_RESPONSE_PLAN.md).
-It does not describe current release behavior.
+Finished plans (forensics and response, the v1.8.1 hardening, the DNS and DHCP
+incident) are kept in [`docs/history/`](../docs/history/README.md). They do not
+describe current release behavior.
 
 ## License
 

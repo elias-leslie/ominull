@@ -18,6 +18,11 @@ DO_HUB=1
 DO_AGENTS=1
 WAIT_FOR_AGENTS=1
 CANARY_IDS=""
+URGENT_REASON=""
+# Hub releases are batched: at most one a day, none when nothing shipped
+# changed (docs/project-guide.md, "Release cadence"). Thresholds are tuning
+# data on the hub, so a threshold change needs no release at all.
+RELEASE_INTERVAL_SECONDS="${OMINULL_RELEASE_INTERVAL_SECONDS:-86400}"
 # A release signed with a routine key (OMINULL_SIGNING_ROUTINE=1) always rolls
 # out canaries first; the lab machines are the standing canaries.
 ROUTINE_CANARIES="${OMINULL_ROUTINE_CANARIES:-linux-ominull-target-linux}"
@@ -34,6 +39,9 @@ Options:
   --hub-only       build, sign, install hub, and publish artifacts; do not roll agents
   --agents-only    skip build/deploy; roll agents against an already-live hub
   --no-wait        queue the update and return without claiming convergence
+  --urgent REASON  release the hub again within a day of the last release
+                   (a live outage, a paging false alarm, a security fix);
+                   REASON goes in the release commit and the operations brief
 EOF
 }
 
@@ -45,10 +53,39 @@ while [ "$#" -gt 0 ]; do
         --hub-only) DO_AGENTS=0; shift ;;
         --agents-only) DO_HUB=0; shift ;;
         --no-wait) WAIT_FOR_AGENTS=0; shift ;;
+        --urgent) URGENT_REASON="${2:?--urgent needs a reason}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "[-] Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+if [ "${DO_HUB}" -eq 1 ]; then
+    # The last release is the last "Release X.Y.Z" commit. What ships is the
+    # hub, the agents and their packaging; tests and docs change no bytes.
+    last_release="$(git -C "${ROOT_DIR}" log -1 --format='%H %ct %s' --grep='^Release [0-9]' 2>/dev/null || true)"
+    if [ -n "${last_release}" ]; then
+        read -r last_sha last_time last_subject <<<"${last_release}"
+        last_name="$(printf '%s' "${last_subject}" | cut -d' ' -f1-2 | sed -E 's/[.:]+$//')"
+        shipped="$(git -C "${ROOT_DIR}" diff --name-only "${last_sha}" -- hub agent packaging \
+            scripts/build.sh scripts/build-packages.sh scripts/build-linux-agent.sh scripts/build-bpf.sh \
+            ':(exclude)*_test.go' ':(exclude)agent/tests' ':(exclude)hub/**/testdata' ':(exclude)*.md')"
+        if [ -z "${shipped}" ]; then
+            echo "[-] Nothing the hub or agents ship has changed since ${last_name}; nothing to release." >&2
+            exit 1
+        fi
+        age=$(( $(date +%s) - last_time ))
+        if [ "${age}" -lt "${RELEASE_INTERVAL_SECONDS}" ] && [ -z "${URGENT_REASON}" ]; then
+            echo "[-] ${last_name} went out $(( age / 3600 ))h ago; hub releases are batched to one a day." >&2
+            echo "    Leave this change for the next batch, or, if it cannot wait (a live outage, a paging" >&2
+            echo "    false alarm, a security fix), run again with --urgent \"<why>\"." >&2
+            exit 1
+        fi
+        if [ -n "${URGENT_REASON}" ] && [ "${age}" -lt "${RELEASE_INTERVAL_SECONDS}" ]; then
+            echo "[*] Releasing within a day of ${last_name}: ${URGENT_REASON}"
+            echo "    Put this reason in the release commit and the operations brief."
+        fi
+    fi
+fi
+
 if [ "${OMINULL_SIGNING_ROUTINE:-0}" = 1 ] && [ -z "${CANARY_IDS}" ]; then
     CANARY_IDS="${ROUTINE_CANARIES}"
     echo "[*] Routine-signed release: canaries first (${CANARY_IDS})."
@@ -94,6 +131,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/test-proveout-weekly.py"
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
+    bash "${ROOT_DIR}/scripts/test-release-batching.sh"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" "${ROOT_DIR}/scripts/sign-trust-bundle.sh" \
         "${ROOT_DIR}/scripts/deploy-hub.sh" "${ROOT_DIR}/scripts/pve/install.sh" \
         "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
