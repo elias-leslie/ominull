@@ -116,7 +116,9 @@ func TestALearningWindowDoesNotHoldTheBurst(t *testing.T) {
 	engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "lin-02", Timestamp: now, Action: "PERMIT", Direction: "OUTBOUND",
 		DstIP: "203.0.113.9", DstPort: 443, BytesOut: 11 << 20, ProcessPath: "/usr/local/bin/uploader"})
 	got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE")
-	if len(got) != 1 || got[0].HeldReason != "" {
+	// Recorded (a bandwidth spike is a record, not a page), never held for
+	// learning.
+	if len(got) != 1 || got[0].HeldReason == storage.HeldLearning || storage.AlertClass(got[0]) != storage.ClassRecord {
 		t.Fatalf("a burst inside a learning window = %+v", got)
 	}
 }

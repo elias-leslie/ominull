@@ -35,6 +35,19 @@ func noiseEngine(t *testing.T) (*Engine, *storage.Store) {
 	return New(store, make(chan storage.Event, 64), func(string, string) error { return nil }), store
 }
 
+// firstBeacons is the beacon findings but the one raised again for a
+// conversation that turned strong enough to page (strengthened).
+func firstBeacons(t *testing.T, store *storage.Store) []storage.AnomalyAlert {
+	t.Helper()
+	var out []storage.AnomalyAlert
+	for _, a := range anomaliesOfType(t, store, "C2_BEACONING") {
+		if !strings.Contains(a.Evidence, `"strengthened":true`) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func anomaliesOfType(t *testing.T, store *storage.Store, kind string) []storage.AnomalyAlert {
 	t.Helper()
 	all, err := store.ListAnomalyAlerts("", 500)
@@ -766,7 +779,7 @@ func TestOneBeaconingConversationIsOneFindingPerCounterparty(t *testing.T) {
 		beaconEvents(engine, "linux-50", fmt.Sprintf("104.16.0.%d", last), "/usr/bin/python3.13", now)
 	}
 
-	got := anomaliesOfType(t, store, "C2_BEACONING")
+	got := firstBeacons(t, store)
 	if len(got) != 1 {
 		t.Fatalf("four addresses of one counterparty raised %d beacon findings", len(got))
 	}
@@ -798,7 +811,7 @@ func TestABrowserBeaconingToRentedComputeIsAFinding(t *testing.T) {
 	// 159.65.0.0/16 is DigitalOcean in the built-in table: resolved, and rented.
 	beaconEvents(engine, "linux-52", "159.65.0.20", "/opt/google/chrome/chrome", time.Now().UTC().Add(-2*time.Hour))
 
-	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 1 {
+	if got := firstBeacons(t, store); len(got) != 1 {
 		t.Fatalf("a browser beaconing to rented compute raised %d findings, want 1", len(got))
 	}
 }
@@ -810,7 +823,7 @@ func TestAnImplantNamedLikeAQuietProgramIsStillABeacon(t *testing.T) {
 		engine, store := noiseEngine(t)
 		// 104.16.0.1 is Cloudflare, which the shipped tuning vouches for.
 		beaconEvents(engine, fmt.Sprintf("linux-6%d", i), "104.16.0.1", path, time.Now().UTC().Add(-2*time.Hour))
-		if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) != 1 {
+		if got := firstBeacons(t, store); len(got) != 1 {
 			t.Errorf("%s beaconing to a vouched network raised %d findings, want 1", path, len(got))
 		}
 	}

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -86,7 +87,7 @@ func (s *Store) RunsAgentRuntimes(tenantID, endpointID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var one int
-	return s.db.QueryRow(`SELECT 1 FROM agent_egress_runtimes WHERE tenant_id = ? AND endpoint_id = ? LIMIT 1`,
+	return s.db.QueryRow(`SELECT 1 FROM agent_egress_runtimes WHERE tenant_id = ? AND endpoint_id = ? AND runtime != '*' LIMIT 1`,
 		tenantID, endpointID).Scan(&one) == nil
 }
 
@@ -171,4 +172,177 @@ func (s *Store) SummariseHuntLeads(since time.Time) (HuntWindow, error) {
 		out.ByHost[host] += n
 	}
 	return out, rows.Err()
+}
+
+// Alert classes (detector/class.go). A page is pushed and asked about, once
+// per incident; a record is stored with its evidence and only counted; a
+// digest is one daily line per group. Record and digest findings are held
+// like hunt leads (held_reason hunt), so only pages are open alerts.
+const (
+	ClassPage   = "page"
+	ClassRecord = "record"
+	ClassDigest = "digest"
+)
+
+// SetAlertClassifier installs the function that stamps a finding's class,
+// reason and incident before CreateAnomalyAlert writes it. The detector
+// installs it; nil removes it.
+func (s *Store) SetAlertClassifier(f func(*AnomalyAlert)) {
+	if f == nil {
+		s.classifier.Store(nil)
+		return
+	}
+	s.classifier.Store(&f)
+}
+
+// AlertClass is a finding's stamped class: the evidence's class field, or for
+// a finding written before classes, page unless it is held as a hunt lead.
+func AlertClass(a AnomalyAlert) string {
+	var f struct {
+		Class string `json:"class"`
+	}
+	if strings.TrimSpace(a.Evidence) != "" && json.Unmarshal([]byte(a.Evidence), &f) == nil {
+		switch f.Class {
+		case ClassPage, ClassRecord, ClassDigest:
+			return f.Class
+		}
+	}
+	if a.HeldReason == HeldHunt {
+		return ClassRecord
+	}
+	return ClassPage
+}
+
+// OpenIncident finds the incident a page with this key joins: the newest
+// paging finding carrying the key since a point in time. It returns the
+// incident id ("" when none is open) and the worst severity it has paged at.
+func (s *Store) OpenIncident(tenantID, endpointID, key string, since time.Time) (id, worst string, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT json_extract(evidence, '$.incident'), severity FROM anomaly_alerts
+		WHERE tenant_id = ? AND endpoint_id = ? AND timestamp >= ? AND json_valid(evidence)
+			AND json_extract(evidence, '$.incident_key') = ?
+		ORDER BY timestamp DESC LIMIT 200`, tenantID, endpointID, since.UTC(), key)
+	if err != nil {
+		return "", "", err
+	}
+	defer rows.Close()
+	rank := map[string]int{"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+	for rows.Next() {
+		var inc *string
+		var sev string
+		if err := rows.Scan(&inc, &sev); err != nil {
+			return "", "", err
+		}
+		if inc == nil || *inc == "" {
+			continue
+		}
+		if id == "" {
+			id = *inc
+		}
+		if *inc == id && rank[sev] > rank[worst] {
+			worst = sev
+		}
+	}
+	return id, worst, rows.Err()
+}
+
+// PagedIncident is one incident that paged in a window.
+type PagedIncident struct {
+	Incident string
+	Type     string
+	Host     string
+	Alerts   int
+}
+
+// PagedIncidents lists the incidents of the paging findings raised since a
+// point in time, the drill endpoint aside, most alerts first.
+func (s *Store) PagedIncidents(since time.Time, excludeEndpoint string) ([]PagedIncident, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT COALESCE(json_extract(evidence, '$.incident'), id), anomaly_type, hostname, COUNT(*) FROM anomaly_alerts
+		WHERE timestamp >= ? AND held_reason = '' AND endpoint_id != ? AND json_valid(evidence)
+			AND json_extract(evidence, '$.class') = ?
+		GROUP BY 1 ORDER BY 4 DESC`, since.UTC(), excludeEndpoint, ClassPage)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PagedIncident
+	for rows.Next() {
+		var p PagedIncident
+		if err := rows.Scan(&p.Incident, &p.Type, &p.Host, &p.Alerts); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ClassWindow counts the record and digest findings since a point in time.
+type ClassWindow struct {
+	Total  int            `json:"total"`
+	ByType map[string]int `json:"by_type"`
+	ByHost map[string]int `json:"by_host"`
+}
+
+// SummariseClass counts one class's findings raised since a point in time.
+func (s *Store) SummariseClass(class string, since time.Time) (ClassWindow, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := ClassWindow{ByType: map[string]int{}, ByHost: map[string]int{}}
+	rows, err := s.db.Query(`SELECT anomaly_type, hostname, COUNT(*) FROM anomaly_alerts
+		WHERE timestamp >= ? AND json_valid(evidence) AND json_extract(evidence, '$.class') = ?
+		GROUP BY 1, 2`, since.UTC(), class)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var typ, host string
+		var n int
+		if err := rows.Scan(&typ, &host, &n); err != nil {
+			return out, err
+		}
+		out.Total += n
+		out.ByType[typ] += n
+		out.ByHost[host] += n
+	}
+	return out, rows.Err()
+}
+
+// ClassAlerts returns the newest findings of one class since a point in
+// time, at most limit of them.
+func (s *Store) ClassAlerts(class string, since time.Time, limit int) ([]AnomalyAlert, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT id, tenant_id, endpoint_id, hostname, anomaly_type, severity, title, description,
+		COALESCE(evidence, ''), held_reason, process_path, dst_ip, dst_port, timestamp FROM anomaly_alerts
+		WHERE timestamp >= ? AND json_valid(evidence) AND json_extract(evidence, '$.class') = ?
+		ORDER BY timestamp DESC LIMIT ?`, since.UTC(), class, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AnomalyAlert
+	for rows.Next() {
+		var a AnomalyAlert
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.EndpointID, &a.Hostname, &a.AnomalyType, &a.Severity, &a.Title,
+			&a.Description, &a.Evidence, &a.HeldReason, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DestinationPrevalence counts the devices that have reached an address
+// (or, when named, the name) in their communication profiles.
+func (s *Store) DestinationPrevalence(tenantID, dstIP, domain string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(DISTINCT endpoint_id) FROM comm_profiles
+		WHERE tenant_id = ? AND (dst_ip = ? OR (? != '' AND domain = ?))`, tenantID, dstIP, domain, domain).Scan(&n)
+	return n, err
 }

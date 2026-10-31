@@ -936,8 +936,9 @@ func TestKnownWorkloadExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
 
 // A loosening change carries the floor drill run against the policy it would
 // save into what the authority signs, so the audit shows what it blinds: an
-// exclusion over an internet range blinds the 10 MB burst, a container
-// network over the LAN blinds the lateral sweeps; a case already blinded is
+// exclusion over an internet range blinds the 10 MB burst and the rare
+// beacon, a container network over the LAN blinds the lateral sweeps and the
+// lab escape; a case already blinded is
 // not counted again.
 func TestTheAuthorizationRecordsWhatALooseningChangeWouldBlind(t *testing.T) {
 	t.Parallel()
@@ -946,14 +947,14 @@ func TestTheAuthorizationRecordsWhatALooseningChangeWouldBlind(t *testing.T) {
 	expires := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
 	body := `{"name":"uploads","dst_ip_range":"203.0.113.0/24","reason":"backup target","expires_at":"` + expires + `"}`
 	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/exclusions", body, ""), http.StatusCreated)
-	if !strings.HasPrefix(a.Summary, "BLINDS 1 FLOOR CASE: bandwidth burst; ") {
+	if !strings.HasPrefix(a.Summary, "BLINDS 2 FLOOR CASES: bandwidth burst, rare beacon; ") {
 		t.Fatalf("exclusion authorization = %q", a.Summary)
 	}
 
 	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"container_cidrs":["192.168.250.0/24"]}`, ""), http.StatusOK)
 	// The burst the live exclusion already blinds is not this change's; the
 	// quiet processes' lateral sweeps are.
-	if !strings.HasPrefix(a.Summary, "BLINDS 12 FLOOR CASES: lateral sweep, agent ssh fan-out reaching a floor port and 10 more; container_cidrs +192.168.250.0/24") {
+	if !strings.HasPrefix(a.Summary, "BLINDS 13 FLOOR CASES: lateral sweep, lab escape and 11 more; container_cidrs +192.168.250.0/24") {
 		t.Fatalf("tuning authorization = %q", a.Summary)
 	}
 	if len(store.GetDetectionTuning().ContainerCIDRs) != 1 {

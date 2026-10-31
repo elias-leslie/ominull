@@ -236,18 +236,18 @@ func TestAFirstLiveEventDoesNotCancelTheSeed(t *testing.T) {
 // runtime does not get a second silent learning week.
 func TestRetentionDoesNotReopenTheLearningWeek(t *testing.T) {
 	engine, store := noiseEngine(t)
-	start := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	start := time.Now().UTC().Add(-100 * 24 * time.Hour)
 	engine.Evaluate(agentEvent("linux-75", claudePath, "api.anthropic.com", "160.79.104.10", 443, 100, start))
 	if _, err := store.AddAgentUpload("default", "linux-75", "claude", 100, start); err != nil {
 		t.Fatal(err)
 	}
 	policy := storage.DefaultRetention()
-	policy.CommProfiles = 30 * 24 * time.Hour
-	removed, err := store.PruneOldData(policy)
+	removed, err := store.PruneOldData(policy) // the default 90-day novelty memory
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed["agent_egress_destinations"] != 1 || removed["agent_egress_hourly"] != 1 {
+	// The runtime's row and the device's row for the destination.
+	if removed["agent_egress_destinations"] != 2 || removed["agent_egress_hourly"] != 1 {
 		t.Fatalf("retention removed %v", removed)
 	}
 	engine.Evaluate(agentEvent("linux-75", claudePath, "drop.attacker.example", "198.51.100.40", 443, 100, time.Now().UTC()))

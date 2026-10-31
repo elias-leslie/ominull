@@ -335,6 +335,8 @@ func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyCh
 			}
 		case dir == addLoosens:
 			mid[k] = keptEntries(a[k], b[k])
+		case dir == removeLoosens:
+			mid[k] = unionEntries(a[k], b[k])
 		case dir == vendorField:
 			mid[k] = keptVendors(a[k], b[k])
 		case dir == workloadField:
@@ -372,6 +374,26 @@ func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyCh
 	rest := tuningChange(c.op, s.store.GetDetectionTuning(), after)
 	rest.tightenedFirst = tight.wording
 	return rest, true
+}
+
+// unionEntries is the list before with the entries after adds: the
+// tightening half of a list where taking an entry away loosens.
+func unionEntries(before, after any) any {
+	list, _ := before.([]any)
+	out := append([]any{}, list...)
+	has := map[string]bool{}
+	for _, x := range list {
+		raw, _ := json.Marshal(x)
+		has[string(raw)] = true
+	}
+	if next, ok := after.([]any); ok {
+		for _, x := range next {
+			if raw, _ := json.Marshal(x); !has[string(raw)] {
+				out = append(out, x)
+			}
+		}
+	}
+	return out
 }
 
 // keptEntries is the list before without the entries after drops.
@@ -547,6 +569,7 @@ const (
 	windowField                          // the off-hours window, judged as a whole
 	vendorField                          // agent runtime vendors: a domain or prefix that was not there loosens
 	workloadField                        // known workloads: a new entry or a later expiry loosens
+	removeLoosens                        // a list entry taken away loosens
 )
 
 var tuningDirections = map[string]tuningDirection{
@@ -592,6 +615,22 @@ var tuningDirections = map[string]tuningDirection{
 	"admin_fanout_sources":   addLoosens,
 	"admin_fanout_targets":   addLoosens,
 	"admin_fanout_max_hosts": higherLoosens,
+
+	"lab_cidrs":               addLoosens,
+	"infra_cidrs":             addLoosens,
+	"decoy_addrs":             removeLoosens,
+	"tunnel_services":         removeLoosens,
+	"intel_page_confidence":   higherLoosens,
+	"auto_isolate_roles":      removeLoosens,
+	"page_incident_hours":     higherLoosens,
+	"page_budget_per_week":    ignored, // a health note; it never holds a page back
+	"lan_sweep_hosts":         higherLoosens,
+	"lab_escape_hosts":        higherLoosens,
+	"beacon_page_score":       higherLoosens,
+	"beacon_rare_devices":     lowerLoosens,
+	"new_dest_upload_mb":      higherLoosens,
+	"new_dest_window_min":     lowerLoosens,
+	"max_plausible_rate_mbps": lowerLoosens,
 }
 
 // tuningLoosens names each field whose change loosens detection; empty means
@@ -631,6 +670,8 @@ func tuningLoosens(before, after storage.DetectionTuning) []string {
 			loose = !okA || !okB || (dir == higherLoosens && y > x) || (dir == lowerLoosens && y < x)
 		case addLoosens:
 			loose = addsEntries(a[k], b[k])
+		case removeLoosens:
+			loose = addsEntries(b[k], a[k])
 		case vendorField:
 			loose = vendorsLoosen(a[k], b[k])
 		case workloadField:

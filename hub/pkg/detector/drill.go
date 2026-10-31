@@ -44,14 +44,34 @@ type DrillCase struct {
 	WantIsolated bool `json:"-"`
 	// Tuning is what the case ran with, for judging how its finding reads.
 	Tuning storage.DetectionTuning `json:"-"`
+	// WantClass is the class the finding must carry; "" means page. A rule
+	// that is recorded, not paged, must still raise: the drill proves the
+	// detector sees it, not that it pushes.
+	WantClass string `json:"want_class,omitempty"`
 }
 
-// Raised returns the case's finding of the type it wants.
+// Raised returns the case's finding of the type it wants, the one of the
+// class it wants where there are several (a beacon is raised when it is first
+// seen and again when it is strong enough to page).
 func (c DrillCase) Raised() (storage.AnomalyAlert, bool) {
-	for _, f := range c.Findings {
-		if f.AnomalyType == c.Want {
+	want := c.WantClass
+	if want == "" {
+		want = storage.ClassPage
+	}
+	var first *storage.AnomalyAlert
+	for i, f := range c.Findings {
+		if f.AnomalyType != c.Want {
+			continue
+		}
+		if storage.AlertClass(f) == want {
 			return f, true
 		}
+		if first == nil {
+			first = &c.Findings[i]
+		}
+	}
+	if first != nil {
+		return *first, true
 	}
 	return storage.AnomalyAlert{}, false
 }
@@ -110,7 +130,13 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 
 	ti := flow(drillProgram+"implant", "203.0.113.66", 443, 600, 0)
 	ti.ThreatMatch = &storage.IOC{Value: ti.DstIP, Type: "ipv4", Source: "floor-drill", ThreatType: "c2", Confidence: 100, Active: true}
-	cases = append(cases, run(DrillCase{Rule: "threat-list match isolates", Want: "THREAT_INTEL_MATCH", WantIsolated: true}, live, []storage.Event{ti}))
+	// Run from a personal device: a match isolates only the roles in
+	// auto_isolate_roles, and an agent workstation or the hypervisor is not
+	// cut off automatically.
+	tiEP := ep
+	tiEP.RoleTag = storage.RolePersonal
+	cases = append(cases, runAt(DrillCase{Rule: "threat-list match isolates", Want: "THREAT_INTEL_MATCH", WantIsolated: live.AutoIsolates(storage.RolePersonal)},
+		tiEP, "", live, []storage.Event{ti}))
 
 	cases = append(cases, run(DrillCase{Rule: "sensitive port to the internet", Want: "SENSITIVE_PORT_EGRESS"}, live,
 		[]storage.Event{flow(drillProgram+"smb", "203.0.113.67", 445, 600, 0)}))
@@ -129,14 +155,34 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 	}
 	cases = append(cases, run(DrillCase{Rule: "lateral sweep", Want: "LATERAL_PORT_SWEEP"}, live, fanout))
 
-	cases = append(cases, run(DrillCase{Rule: "bandwidth burst", Want: "BANDWIDTH_SPIKE"}, live,
+	cases = append(cases, run(DrillCase{Rule: "bandwidth burst", Want: "BANDWIDTH_SPIKE", WantClass: storage.ClassRecord}, live,
 		[]storage.Event{flow(drillProgram+"uploader", "203.0.113.69", 443, bandwidthBurstBytes+1<<20, 0)}))
 
 	// A connection test that carried data out is not a connection test: the
 	// resolver bypass is raised and the feed must not explain it away.
 	probe := flow("/usr/bin/bash", "8.8.8.8", 53, 512, 0)
 	probe.CommandLine = "bash -c '</dev/tcp/8.8.8.8/53'"
-	cases = append(cases, run(DrillCase{Rule: "resolver bypass shaped as a connection test", Want: "AGENT_DNS_BYPASS"}, live, []storage.Event{probe}))
+	cases = append(cases, run(DrillCase{Rule: "resolver bypass shaped as a connection test", Want: "AGENT_DNS_BYPASS", WantClass: storage.ClassRecord}, live, []storage.Event{probe}))
+
+	// A decoy address nothing uses: one touch pages. The drill lists its own
+	// decoy, so it runs whether or not the operator has listed any.
+	decoyed := live
+	decoyed.DecoyAddrs = append(append([]string(nil), live.DecoyAddrs...), lan(199))
+	cases = append(cases, run(DrillCase{Rule: "decoy touch", Want: "DECOY_TOUCH"}, decoyed,
+		[]storage.Event{flow(drillProgram+"mapper", lan(199), 80, 60, 0)}))
+
+	// A parked lab guest reaching a home host outside the lab pages.
+	labEP := ep
+	labEP.RoleTag, labEP.Presence = "", storage.PresenceParked
+	cases = append(cases, runAt(DrillCase{Rule: "lab escape", Want: "LAB_ESCAPE"}, labEP, "", live,
+		[]storage.Event{flow(drillProgram+"escape", lan(198), 8080, 60, 0)}))
+
+	// A metronomic, uniform beacon to a destination no device reaches pages.
+	var beacon []storage.Event
+	for i := 0; i <= 40; i++ {
+		beacon = append(beacon, flow(drillProgram+"implant", "203.0.113.70", 443, 600, time.Duration(i)*time.Minute))
+	}
+	cases = append(cases, run(DrillCase{Rule: "rare beacon", Want: "C2_BEACONING"}, live, beacon))
 
 	// An agent's ssh fan-out from an admin workstation that also reaches SMB:
 	// raised, and neither the actor nor the admin rule may explain it.
@@ -277,7 +323,8 @@ func drillExclusion(ex storage.Exclusion, ep storage.Endpoint, lan func(int) str
 			kind = "ipv6"
 		}
 		ti.ThreatMatch = &storage.IOC{Value: to[0], Type: kind, Source: "floor-drill", ThreatType: "c2", Confidence: 100, Active: true}
-		cases = add(cases, DrillCase{Rule: "threat-list match", Want: "THREAT_INTEL_MATCH", WantIsolated: true}, []storage.Event{ti})
+		role := NewClassContext(tuning, nil, nil).RoleOf(ep)
+		cases = add(cases, DrillCase{Rule: "threat-list match", Want: "THREAT_INTEL_MATCH", WantIsolated: tuning.AutoIsolates(role)}, []storage.Event{ti})
 	}
 	if to, ok := dests(1, false, public("203.0.113.67")); ok && (ex.Port == 0 || FloorPort(int(ex.Port))) {
 		port := ex.Port
@@ -316,7 +363,7 @@ func drillExclusion(ex storage.Exclusion, ep storage.Endpoint, lan func(int) str
 	google := netip.MustParseAddr("8.8.8.8")
 	if (!ranged || prefix.Contains(google)) && (ex.Port == 0 || ex.Port == 53) &&
 		(tuning.AgentRuntimeOf(resolver) != "" || isInterpreterOrShell(name)) {
-		cases = add(cases, DrillCase{Rule: "resolver bypass", Want: "AGENT_DNS_BYPASS"}, []storage.Event{flow(resolver, google.String(), 53, 512, 0)})
+		cases = add(cases, DrillCase{Rule: "resolver bypass", Want: "AGENT_DNS_BYPASS", WantClass: storage.ClassRecord}, []storage.Event{flow(resolver, google.String(), 53, 512, 0)})
 	}
 	return cases
 }

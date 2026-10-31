@@ -61,7 +61,7 @@ func main() {
 	consoleTLSKey := flag.String("console-tls-key", envOr("OMINULL_CONSOLE_TLS_KEY", ""), "PEM private key for --console-tls-cert")
 	consoleHostname := flag.String("console-hostname", envOr("OMINULL_CONSOLE_HOSTNAME", ""), "Canonical DNS hostname for the operator console (required for WebAuthn RP ID)")
 	retentionDays := flag.Int("retention-days", envInt("OMINULL_RETENTION_DAYS", 14), "Days of raw flow telemetry to keep (0 disables pruning)")
-	commRetentionDays := flag.Int("comm-retention-days", envInt("OMINULL_COMM_RETENTION_DAYS", 14), "Days of aggregated communication profiles to keep (0 disables pruning)")
+	commRetentionDays := flag.Int("comm-retention-days", envInt("OMINULL_COMM_RETENTION_DAYS", 90), "Days of aggregated communication profiles and learned destinations (the novelty memory) to keep (0 disables pruning)")
 	alertRetentionDays := flag.Int("alert-retention-days", envInt("OMINULL_ALERT_RETENTION_DAYS", 90), "Days of alerts to keep (0 disables pruning)")
 	auditRetentionDays := flag.Int("audit-retention-days", envInt("OMINULL_AUDIT_RETENTION_DAYS", 365), "Days of audit log to keep (0 disables pruning)")
 	accessTeam := flag.String("access-team", envOr("OMINULL_ACCESS_TEAM", ""), "Cloudflare Access team name")

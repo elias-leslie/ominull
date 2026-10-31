@@ -777,3 +777,26 @@ func (s *Store) RefreshRegistryVendorClaims(revision string, vendorFor func(stri
 	}
 	return len(changes), nil
 }
+
+// KnownAssetIPs is every address the asset graph holds for a tenant (and the
+// default tenant, which owns what was discovered before any client did): the
+// hosts the router and the scans know, enrolled or not, except the address
+// a retired endpoint's agent last reported.
+func (s *Store) KnownAssetIPs(tenantID string) (map[string]bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT DISTINCT ip FROM assets WHERE ip != '' AND (tenant_id = ? OR tenant_id = 'default' OR ? = '')
+		AND COALESCE(agent_endpoint_id, '') NOT IN (SELECT id FROM endpoints WHERE status = 'retired')`, tenantID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var ip string
+		if rows.Scan(&ip) == nil {
+			out[ip] = true
+		}
+	}
+	return out, rows.Err()
+}

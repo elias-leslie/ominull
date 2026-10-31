@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ominull/hub/pkg/netaddr"
@@ -422,6 +423,10 @@ type Store struct {
 	dataReport dataReportCache
 	// uploads counts agent request bytes before they are written (uploads.go).
 	uploads uploadLedger
+
+	// classifier stamps each finding's class before it is written
+	// (SetAlertClassifier).
+	classifier atomic.Pointer[func(*AnomalyAlert)]
 }
 
 func New(dbPath string) (*Store, error) {
@@ -789,6 +794,9 @@ func (s *Store) initSchema() error {
 	}
 	// A failed repair is retried at the next start; it never keeps the hub down.
 	if err := s.repairByteCounts(); err != nil {
+		log.Printf("[!] %v", err)
+	}
+	if err := s.repairImplausibleRates(); err != nil {
 		log.Printf("[!] %v", err)
 	}
 	return nil
@@ -1839,6 +1847,10 @@ func (s *Store) ListCommProfiles(level string, id string, limit int) ([]CommProf
 /* ANOMALY ALERTS */
 
 func (s *Store) CreateAnomalyAlert(a AnomalyAlert) error {
+	// Classified before the lock: the classifier reads the store (incidents).
+	if f := s.classifier.Load(); f != nil {
+		(*f)(&a)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

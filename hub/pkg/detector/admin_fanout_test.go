@@ -208,8 +208,9 @@ func TestAdminFanoutTargetsMustBePrivate(t *testing.T) {
 	}
 	tuning.AdminFanoutTargets = []string{"10.0.0.1", "192.168.1.0/24"}
 	saved, err := store.SaveDetectionTuning(tuning, "test")
-	if err != nil || len(saved.AdminFanoutTargets) != 2 || saved.AdminFanoutTargets[0] != "10.0.0.1/32" {
-		t.Fatalf("private targets: %v %v", saved.AdminFanoutTargets, err)
+	// The two-address target list became infra_cidrs: the entries move there.
+	if err != nil || len(saved.AdminFanoutTargets) != 0 || len(saved.InfraCIDRs) != 2 || saved.InfraCIDRs[0] != "10.0.0.1/32" {
+		t.Fatalf("private targets: %v %v %v", saved.AdminFanoutTargets, saved.InfraCIDRs, err)
 	}
 }
 

@@ -110,5 +110,45 @@ func ClampToFloor(t storage.DetectionTuning) (storage.DetectionTuning, []string)
 	ceiling("bandwidth_cooldown_minutes", &t.BandwidthCooldown, floorBandwidthCooldown)
 	ceiling("warmup_hours", &t.WarmupHours, floorWarmupHours)
 	ceiling("admin_fanout_max_hosts", &t.AdminFanoutMax, floorAdminFanoutMax)
+	// The must-page rules (class.go) have floors too: a tuning may make them
+	// page sooner, never later.
+	ceiling("intel_page_confidence", &t.IntelPageConfidence, floorIntelPageConfidence)
+	ceiling("lan_sweep_hosts", &t.LANSweepHosts, lateralHosts)
+	ceiling("lab_escape_hosts", &t.LabEscapeHosts, floorLabEscapeHosts)
+	ceiling("new_dest_upload_mb", &t.NewDestUploadMB, floorNewDestUploadMB)
+	ceiling("page_incident_hours", &t.PageIncidentHours, floorPageIncidentHours)
+	if t.NewDestWindowMin < floorNewDestWindowMin {
+		notes = append(notes, fmt.Sprintf("new_dest_window_min %d is below the floor and runs at %d", t.NewDestWindowMin, floorNewDestWindowMin))
+		t.NewDestWindowMin = floorNewDestWindowMin
+	}
+	if t.BeaconPageScore > floorBeaconPageScore {
+		notes = append(notes, fmt.Sprintf("beacon_page_score %.2f is past the floor and runs at %.2f", t.BeaconPageScore, floorBeaconPageScore))
+		t.BeaconPageScore = floorBeaconPageScore
+	}
+	if t.MaxPlausibleRateMbps < floorMaxPlausibleRateMbps {
+		notes = append(notes, fmt.Sprintf("max_plausible_rate_mbps %d is below the floor and runs at %d", t.MaxPlausibleRateMbps, floorMaxPlausibleRateMbps))
+		t.MaxPlausibleRateMbps = floorMaxPlausibleRateMbps
+	}
 	return t, notes
 }
+
+// Must-page floors.
+const (
+	// floorIntelPageConfidence is the highest confidence a threat-intel match
+	// may need before it pages.
+	floorIntelPageConfidence = 90
+	// floorLabEscapeHosts is the most hosts outside the lab a lab host may
+	// reach before it pages.
+	floorLabEscapeHosts = 3
+	// floorNewDestUploadMB and floorNewDestWindowMin bound the new-place
+	// upload: at most 10 MB, judged over at least the first half hour.
+	floorNewDestUploadMB  = 10
+	floorNewDestWindowMin = 30
+	// floorBeaconPageScore is the highest score a beacon may need to page.
+	floorBeaconPageScore = 0.95
+	// floorMaxPlausibleRateMbps is the lowest rate the tuning may call
+	// implausible: 2.5 Gb/s, faster than any link a laptop has here.
+	floorMaxPlausibleRateMbps = 2500
+	// floorPageIncidentHours is the longest one incident may hold its alerts.
+	floorPageIncidentHours = 24
+)

@@ -160,7 +160,7 @@ func TestAnEndpointOutsideAWindowIsStillJudged(t *testing.T) {
 		t.Fatal("an endpoint outside every window raised nothing")
 	}
 	for _, a := range spikes {
-		if a.HeldReason != "" {
+		if a.HeldReason == storage.HeldLearning {
 			t.Fatalf("a window over another host held this finding: %+v", a)
 		}
 	}

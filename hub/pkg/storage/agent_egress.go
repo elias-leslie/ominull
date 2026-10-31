@@ -210,10 +210,11 @@ func (s *Store) ListAgentDestinations(tenantID string, limit int) ([]AgentDestin
 	if limit <= 0 || limit > 5000 {
 		limit = 500
 	}
-	q := `SELECT tenant_id, endpoint_id, runtime, destination, first_seen, last_seen, events, bytes_out FROM agent_egress_destinations`
+	q := `SELECT tenant_id, endpoint_id, runtime, destination, first_seen, last_seen, events, bytes_out FROM agent_egress_destinations
+		WHERE runtime != '*'`
 	args := []any{}
 	if tenantID != "" {
-		q += ` WHERE tenant_id = ?`
+		q += ` AND tenant_id = ?`
 		args = append(args, tenantID)
 	}
 	q += ` ORDER BY last_seen DESC LIMIT ?`
@@ -241,9 +242,20 @@ func (s *Store) ListAgentDestinations(tenantID string, limit int) ([]AgentDestin
 // being empty, says it has run, so a runtime event that lands first cannot
 // cancel it. The profiles are read without holding the write lock.
 func (s *Store) SeedAgentDestinations(classify func(processPath, processName, domain, dstIP string) (runtime, destination string)) (int, error) {
+	return s.SeedDestinations("seeded", classify)
+}
+
+// DeviceDestinations is the runtime column of the rows that remember where a
+// device as a whole has sent anything (the new-place upload rule), beside the
+// per-runtime rows.
+const DeviceDestinations = "*"
+
+// SeedDestinations is SeedAgentDestinations under its own marker, so a
+// baseline added later (the device-wide one) is seeded once too.
+func (s *Store) SeedDestinations(marker string, classify func(processPath, processName, domain, dstIP string) (runtime, destination string)) (int, error) {
 	var done string
 	s.mu.RLock()
-	err := s.db.QueryRow(`SELECT value FROM agent_egress_meta WHERE key = 'seeded'`).Scan(&done)
+	err := s.db.QueryRow(`SELECT value FROM agent_egress_meta WHERE key = ?`, marker).Scan(&done)
 	s.mu.RUnlock()
 	switch {
 	case err == nil:
@@ -285,7 +297,7 @@ func (s *Store) SeedAgentDestinations(classify func(processPath, processName, do
 			return 0, err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO agent_egress_meta (key, value) VALUES ('seeded', ?) ON CONFLICT DO NOTHING`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+	if _, err := tx.Exec(`INSERT INTO agent_egress_meta (key, value) VALUES (?, ?) ON CONFLICT DO NOTHING`, marker, time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return 0, err
 	}
 	return len(acc), tx.Commit()

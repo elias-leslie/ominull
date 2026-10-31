@@ -108,6 +108,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	}
 
 	events := normalizeTelemetryEvents(batch.Events, tenantID, batch.EndpointID, now)
+	implausible := s.dropImplausibleRates(events, *persisted)
 	applyCollectorLoss(events, previousHealth, batch.CollectorHealth)
 	snapshot, err := s.telemetrySnapshot(tenantID, *persisted, events)
 	if err != nil {
@@ -140,6 +141,7 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 		}
 	}
 	s.detector.EvaluateBatch(events, snapshot)
+	implausible()
 
 	resp, err := s.telemetryControlResponse(r, tenantID, batch.EndpointID, batch.DriverVersion, batch.UpdateCapability)
 	if err != nil {
@@ -182,6 +184,7 @@ func (s *Server) ingestTelemetryReplay(r *http.Request, tenantID string, batch T
 		return nil, err
 	}
 	events := normalizeTelemetryEvents(batch.Events, tenantID, batch.EndpointID, time.Now().UTC())
+	implausible := s.dropImplausibleRates(events, *persisted)
 	snapshot, err := s.telemetrySnapshot(tenantID, *persisted, events)
 	if err != nil {
 		return nil, err
@@ -191,7 +194,21 @@ func (s *Server) ingestTelemetryReplay(r *http.Request, tenantID string, batch T
 		return nil, fmt.Errorf("persist replayed batch: %w", err)
 	}
 	s.detector.EvaluateBatch(events, snapshot)
+	implausible()
 	return map[string]interface{}{"status": "ok", "replayed": len(events)}, nil
+}
+
+// dropImplausibleRates makes unmeasured, before anything stores them, the
+// samples whose rate is past max_plausible_rate_mbps, and returns the call
+// that notes it (a collector-health record, at most hourly per endpoint),
+// made once the batch is stored.
+func (s *Server) dropImplausibleRates(events []storage.Event, ep storage.Endpoint) func() {
+	limit := float64(s.store.GetDetectionTuning().MaxPlausibleRateMbps) * 125000
+	first, rate, n := storage.DropImplausibleRates(events, limit)
+	if n == 0 {
+		return func() {}
+	}
+	return func() { s.detector.NoteImplausibleRate(first, ep, rate, limit, n, time.Now().UTC()) }
 }
 
 func requestRemoteIP(r *http.Request) string {

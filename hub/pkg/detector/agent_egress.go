@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/netip"
@@ -25,11 +26,16 @@ import (
 // "Codex reached a new site" is judged against Codex, not against the estate.
 
 const (
-	agentLargeFirstUpload   = 1 << 20   // a new destination sent a megabyte soon after first contact pages
-	agentFirstContactWindow = time.Hour // how long after first contact an upload counts as the first contact's
-	agentUploadDays         = 14
-	agentDNSCooldown        = time.Hour
+	agentUploadDays  = 14
+	agentDNSCooldown = time.Hour
 )
+
+// firstContactUpload is the new-place line from the tuning: what a new
+// destination must be sent (new_dest_upload_mb) within how long of first
+// contact (new_dest_window_min) to page.
+func firstContactUpload(cfg storage.DetectionTuning) (int64, time.Duration) {
+	return int64(cfg.NewDestUploadMB) << 20, time.Duration(cfg.NewDestWindowMin) * time.Minute
+}
 
 // publicResolvers are the anycast addresses of the public DNS-over-HTTPS and
 // DNS-over-TLS services. A tool talking to one on 443 is resolving names where
@@ -66,7 +72,8 @@ func isDoHHost(name string) bool {
 
 // isResolverBypass reports a connection that resolves names outside the
 // estate's own resolvers: plain DNS or DNS-over-TLS to a public address, or
-// HTTPS to a public DoH service.
+// HTTPS carrying data to a public DoH service. It is recorded, not paged:
+// lookups the router cannot see are a visibility gap, not exfiltration.
 func isResolverBypass(ev storage.Event) bool {
 	if ev.Direction != "OUTBOUND" || isPrivateIP(ev.DstIP) {
 		return false
@@ -75,6 +82,11 @@ func isResolverBypass(ev storage.Event) bool {
 	case 53, 853:
 		return true
 	case 443:
+		// HTTPS to a resolver is a lookup only when something was sent: a
+		// reachability probe to 1.1.1.1:443 (0 bytes out) resolves nothing.
+		if ev.BytesOut <= 0 {
+			return false
+		}
 		a, err := netip.ParseAddr(ev.DstIP)
 		return (err == nil && publicResolvers[a.Unmap()]) || isDoHHost(ev.Domain) || isDoHHost(ev.SNI)
 	}
@@ -138,6 +150,19 @@ func (e *Engine) SeedAgentBaselines() {
 		log.Printf("[-] seeding agent egress baselines: %v", err)
 	} else if n > 0 {
 		log.Printf("[*] Seeded %d agent egress destinations from communication profiles", n)
+	}
+	// Where each device as a whole has sent anything, for the new-place
+	// upload rule (checkNewPlace).
+	n, err = e.store.SeedDestinations("seeded_devices", func(path, _, domain, ip string) (string, string) {
+		if isPrivateIP(ip) || isSensorProcess(path) {
+			return "", ""
+		}
+		return storage.DeviceDestinations, agentDestination(domain, "", ip, threatintel.ResolveGeoIP(ip))
+	})
+	if err != nil {
+		log.Printf("[-] seeding device destinations: %v", err)
+	} else if n > 0 {
+		log.Printf("[*] Seeded %d device destinations from communication profiles", n)
 	}
 }
 
@@ -228,8 +253,8 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 // and never pages on its own, whoever hosts it: most of the web sits on
 // rented compute, and an address the hub could not name is usually a site
 // whose lookup it did not see. What pages (HIGH) is the exfiltration shape:
-// the runtime sending agentLargeFirstUpload or more to the new destination
-// within agentFirstContactWindow of first reaching it. A connection's first
+// the runtime sending new_dest_upload_mb or more to the new destination
+// within new_dest_window_min of first reaching it. A connection's first
 // report carries no bytes on Linux (the agent's first counter reading is its
 // baseline), so the upload is judged over the destination's first window,
 // once, when its total crosses the line.
@@ -246,8 +271,9 @@ func (e *Engine) checkAgentDestination(ev storage.Event, geo threatintel.GeoReco
 		// Inside the runtime's baseline: learned, not new.
 		return
 	}
+	line, window := firstContactUpload(cfg)
 	total := seen.BytesBefore + sent
-	large := total >= agentLargeFirstUpload && seen.BytesBefore < agentLargeFirstUpload && now.Sub(seen.FirstSeen) <= agentFirstContactWindow
+	large := total >= line && seen.BytesBefore < line && now.Sub(seen.FirstSeen) <= window
 	if seen.Known && !large {
 		return
 	}
@@ -266,11 +292,14 @@ func (e *Engine) checkAgentDestination(ev storage.Event, geo threatintel.GeoReco
 			runtime, humanBytes(total), ev.DstIP, ev.DstPort, describeOwner(geo), minutesPhrase(now.Sub(seen.FirstSeen)), seen.Since.UTC().Format("2006-01-02"))
 		alert.Details = fmt.Sprintf("Runtime: %s | Destination: %s | Process: %s | Sent since first contact: %s | First contact: %s | %s",
 			runtime, dest, ev.ProcessPath, humanBytes(total), seen.FirstSeen.UTC().Format(time.RFC3339), describeOwner(geo))
+		alert.Evidence = uploadEvidence(dest, total, seen.FirstSeen)
+	} else {
+		alert.Evidence = uploadEvidence(dest, -1, seen.FirstSeen)
 	}
 	e.recordAnomaly(ev, geo, endpoint, alert)
 }
 
-// minutesPhrase reads a duration under agentFirstContactWindow: "a minute",
+// minutesPhrase reads a duration within the first-contact window: "a minute",
 // "12 minutes".
 func minutesPhrase(d time.Duration) string {
 	if m := int(d.Minutes()); m > 1 {
@@ -310,4 +339,68 @@ func firstNonEmpty(v ...string) string {
 		}
 	}
 	return ""
+}
+
+// uploadEvidence is the first-contact upload a new-destination finding
+// carries; sent < 0 means nothing was uploaded past the line.
+func uploadEvidence(dest string, sent int64, first time.Time) string {
+	fields := map[string]any{"destination": dest, "first_contact": first.UTC().Format(time.RFC3339)}
+	if sent >= 0 {
+		fields["first_upload_bytes"] = sent
+	}
+	raw, _ := json.Marshal(fields)
+	return string(raw)
+}
+
+// checkNewPlace is the new-place upload rule for every program on a device,
+// not only the agent runtimes: the device sending new_dest_upload_mb or more
+// to a destination (registrable domain, else network owner) that nothing on
+// it has reached before, within new_dest_window_min of first reaching it,
+// pages. The device's memory is the runtime-agnostic rows of
+// agent_egress_destinations (storage.DeviceDestinations), seeded once from
+// the communication profiles. Runtime flows feed the memory but are judged
+// by AGENT_NEW_DESTINATION; the sensor's own traffic is left out. It runs
+// before the exclusions: an exclusion is an answer about a destination the
+// operator knows, and this rule is about one nobody has seen.
+func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
+	quietPath string, now time.Time) {
+	if ev.Direction != "OUTBOUND" || isPrivateIP(ev.DstIP) || isSensorProcess(quietPath) {
+		return
+	}
+	dest := agentDestination(ev.Domain, ev.SNI, ev.DstIP, geo)
+	if dest == "" {
+		return
+	}
+	sent := max(ev.BytesOut, 0)
+	seen, err := e.store.ObserveAgentDestination(ev.TenantID, ev.EndpointID, storage.DeviceDestinations, dest, sent, now)
+	if err != nil {
+		log.Printf("[-] device destination write failed for %s: %v", ev.EndpointID, err)
+		return
+	}
+	if cfg.AgentRuntimeOf(ev.ProcessPath) != "" {
+		return
+	}
+	warming, _ := warmingUp(endpoint, cfg, now)
+	learnFor := time.Duration(cfg.AgentBaselineDays) * 24 * time.Hour
+	if warming || seen.FirstSeen.Sub(seen.Since) < learnFor {
+		return
+	}
+	line, window := firstContactUpload(cfg)
+	total := seen.BytesBefore + sent
+	if total < line || seen.BytesBefore >= line || now.Sub(seen.FirstSeen) > window {
+		return
+	}
+	who := firstNonEmpty(endpoint.Hostname, ev.EndpointID)
+	proc := firstNonEmpty(baseName(ev.ProcessPath), "an unattributed process")
+	e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
+		ID: uuid.New().String(), TenantID: ev.TenantID, EndpointID: ev.EndpointID, Hostname: endpoint.Hostname,
+		AnomalyType: "NEW_PLACE_UPLOAD", Technique: "T1567", Severity: "HIGH",
+		Title: fmt.Sprintf("%s sent %s to %s, somewhere it never sent anything before", who, humanBytes(total), dest),
+		Description: fmt.Sprintf("%s on %s sent %s to %s:%d (%s) within %s of first reaching it. Nothing on this device has reached %s since %s.",
+			proc, who, humanBytes(total), ev.DstIP, ev.DstPort, describeOwner(geo), minutesPhrase(now.Sub(seen.FirstSeen)), dest, seen.Since.UTC().Format("2006-01-02")),
+		Details: fmt.Sprintf("Process: %s | Destination: %s | Sent since first contact: %s | First contact: %s | %s",
+			firstNonEmpty(ev.ProcessPath, "-"), dest, humanBytes(total), seen.FirstSeen.UTC().Format(time.RFC3339), describeOwner(geo)),
+		Evidence:    uploadEvidence(dest, total, seen.FirstSeen),
+		ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
+	})
 }

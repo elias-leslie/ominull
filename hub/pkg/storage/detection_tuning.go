@@ -151,6 +151,62 @@ type DetectionTuning struct {
 	AdminFanoutTargets []string `json:"admin_fanout_targets"`
 	AdminFanoutMax     int      `json:"admin_fanout_max_hosts"`
 
+	// Roles and zones (detector/class.go). LabCIDRs are the lab networks
+	// (target VMs, labnet) and InfraCIDRs the estate's own infrastructure
+	// (hypervisor, gateway, vault, guests without an agent): a sweep from an
+	// agent workstation into either is recorded, never paged, and anything a
+	// lab host reaches outside the lab is a lab escape, which pages. Enrolled
+	// endpoints take their zone from their role without being listed.
+	// InfraCIDRs replaces AdminFanoutTargets, whose entries move here.
+	LabCIDRs   []string `json:"lab_cidrs"`
+	InfraCIDRs []string `json:"infra_cidrs"`
+	// DecoyAddrs are LAN addresses ("ip" or "ip:port") nothing legitimate
+	// uses: any connection to one pages, whatever the role or exclusion.
+	DecoyAddrs []string `json:"decoy_addrs"`
+	// TunnelServices are shared fronts (name suffixes) where beacon rarity
+	// means nothing: a non-browser program beaconing to one pages.
+	TunnelServices []string `json:"tunnel_services"`
+
+	// IntelPageConfidence is the threat-intelligence confidence (percent) at
+	// which a match pages; below it the match is recorded.
+	IntelPageConfidence int `json:"intel_page_confidence"`
+	// AutoIsolateRoles are the roles (agent, lab, infra, personal) a paging
+	// threat-intelligence match isolates automatically. The agent and infra
+	// roles are left out by default: cutting the agent workstation or the
+	// hypervisor off the network is worse than the match.
+	AutoIsolateRoles []string `json:"auto_isolate_roles"`
+
+	// PageIncidentHours is how long one incident (device, rule family,
+	// counterparty) stays open: later alerts add to its count and only an
+	// escalation asks again. PageBudgetPerWeek is the alert-fatigue target:
+	// when a week pages more incidents than this, the feed carries an info
+	// "detection health" note naming the noisiest rule. It never suppresses
+	// a page.
+	PageIncidentHours int `json:"page_incident_hours"`
+	PageBudgetPerWeek int `json:"page_budget_per_week"`
+
+	// LANSweepHosts is how many home-zone hosts one process may reach in the
+	// sweep window before it pages; LabEscapeHosts how many hosts outside
+	// the lab a lab host may reach before it pages.
+	LANSweepHosts  int `json:"lan_sweep_hosts"`
+	LabEscapeHosts int `json:"lab_escape_hosts"`
+
+	// A beacon pages when its score is at least BeaconPageScore over at least
+	// half an hour and the destination is seen from at most
+	// BeaconRareDevices devices; any other beacon is in the daily digest.
+	BeaconPageScore   float64 `json:"beacon_page_score"`
+	BeaconRareDevices int     `json:"beacon_rare_devices"`
+
+	// A program sending NewDestUploadMB or more to a place its device never
+	// reached, within NewDestWindowMin of first reaching it, pages.
+	NewDestUploadMB  int `json:"new_dest_upload_mb"`
+	NewDestWindowMin int `json:"new_dest_window_min"`
+
+	// MaxPlausibleRateMbps is the fastest rate a flow can really have. A
+	// counter that claims more (a wrapped or underflowed Windows counter) is
+	// collector trouble, noted as such, never an alert or a baseline sample.
+	MaxPlausibleRateMbps int `json:"max_plausible_rate_mbps"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
 }
@@ -208,7 +264,39 @@ func defaultDetectionTuning() DetectionTuning {
 		QuietProcesses: defaultQuietProcesses(),
 		QuietOrgs:      defaultQuietOrgs(),
 		QuietClients:   defaultQuietClients(),
+
+		TunnelServices:       defaultTunnelServices(),
+		IntelPageConfidence:  IntelPageConfidenceDefault,
+		AutoIsolateRoles:     []string{RoleLab, RolePersonal},
+		PageIncidentHours:    24,
+		PageBudgetPerWeek:    1,
+		LANSweepHosts:        10,
+		LabEscapeHosts:       1,
+		BeaconPageScore:      0.90,
+		BeaconRareDevices:    1,
+		NewDestUploadMB:      1,
+		NewDestWindowMin:     60,
+		MaxPlausibleRateMbps: 10000,
 	}
+}
+
+// IntelPageConfidenceDefault is the threat-intelligence confidence at which a
+// match pages unless the tuning says otherwise.
+const IntelPageConfidenceDefault = 75
+
+// Endpoint roles (detector/class.go).
+const (
+	RoleAgent    = "agent"
+	RoleLab      = "lab"
+	RoleInfra    = "infra"
+	RolePersonal = "personal"
+)
+
+// defaultTunnelServices are the shared tunnel and paste fronts where an
+// implant's beacon looks like everyone else's traffic.
+func defaultTunnelServices() []string {
+	return []string{"trycloudflare.com", "workers.dev", "ngrok.io", "ngrok.app", "ngrok-free.app",
+		"loca.lt", "serveo.net", "localhost.run", "pastebin.com", "transfer.sh"}
 }
 
 // defaultQuietProcesses is a starting point, not a security boundary. Every
@@ -575,11 +663,10 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 	if err := t.validQuietLists(); err != nil {
 		return t, err
 	}
-	targets, err := validAdminTargets(t.AdminFanoutTargets)
+	t, err := t.validZones()
 	if err != nil {
 		return t, err
 	}
-	t.AdminFanoutTargets = targets
 	vendors, err := validAgentRuntimeVendors(t.AgentRuntimeVendors)
 	if err != nil {
 		return t, err
@@ -713,32 +800,160 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AdminFanoutSources = tidyList(t.AdminFanoutSources)
 	t.AdminFanoutTargets = tidyList(t.AdminFanoutTargets)
 	t.AdminFanoutMax = clampInt(t.AdminFanoutMax, 2, 20, AdminFanoutMaxDefault)
+	// The managed-host list became the infrastructure zone.
+	t.InfraCIDRs = tidyList(append(t.InfraCIDRs, t.AdminFanoutTargets...))
+	t.AdminFanoutTargets = []string{}
+	t.LabCIDRs = tidyList(t.LabCIDRs)
+	t.DecoyAddrs = tidyList(t.DecoyAddrs)
+	t.TunnelServices = tidyList(t.TunnelServices)
+	t.AutoIsolateRoles = tidyList(t.AutoIsolateRoles)
+	t.IntelPageConfidence = clampInt(t.IntelPageConfidence, 1, 100, IntelPageConfidenceDefault)
+	t.PageIncidentHours = clampInt(t.PageIncidentHours, 1, 168, 24)
+	t.PageBudgetPerWeek = clampInt(t.PageBudgetPerWeek, 1, 1000, 1)
+	t.LANSweepHosts = clampInt(t.LANSweepHosts, 2, 256, 10)
+	t.LabEscapeHosts = clampInt(t.LabEscapeHosts, 1, 256, 1)
+	if t.BeaconPageScore <= 0 || t.BeaconPageScore > 1 {
+		t.BeaconPageScore = 0.90
+	}
+	t.BeaconRareDevices = clampInt(t.BeaconRareDevices, 1, 1000, 1)
+	t.NewDestUploadMB = clampInt(t.NewDestUploadMB, 1, 100000, 1)
+	t.NewDestWindowMin = clampInt(t.NewDestWindowMin, 1, 1440, 60)
+	t.MaxPlausibleRateMbps = clampInt(t.MaxPlausibleRateMbps, 100, 1000000, 10000)
 	return t
+}
+
+// validZones checks the lab and infrastructure networks (private prefixes
+// that do not overlap), the decoys (private address, optional port), the
+// tunnel fronts (names) and the auto-isolate roles.
+func (t DetectionTuning) validZones() (DetectionTuning, error) {
+	prefixes := func(list []string, what string) ([]string, []netip.Prefix, error) {
+		out, ps := make([]string, 0, len(list)), make([]netip.Prefix, 0, len(list))
+		for _, raw := range list {
+			p, err := netip.ParsePrefix(raw)
+			if err != nil {
+				if a, aerr := netip.ParseAddr(raw); aerr == nil {
+					p, err = a.Prefix(a.BitLen())
+				}
+			}
+			if err != nil || !privatePrefix(p) {
+				return nil, nil, fmt.Errorf("%w: %s %q must be an address or network inside private IPv4 or IPv6 space", ErrInvalidDetectionTuning, what, raw)
+			}
+			out, ps = append(out, p.Masked().String()), append(ps, p.Masked())
+		}
+		return tidyList(out), ps, nil
+	}
+	var lab, infra []netip.Prefix
+	var err error
+	if t.LabCIDRs, lab, err = prefixes(t.LabCIDRs, "lab network"); err != nil {
+		return t, err
+	}
+	if t.InfraCIDRs, infra, err = prefixes(t.InfraCIDRs, "infrastructure network"); err != nil {
+		return t, err
+	}
+	for _, l := range lab {
+		for _, i := range infra {
+			if l.Overlaps(i) {
+				return t, fmt.Errorf("%w: lab network %s overlaps infrastructure network %s; a host is in one zone", ErrInvalidDetectionTuning, l, i)
+			}
+		}
+	}
+	for _, d := range t.DecoyAddrs {
+		if _, _, ok := ParseDecoy(d); !ok {
+			return t, fmt.Errorf("%w: decoy %q must be a private address, optionally with :port", ErrInvalidDetectionTuning, d)
+		}
+	}
+	for _, name := range t.TunnelServices {
+		if name == "" || strings.ContainsAny(name, " /:@*") || !strings.Contains(name, ".") {
+			return t, fmt.Errorf("%w: tunnel service %q must be a domain name such as trycloudflare.com", ErrInvalidDetectionTuning, name)
+		}
+	}
+	for _, r := range t.AutoIsolateRoles {
+		switch r {
+		case RoleAgent, RoleLab, RoleInfra, RolePersonal:
+		default:
+			return t, fmt.Errorf("%w: auto-isolate role %q must be agent, lab, infra or personal", ErrInvalidDetectionTuning, r)
+		}
+	}
+	return t, nil
+}
+
+// ParseDecoy reads a decoy entry: a private address and, optionally, a port
+// (0 = any port).
+func ParseDecoy(entry string) (netip.Addr, uint16, bool) {
+	if ap, err := netip.ParseAddrPort(entry); err == nil {
+		a := ap.Addr().Unmap()
+		return a, ap.Port(), ap.Port() != 0 && privatePrefix(netip.PrefixFrom(a, a.BitLen()))
+	}
+	a, err := netip.ParseAddr(entry)
+	if err != nil {
+		return netip.Addr{}, 0, false
+	}
+	a = a.Unmap()
+	return a, 0, privatePrefix(netip.PrefixFrom(a, a.BitLen()))
+}
+
+// IsDecoy says whether a connection to ip:port touches a decoy.
+func (t DetectionTuning) IsDecoy(ip string, port uint16) bool {
+	a, err := netaddr.Parse(ip)
+	if err != nil {
+		return false
+	}
+	a = a.WithZone("").Unmap()
+	for _, d := range t.DecoyAddrs {
+		if da, dp, ok := ParseDecoy(d); ok && da == a && (dp == 0 || dp == port) {
+			return true
+		}
+	}
+	return false
+}
+
+func inPrefixes(list []string, raw string) bool {
+	a, err := netaddr.Parse(raw)
+	if err != nil {
+		return false
+	}
+	a = a.WithZone("").Unmap()
+	for _, cidr := range list {
+		if p, err := netip.ParsePrefix(cidr); err == nil && p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsLabAddress and IsInfraAddress place an address in the lab or
+// infrastructure zone by the tuning's networks.
+func (t DetectionTuning) IsLabAddress(raw string) bool   { return inPrefixes(t.LabCIDRs, raw) }
+func (t DetectionTuning) IsInfraAddress(raw string) bool { return inPrefixes(t.InfraCIDRs, raw) }
+
+// IsTunnelService says whether a name is one of the shared tunnel fronts.
+func (t DetectionTuning) IsTunnelService(name string) bool {
+	name = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
+	if name == "" {
+		return false
+	}
+	for _, s := range t.TunnelServices {
+		if name == s || strings.HasSuffix(name, "."+s) {
+			return true
+		}
+	}
+	return false
+}
+
+// AutoIsolates says whether a paging threat-intelligence match isolates an
+// endpoint of this role.
+func (t DetectionTuning) AutoIsolates(role string) bool {
+	for _, r := range t.AutoIsolateRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 // AdminFanoutMaxDefault is how many inventoried hosts one admin fan-out may
 // reach in the sweep window before it pages anyway.
 const AdminFanoutMaxDefault = 8
-
-// validAdminTargets turns each admin fan-out target into a masked prefix (a
-// bare address becomes a host prefix). Private space only: a public address
-// is never "our own managed host".
-func validAdminTargets(in []string) ([]string, error) {
-	out := make([]string, 0, len(in))
-	for _, raw := range in {
-		p, err := netip.ParsePrefix(raw)
-		if err != nil {
-			if a, aerr := netip.ParseAddr(raw); aerr == nil {
-				p, err = a.Prefix(a.BitLen())
-			}
-		}
-		if err != nil || !privatePrefix(p) {
-			return nil, fmt.Errorf("%w: admin fan-out target %q must be an address or network inside private IPv4 or IPv6 space", ErrInvalidDetectionTuning, raw)
-		}
-		out = append(out, p.Masked().String())
-	}
-	return tidyList(out), nil
-}
 
 func privatePrefix(p netip.Prefix) bool {
 	if !p.IsValid() || p.Addr().Is4In6() {
@@ -772,7 +987,7 @@ func (t DetectionTuning) IsAdminFanoutTarget(raw string) bool {
 	if err != nil {
 		return false
 	}
-	for _, cidr := range t.AdminFanoutTargets {
+	for _, cidr := range append(t.InfraCIDRs, t.AdminFanoutTargets...) {
 		if p, err := netip.ParsePrefix(cidr); err == nil && p.Contains(a.WithZone("")) {
 			return true
 		}

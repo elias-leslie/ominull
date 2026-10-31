@@ -23,9 +23,10 @@ func TestTheFloorDrillRaisesEveryRuleAndStoresNothing(t *testing.T) {
 		t.Fatalf("a drill that never ran = %+v", f)
 	}
 	rec := srv.runFloorDrill(now)
-	// Eight floor rules, and both sweeps as each shipped quiet process but
+	// Eleven floor rules (decoy touch, lab escape and the rare beacon among
+	// them), and both sweeps as each shipped quiet process but
 	// systemd-resolved, which the code exempts as a local resolver.
-	if want := 8 + 2*(len(storage.DefaultDetectionTuning().QuietProcesses)-1); len(rec.Missed) != 0 || rec.Cases != want {
+	if want := 11 + 2*(len(storage.DefaultDetectionTuning().QuietProcesses)-1); len(rec.Missed) != 0 || rec.Cases != want {
 		t.Fatalf("drill = %+v, want %d clean cases", rec, want)
 	}
 	if f := srv.floorDrillFinding(now); f.SeverityID != ocsfSevInformational || f.StatusID != ocsfStatusResolved {
@@ -74,7 +75,7 @@ func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 			if _, err := s.SaveDetectionTuning(tu, "test"); err != nil {
 				t.Fatal(err)
 			}
-		}, []string{"lateral sweep", "agent ssh fan-out reaching a floor port"}},
+		}, []string{"lateral sweep", "lab escape", "agent ssh fan-out reaching a floor port"}},
 		{"exclusion on SMB", func(t *testing.T, s *storage.Store) {
 			if err := s.CreateExclusion(exclusion(445, "")); err != nil {
 				t.Fatal(err)
@@ -84,7 +85,7 @@ func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 			if err := s.CreateExclusion(exclusion(0, "203.0.113.0/24")); err != nil {
 				t.Fatal(err)
 			}
-		}, []string{"bandwidth burst"}},
+		}, []string{"bandwidth burst", "rare beacon"}},
 	} {
 		srv, store := setupTestServer(t)
 		c.blind(t, store)

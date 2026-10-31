@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/detector"
+	"ominull/hub/pkg/storage"
 )
 
 // The weekly floor drill (detector/drill.go), run inside the hub process: not
@@ -73,6 +74,16 @@ func judgeDrillCase(c detector.DrillCase) string {
 	f, ok := c.Raised()
 	if !ok {
 		return fmt.Sprintf("%s: no %s was raised", c.Rule, c.Want)
+	}
+	want := c.WantClass
+	if want == "" {
+		want = storage.ClassPage
+	}
+	if got := storage.AlertClass(f); got != want {
+		return fmt.Sprintf("%s: raised as %s, not %s", c.Rule, got, want)
+	}
+	if want != storage.ClassPage {
+		return "" // recorded as it should be; held by design
 	}
 	if f.HeldReason != "" {
 		return fmt.Sprintf("%s: raised, but held (%s), so it would not reach the feed", c.Rule, f.HeldReason)

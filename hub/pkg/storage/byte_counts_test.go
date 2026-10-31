@@ -93,3 +93,80 @@ func TestByteCountValid(t *testing.T) {
 		}
 	}
 }
+
+// Windows counter faults below MaxByteCount: a pointer-shaped read (1.4e14
+// bytes in 193 s, live 2026-10-18) and an exact 2^32 wrap in a 2.7 s sample
+// claim rates no link carries; a real 12 MB in 10 s does not. Ingest makes the
+// first two unmeasured and keeps the flows.
+func TestImplausibleRatesAreDroppedAtIngest(t *testing.T) {
+	at := time.Date(2026, 10, 18, 1, 43, 0, 0, time.UTC)
+	span := func(d time.Duration) FlowObservation {
+		first, last := at, at.Add(d)
+		return FlowObservation{FirstAt: &first, LastAt: &last}
+	}
+	events := []Event{
+		{BytesIn: 148512329163520, BytesOut: 8589934787, Observation: span(193 * time.Second)},
+		{BytesOut: 1 << 32, Observation: span(2700 * time.Millisecond)},
+		{BytesOut: 12 << 20, Observation: span(10 * time.Second)},
+		{BytesOut: 5 << 30}, // no span: a batch total, not a rate
+	}
+	limit := float64(DefaultDetectionTuning().MaxPlausibleRateMbps) * 125000
+	first, rate, n := DropImplausibleRates(events, limit)
+	if n != 2 || first.BytesIn != 148512329163520 || rate < 7e11 {
+		t.Fatalf("dropped %d, first %+v at %.0f B/s", n, first, rate)
+	}
+	if events[0].BytesIn != 0 || events[0].BytesOut != 0 || events[1].BytesOut != 0 {
+		t.Fatalf("faults kept their bytes: %+v %+v", events[0], events[1])
+	}
+	if events[2].BytesOut != 12<<20 || events[3].BytesOut != 5<<30 {
+		t.Fatalf("real samples lost their bytes: %+v %+v", events[2], events[3])
+	}
+}
+
+// The faults stored before ingest refused them are cleared once: the flow
+// sample by its rate, the profile total by its size.
+func TestStoredImplausibleRatesAreClearedOnce(t *testing.T) {
+	store := newTestStore(t)
+	day := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
+	for i, b := range []int64{148512329163520, 1200} {
+		if _, err := store.db.Exec(`INSERT INTO events
+			(tenant_id, endpoint_id, timestamp, layer, action, direction, protocol,
+			 src_ip, dst_ip, src_port, dst_port, bytes_in, bytes_out, process_path, process_id)
+			VALUES ('default','e1',?,'windows-estats','PERMIT','OUTBOUND',6,'10.0.0.1','10.0.0.2',?,443,?,64,'/bin/x',1)`,
+			day.Add(time.Duration(i)*time.Minute), 50000+i, b); err != nil {
+			t.Fatalf("seed flow: %v", err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE flows SET measured = 1, first_at = ?, last_at = ?`, day.UnixNano(), day.Add(193*time.Second).UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO comm_profiles
+		(id, tenant_id, endpoint_id, process_name, dst_ip, dst_port, first_seen, last_seen, total_bytes_in, total_bytes_out)
+		VALUES ('p1', 'default', 'e1', 'x', '10.0.0.2', 443, ?, ?, 148512329165000, 10), ('p2', 'default', 'e1', 'y', '10.0.0.3', 443, ?, ?, 5000000000, 10)`,
+		day, day, day, day); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSetting(rateRepairSetting, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.repairImplausibleRates(); err != nil {
+		t.Fatal(err)
+	}
+	var in, measured int64
+	if err := store.db.QueryRow(`SELECT SUM(bytes_in), SUM(measured) FROM flows`).Scan(&in, &measured); err != nil {
+		t.Fatal(err)
+	}
+	if in != 1200 || measured != 1 {
+		t.Errorf("flows after repair: in %d measured %d, want only the real sample", in, measured)
+	}
+	var p1, p2 int64
+	if err := store.db.QueryRow(`SELECT (SELECT total_bytes_in FROM comm_profiles WHERE id = 'p1'), (SELECT total_bytes_in FROM comm_profiles WHERE id = 'p2')`).Scan(&p1, &p2); err != nil {
+		t.Fatal(err)
+	}
+	if p1 != 0 || p2 != 5000000000 {
+		t.Errorf("profiles: fault %d (want 0), real 5 GB %d", p1, p2)
+	}
+	if done, _ := store.GetSetting(rateRepairSetting); done == "" {
+		t.Error("the repair is not marked done")
+	}
+}

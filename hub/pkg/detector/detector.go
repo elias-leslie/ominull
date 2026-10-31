@@ -58,14 +58,13 @@ func (b *bandwidthStats) observe(val float64) (median float64, mad float64, z fl
 	switch {
 	case baseline < 2:
 		// Nothing to compare against yet.
-	case mad > 0:
-		z = 0.6745 * (val - median) / mad
-	case median > 0 && val > median:
-		// A process whose transfers are all the same size has a MAD of zero,
-		// and dividing by it would be an infinity dressed up as a score. What
-		// the operator wants to know is how many times its usual volume this
-		// transfer was, expressed on the same scale as the threshold beside it.
-		z = 3.5 * (val / median)
+	default:
+		// A process whose transfers are nearly all the same size has a MAD at
+		// or near zero, and dividing by it turned a 3 MB request against a
+		// 10 B/s median into a z-score of ten million. The spread is floored
+		// at a twentieth of the median, and at a kilobyte, so the score says
+		// how far out the transfer is on a scale a person can read.
+		z = 0.6745 * (val - median) / math.Max(mad, math.Max(median/20, 1024))
 	}
 
 	if len(b.samples) < bandwidthRingSize {
@@ -111,6 +110,7 @@ type Engine struct {
 	alertCooldown  map[string]time.Time        // alertKey -> last triggered time
 	unattributed   map[string]*unattributedRun // endpointID -> destinations we could not name
 	silence        *silenceWatch               // endpoints already reported as gone quiet
+	classes        classCache                  // endpoints the classifier reads (class.go)
 	tuning         storage.DetectionTuning
 	tuningAt       time.Time
 	cancel         context.CancelFunc
@@ -211,6 +211,8 @@ func (e *Engine) Start(ctx context.Context) {
 
 	// Alerting on absence does not depend on events arriving - that is the
 	// point of it - so it starts before the events channel is checked.
+	// Every finding is classified before it is written, whoever writes it.
+	e.store.SetAlertClassifier(e.stampClass)
 	e.StartSilenceWatch(subCtx)
 	e.startLearningFlush(subCtx.Done())
 	go e.backfillHuntTier()
@@ -297,6 +299,19 @@ func (e *Engine) recordAnomaly(ev storage.Event, geo threatintel.GeoRecord, ep s
 			anomaly.HeldReason = storage.HeldLearning
 		}
 	}
+	// The role is the endpoint's as this event saw it, which the classifier's
+	// cached endpoint list may not hold yet (a new enrolment, the drill).
+	if ep.ID != "" {
+		fields := map[string]any{}
+		if json.Unmarshal([]byte(anomaly.Evidence), &fields) == nil && fields != nil {
+			if _, ok := fields["source_role"]; !ok {
+				fields["source_role"] = e.classContext().RoleOf(ep)
+				raw, _ := json.Marshal(fields)
+				anomaly.Evidence = string(raw)
+			}
+		}
+	}
+	e.stampClass(&anomaly)
 	if e.sink != nil {
 		e.sink(anomaly)
 		return nil
@@ -465,11 +480,12 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				Severity:    "CRITICAL",
 				Mitigated:   ev.Action == "BLOCK",
 			}
-			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
+			intel := storage.AnomalyAlert{
 				ID:          alert.ID,
 				TenantID:    ev.TenantID,
 				EndpointID:  ev.EndpointID,
 				Hostname:    endpoint.Hostname,
+				Evidence:    fmt.Sprintf(`{"intel_confidence":%d}`, ev.ThreatMatch.Confidence),
 				AnomalyType: "THREAT_INTEL_MATCH",
 				Technique:   "T1071",
 				Severity:    "CRITICAL",
@@ -480,10 +496,21 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				DstIP:       ev.DstIP,
 				DstPort:     ev.DstPort,
 				Timestamp:   now,
-			})
+			}
+			e.recordAnomaly(ev, geo, endpoint, intel)
 			e.alertf("[!] DETECTION ALERT [CRITICAL]: %s on endpoint %s (%s)", alert.Title, alert.EndpointID, ev.DstIP)
 
-			e.autoIsolate(ev.EndpointID, "Automated Threat Nullification: "+alert.Title)
+			// A match pages at intel_page_confidence and isolates only the
+			// roles in auto_isolate_roles: one stale feed entry an agent
+			// touches during research must not cut the agent workstation or
+			// the hypervisor off the network.
+			cx := e.classContext()
+			role := cx.RoleOf(endpoint)
+			if class, _ := cx.Classify(intel); class == storage.ClassPage && cx.cfg.AutoIsolates(role) {
+				e.autoIsolate(ev.EndpointID, "Automated Threat Nullification: "+alert.Title)
+			} else {
+				e.alertf("[i] threat-intelligence match on %s (%s role, confidence %d%%) not isolated automatically", ev.EndpointID, role, ev.ThreatMatch.Confidence)
+			}
 		}
 	}
 
@@ -492,6 +519,8 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// The detectors read one cached settings row rather than the numbers that
 	// used to be compiled into them.
 	cfg := e.settings()
+	e.checkDecoy(ev, geo, endpoint, cfg, now)
+	role := e.classContext().RoleOf(endpoint)
 	isOffHours := cfg.IsOffHours(now)
 	isInteractiveShell := isInterpreterOrShell(procName)
 
@@ -509,7 +538,12 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// The sweeps and the resolver bypass are floor rules too: no exclusion or
 	// quiet process silences them.
 	e.checkSweeps(ev, geo, endpoint, cfg, quietPath, isInteractiveShell, isOffHours, now)
+	e.checkLabEscape(ev, geo, endpoint, cfg, role, quietPath, now)
 	e.checkResolverBypass(ev, geo, endpoint, cfg, procName, isInteractiveShell, now)
+	// The floor drill (a sink) writes no device memory into the live store.
+	if e.sink == nil {
+		e.checkNewPlace(ev, geo, endpoint, cfg, quietPath, now)
+	}
 
 	// Custom exclusions (pinholes and allowlists) apply only from here on. The
 	// floor rules above stay out of their reach: an exclusion that silenced a
@@ -572,7 +606,10 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// The key is the counterparty, not the address, for the reason the
 	// first-seen detector below gives: one conversation through a CDN reaches
 	// a new edge address every few minutes, and each one used to be a new HIGH.
-	if roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && !isKnownService && !warming &&
+	// Cut on agent and lab hosts: agents work around the clock and lab guests
+	// run when an experiment does, so the hour says nothing there.
+	offHoursMeaningful := role != storage.RoleAgent && role != storage.RoleLab
+	if offHoursMeaningful && roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && !isKnownService && !warming &&
 		ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
 		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, strings.ToLower(workload), counterpartyKey(geo))
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
@@ -634,6 +671,13 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 			seconds := math.Max(1, ev.Observation.LastAt.Sub(*ev.Observation.FirstAt).Seconds())
 			bwValue /= seconds
 		}
+	}
+	// A rate past any real link is a counter fault (a Windows counter that
+	// wrapped at 2^32 or went backwards), not a transfer. Ingest already made
+	// such samples unmeasured and noted them; one reaching here another way
+	// is still kept out of the baseline.
+	if maxRate := float64(cfg.MaxPlausibleRateMbps) * 125000; measuredRate && rateEligible && bwValue > maxRate {
+		rateEligible = false
 	}
 	if rateEligible && ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !isTrustedSys &&
 		!runtimeToOwnVendor(cfg, ev) {
@@ -820,13 +864,24 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				beaconOwner = ev.DstIP
 			}
 			alertKey := fmt.Sprintf("beacon:%s:%s:%s", ev.EndpointID, procName, beaconOwner)
-			if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BeaconCooldownMin)*time.Minute) {
+			cooldown := time.Duration(cfg.BeaconCooldownMin) * time.Minute
+			// A beacon is first raised once it has the minimum samples and
+			// span, usually minutes in. One that later holds at
+			// beacon_page_score for half an hour is raised once more (the
+			// strong key), since that is the shape that can page.
+			strong := bev.Score >= cfg.BeaconPageScore && bev.SpanMinutes >= 30
+			first := !e.shouldSuppressAlert(alertKey, cooldown)
+			raise, strengthened := first, false
+			if strong && !e.shouldSuppressAlert(alertKey+":strong", cooldown) && !first {
+				raise, strengthened = true, true
+			}
+			if raise {
 				// The severity follows the evidence. A conversation that only
 				// just cleared the bar is worth looking at; one that is
 				// metronomic to within a few percent for an hour is not the
 				// same finding and should not wear the same word.
 				severity := "MEDIUM"
-				if bev.Score >= 0.90 && bev.SpanMinutes >= 30 {
+				if strong {
 					severity = "HIGH"
 				}
 				alert := storage.Alert{
@@ -857,7 +912,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 					// as numbers. The console can then show how far past the
 					// threshold this verdict actually was, and sort a page of
 					// beacon alerts by strength, instead of re-reading prose.
-					Evidence:    bev.JSON(cfg.BeaconScore),
+					Evidence:    e.beaconClassEvidence(bev.JSON(cfg.BeaconScore), ev, cfg, procName, beaconOwner, strengthened),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,
@@ -1387,7 +1442,12 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 	if procKey == "" || procKey == "." {
 		procKey = "unknown"
 	}
-	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
+	// A scan of the host's own loopback is a program talking to itself, and a
+	// reply flow (a well-known source port answering a high one) is the
+	// other side's connection seen from here: neither is this host scanning.
+	replyFlow := ev.SrcPort > 0 && ev.SrcPort < 32768 && ev.DstPort >= 32768
+	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !netaddr.IsLoopback(ev.DstIP) && !replyFlow &&
+		!isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
 		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
 		e.mu.Lock()
 		history := e.portHistory[sweepKey]
@@ -1433,6 +1493,7 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 					Title:       alert.Title,
 					Description: alert.Description,
 					Details:     fmt.Sprintf("Distinct Ports: %d in 10s window | Process: %s", distinctCount, ev.ProcessPath),
+					Evidence:    scanEvidence(e.classContext().ZoneOf(ev.DstIP), distinctCount),
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,
@@ -1511,8 +1572,13 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 				alertKey = fmt.Sprintf("lateral_sweep_floor:%s:%s", ev.EndpointID, procKey)
 			}
 			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
+				zoneHosts := map[string]int{}
+				cx := e.classContext()
+				for ip := range window {
+					zoneHosts[cx.ZoneOf(ip)]++
+				}
 				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
-					"sweep_actor": sweepActor(window), "floor_ports": floor})
+					"sweep_actor": sweepActor(window), "floor_ports": floor, "zone_hosts": zoneHosts})
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,

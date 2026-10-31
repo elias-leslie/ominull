@@ -96,7 +96,8 @@ func adminFanout(cfg storage.DetectionTuning, src storage.Endpoint, procKey stri
 }
 
 // inventoried reports whether an address belongs to an enrolled, not retired
-// endpoint of the tenant. The set is re-read at most once a minute.
+// endpoint of the tenant or is a host the asset graph knows. The set is
+// re-read at most once a minute.
 func (e *Engine) inventoried(tenantID, ip string) bool {
 	e.mu.Lock()
 	set, ok := e.inventory[tenantID]
@@ -107,7 +108,12 @@ func (e *Engine) inventoried(tenantID, ip string) bool {
 		if err != nil {
 			return false // unknown is not inventoried: the sweep pages
 		}
-		set = map[string]bool{}
+		// The asset graph's addresses count too: the lab guests and devices
+		// the router knows but no agent runs on are the network's own hosts.
+		set, err = e.store.KnownAssetIPs(tenantID)
+		if err != nil {
+			set = map[string]bool{}
+		}
 		for _, ep := range list {
 			if ep.Status != "retired" && ep.IP != "" {
 				set[ep.IP] = true
