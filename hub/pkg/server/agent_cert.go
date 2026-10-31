@@ -209,7 +209,7 @@ func (s *Server) handleAgentCertRenewal(w http.ResponseWriter, r *http.Request) 
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, `send {"endpoint_id": "<id>"}`)
+			writeJSONError(w, http.StatusBadRequest, "body must be JSON with only endpoint_id, e.g. {\"endpoint_id\": \"ep-123\"}: "+err.Error())
 			return
 		}
 		id := strings.TrimSpace(req.EndpointID)
@@ -223,7 +223,7 @@ func (s *Server) handleAgentCertRenewal(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if ep.Status == "retired" {
-			writeJSONError(w, http.StatusConflict, "endpoint is retired")
+			writeJSONError(w, http.StatusConflict, "endpoint is retired; re-enrol the machine to give it a new certificate")
 			return
 		}
 		if err := s.store.RequestAgentCertRenewal(id, time.Now().UTC()); err != nil {
@@ -232,7 +232,7 @@ func (s *Server) handleAgentCertRenewal(w http.ResponseWriter, r *http.Request) 
 		}
 		s.audit(r, "AGENT_CERT_RENEWAL_REQUESTED", id, "Asked for this endpoint's client certificate to be renewed on its next heartbeat")
 		writeJSON(w, http.StatusAccepted, map[string]string{"endpoint_id": id, "status": "requested",
-			"note": "offered on its next heartbeat if its agent can renew (1.8.104 or later); GET shows offered_at, and a newer not_after once installed"})
+			"note": "sent on its next heartbeat if its agent can renew (1.8.104 or later; update an older agent first); GET shows offered_at, then a newer not_after once installed"})
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -274,7 +274,11 @@ func (s *Server) agentCertFinding(now time.Time) (feedFinding, error) {
 	var due []entry
 	var unknown []string
 	var unknownRes, renewingRes []feedResource
-	expired, offline := 0, 0
+	// Each machine with a certificate due is counted once, by what it needs:
+	// off line (renews when back, re-enrol once expired), never offered one
+	// (its agent does not ask, so it is too old), or offered and still on the
+	// old one (installing fails; its agent log says why).
+	expired, offline, tooOld, notInstalling := 0, 0, 0, 0
 	next := entry{}
 	certs := map[string]any{}
 	for _, ep := range endpoints {
@@ -309,8 +313,13 @@ func (s *Server) agentCertFinding(now time.Time) (feedFinding, error) {
 			if left <= 0 {
 				expired++
 			}
-			if !ep.LastSeenAt.IsZero() && now.Sub(ep.LastSeenAt) > 48*time.Hour {
+			switch {
+			case !ep.LastSeenAt.IsZero() && now.Sub(ep.LastSeenAt) > 48*time.Hour:
 				offline++
+			case st.OfferedAt.IsZero():
+				tooOld++
+			default:
+				notInstalling++
 			}
 		case left < window && !st.OfferedAt.IsZero():
 			renewingRes = append(renewingRes, res)
@@ -321,7 +330,7 @@ func (s *Server) agentCertFinding(now time.Time) (feedFinding, error) {
 		"certificates": certs, "unknown": unknown}
 	unknownNote := ""
 	if len(unknown) > 0 {
-		unknownNote = fmt.Sprintf("; expiry unknown for %s not yet seen presenting one", plural(len(unknown), "endpoint", "endpoints"))
+		unknownNote = fmt.Sprintf("; %s not shown a certificate yet", plural(len(unknown), "endpoint has", "endpoints have"))
 	}
 	if len(due) > 0 {
 		sort.Slice(due, func(i, j int) bool { return due[i].notAfter.Before(due[j].notAfter) })
@@ -329,33 +338,51 @@ func (s *Server) agentCertFinding(now time.Time) (feedFinding, error) {
 		for _, d := range due {
 			resources = append(resources, d.res)
 		}
-		var parts []string
+		head := plural(len(due), "agent certificate", "agent certificates") + " not renewed"
 		if expired > 0 {
-			parts = append(parts, fmt.Sprintf("%d expired", expired))
+			head += fmt.Sprintf(", %d already expired", expired)
 		}
-		if n := len(due) - expired; n > 0 {
-			parts = append(parts, fmt.Sprintf("%d within %d days of expiry", n, int(warn.Hours()/24)))
-		}
+		var parts []string
 		if offline > 0 {
-			parts = append(parts, fmt.Sprintf("%d off line for over 2 days", offline))
+			parts = append(parts, plural(offline, "machine offline (renews when back; re-enrol it if it cannot reconnect)", "machines offline (renew when back; re-enrol any that cannot reconnect)"))
 		}
-		msg := fmt.Sprintf("%s not renewed (%s). Agents on 1.8.104 or later renew once on line; update older agents, re-enrol any that cannot reconnect",
-			plural(len(due), "agent certificate", "agent certificates"), strings.Join(parts, ", "))
-		return s.feedFinding(now, uid, title, ocsfSevMedium, ocsfStatusNew, msg+unknownNote, resources, unmapped), nil
+		if tooOld > 0 {
+			parts = append(parts, fmt.Sprintf("%d on an agent too old to renew (update it)", tooOld))
+		}
+		if notInstalling > 0 {
+			parts = append(parts, fmt.Sprintf("%d sent a new one that did not install (see its agent log)", notInstalling))
+		}
+		msg := head + ": " + strings.Join(parts, "; ")
+		return s.feedFinding(now, uid, title, ocsfSevMedium, ocsfStatusNew, msg+unknownNote, uniqueResources(resources, unknownRes), unmapped), nil
 	}
 	if next.notAfter.IsZero() {
 		// Nothing to warn about yet, and nothing known: each agent's next
 		// heartbeat records its certificate. Said as unknown, not as fine.
-		msg := "No agent has presented a client certificate since the hub began recording them, so no expiry is known yet"
+		msg := "No expiry known yet: agents report their certificate when they next connect, nothing to do"
 		if len(unknown) > 0 {
 			msg += fmt.Sprintf(" (%s)", plural(len(unknown), "endpoint", "endpoints"))
 		}
 		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved, msg, unknownRes, unmapped), nil
 	}
-	msg := fmt.Sprintf("Agent certificates renew %d days before expiry; the next expires in %d days", int(window.Hours()/24), daysLeft(next.notAfter, now))
+	msg := fmt.Sprintf("Agent certificates renew by themselves %d days before expiry; the next expires in %d days", int(window.Hours()/24), daysLeft(next.notAfter, now))
 	if len(renewingRes) > 0 {
-		msg += fmt.Sprintf("; renewal offered to %s", plural(len(renewingRes), "endpoint", "endpoints"))
+		msg += fmt.Sprintf("; renewal sent to %s", plural(len(renewingRes), "endpoint", "endpoints"))
 	}
-	resources := append(append([]feedResource{next.res}, renewingRes...), unknownRes...)
+	resources := uniqueResources(append([]feedResource{next.res}, renewingRes...), unknownRes)
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved, msg+unknownNote, resources, unmapped), nil
+}
+
+// uniqueResources joins lists of machines, each machine once.
+func uniqueResources(lists ...[]feedResource) []feedResource {
+	seen := map[string]bool{}
+	var out []feedResource
+	for _, l := range lists {
+		for _, r := range l {
+			if !seen[r.UID] {
+				seen[r.UID] = true
+				out = append(out, r)
+			}
+		}
+	}
+	return out
 }

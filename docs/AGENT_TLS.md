@@ -80,15 +80,17 @@ re-enrolled because its certificate aged out:
 
 Nightshift sees this as the `ominull.agents.certificate` finding. It turns
 medium when a certificate is within half the renewal window of expiry, or
-expired, and still not renewed. Its message counts them (expired, close to
-expiry, off line for over two days) and never names a machine, since it may
-reach a push; the machines are its resources. The agent is too old to renew,
-the machine has been off, or it keeps failing to install the new one: an agent
-on 1.8.104 or later renews by itself once it is on line; update an older agent,
-and re-enrol a machine that cannot reconnect. Otherwise it is informational and
-says when the next certificate expires and how many were offered a renewal.
-Endpoints the hub has not seen present a certificate since it began recording
-are counted as unknown (and listed in `unknown`), not as fine; they do not raise
+expired, and still not renewed. Its message never names a machine, since it may
+reach a push; the machines are its resources. It counts the certificates not
+renewed and the expired ones, and each such machine once by what it needs:
+offline for over two days (it renews when back; re-enrol it if it cannot
+reconnect, as a Linux agent cannot once its certificate expired), on an agent
+too old to renew (never offered one: update the agent), or sent a new one that
+did not install (its agent log says why).
+Otherwise it is informational and says when the next certificate expires and
+how many were sent a renewal. Endpoints the hub has not seen present a
+certificate since it began recording are counted as unknown (and listed in
+`unknown` and the resources), not as fine; they do not raise
 the finding, because a laptop that is off would keep it open.
 
 ## Linux and Windows

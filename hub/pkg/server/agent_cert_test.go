@@ -219,8 +219,12 @@ func TestAgentCertFeedWarnsWhenRenewalStalls(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	now := time.Now().UTC()
-	for _, ep := range []string{"linux-fresh", "windows-stale", "windows-off"} {
-		if err := store.UpsertEndpoint(storage.Endpoint{ID: ep, Hostname: ep, TenantID: "default", Status: "online"}); err != nil {
+	for _, ep := range []string{"linux-fresh", "windows-stale", "windows-off", "linux-failing"} {
+		seen := now
+		if ep == "windows-off" {
+			seen = now.Add(-30 * 24 * time.Hour)
+		}
+		if err := store.UpsertEndpoint(storage.Endpoint{ID: ep, Hostname: ep, TenantID: "default", Status: "online", LastSeenAt: seen}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -232,7 +236,7 @@ func TestAgentCertFeedWarnsWhenRenewalStalls(t *testing.T) {
 	if f.SeverityID != ocsfSevInformational || f.StatusID != ocsfStatusResolved || !strings.Contains(f.Message, "next expires in 300 days") {
 		t.Fatalf("healthy fleet: %+v", f)
 	}
-	if unknown, _ := f.Unmapped["unknown"].([]string); len(unknown) != 2 {
+	if unknown, _ := f.Unmapped["unknown"].([]string); len(unknown) != 3 {
 		t.Fatalf("hosts never seen presenting a certificate must be unknown, not fine: %v", f.Unmapped["unknown"])
 	}
 	_ = store.RecordAgentCertSeen("windows-stale", now.Add(20*24*time.Hour), "b", now)
@@ -240,14 +244,20 @@ func TestAgentCertFeedWarnsWhenRenewalStalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.SeverityID != ocsfSevMedium || f.StatusID != ocsfStatusNew || len(f.Resources) != 1 || f.Resources[0].UID != "windows-stale" {
-		t.Fatalf("stalled renewal: %+v", f)
+	// The due machine comes first, then the ones with no expiry known, each once.
+	if f.SeverityID != ocsfSevMedium || f.StatusID != ocsfStatusNew || len(f.Resources) != 3 || f.Resources[0].UID != "windows-stale" ||
+		f.Message != "1 agent certificate not renewed: 1 on an agent too old to renew (update it); 2 endpoints have not shown a certificate yet" {
+		t.Fatalf("stalled renewal: %q %+v", f.Message, f.Resources)
 	}
-	_ = store.RecordAgentCertSeen("windows-off", now.Add(-24*time.Hour), "c", now.Add(-48*time.Hour))
+	// Each due machine is counted once, by what it needs.
+	_ = store.RecordAgentCertSeen("windows-off", now.Add(-24*time.Hour), "c", now.Add(-30*24*time.Hour))
+	_ = store.RecordAgentCertSeen("linux-failing", now.Add(10*24*time.Hour), "d", now)
+	_ = store.MarkAgentCertOffered("linux-failing", now.Add(-time.Hour))
 	f, _ = srv.agentCertFinding(now)
-	if !strings.HasPrefix(f.Message, "2 agent certificates not renewed (1 expired, 1 within 30 days of expiry). ") ||
-		strings.Contains(f.Message, "windows-") || len(f.Resources) != 2 || f.Resources[0].UID != "windows-off" {
-		t.Fatalf("expired certificate: %q", f.Message)
+	want := "3 agent certificates not renewed, 1 already expired: 1 machine offline (renews when back; re-enrol it if it cannot reconnect); " +
+		"1 on an agent too old to renew (update it); 1 sent a new one that did not install (see its agent log)"
+	if f.Message != want || strings.Contains(f.Message, "windows-") || len(f.Resources) != 3 || f.Resources[0].UID != "windows-off" {
+		t.Fatalf("got %q\nwant %q", f.Message, want)
 	}
 	// An hour past expiry is a day ago, not "0 days left"; a renewal in
 	// progress is said.
@@ -274,15 +284,16 @@ func TestAgentCertFeedNamesUnknownAndRenewingHosts(t *testing.T) {
 		}
 	}
 	f, _ := srv.agentCertFinding(now)
-	if f.StatusID != ocsfStatusResolved || !strings.HasSuffix(f.Message, "(3 endpoints)") || len(f.Resources) != 3 {
+	if f.StatusID != ocsfStatusResolved || f.Message != "No expiry known yet: agents report their certificate when they next connect, nothing to do (3 endpoints)" || len(f.Resources) != 3 {
 		t.Fatalf("nothing recorded yet: %q", f.Message)
 	}
 	_ = store.RecordAgentCertSeen("desk", now.Add(300*24*time.Hour), "a", now)
 	_ = store.RecordAgentCertSeen("server", now.Add(50*24*time.Hour), "b", now)
 	_ = store.MarkAgentCertOffered("server", now.Add(-10*time.Minute))
 	f, _ = srv.agentCertFinding(now)
-	want := "Agent certificates renew 60 days before expiry; the next expires in 50 days; renewal offered to 1 endpoint; expiry unknown for 1 endpoint not yet seen presenting one"
-	if f.StatusID != ocsfStatusResolved || f.Message != want || len(f.Resources) != 3 || f.Resources[2].UID != "laptop" {
+	// server is both the next to expire and the one renewing: listed once.
+	want := "Agent certificates renew by themselves 60 days before expiry; the next expires in 50 days; renewal sent to 1 endpoint; 1 endpoint has not shown a certificate yet"
+	if f.StatusID != ocsfStatusResolved || f.Message != want || len(f.Resources) != 2 || f.Resources[1].UID != "laptop" {
 		t.Fatalf("got %q\nwant %q", f.Message, want)
 	}
 }
