@@ -238,6 +238,7 @@ func (s *Server) anomalyDetailFinding(now time.Time, win storage.AnomalyWindow) 
 		needs = append(needs, d)
 		sev = max(sev, alertSeverity(a.Severity))
 	}
+	beyond := 0
 	if len(list) == feedAlertScan && win.Total > feedAlertScan {
 		// Beyond the scan: judge the rest by the window's own counts.
 		for name, n := range win.BySeverity {
@@ -245,14 +246,28 @@ func (s *Server) anomalyDetailFinding(now time.Time, win storage.AnomalyWindow) 
 				sev = max(sev, alertSeverity(name))
 			}
 		}
+		beyond = win.Total - len(list)
 	}
+	// The alerts that page come first, so the list never hides one behind
+	// report-only alerts; within a severity the newest stay first.
+	slices.SortStableFunc(needs, func(a, b feedAlert) int { return alertSeverity(b.Severity) - alertSeverity(a.Severity) })
 	alerts := append(needs, explained...)
 	if len(alerts) > feedAlertMax {
 		alerts = alerts[:feedAlertMax]
 	}
 	alerts = fitAlerts(alerts)
 	more := max(0, win.Total-len(alerts))
-	unmapped["alerts"], unmapped["more"] = alerts, more
+	// more_paging counts the unlisted alerts that page (high or critical, not
+	// explained), so a reader that explains every listed one knows whether
+	// anything it cannot see still asks. Alerts beyond the scan are unknown and
+	// counted as paging.
+	morePaging := beyond
+	for _, d := range needs[min(len(alerts), len(needs)):] {
+		if alertSeverity(d.Severity) >= ocsfSevHigh {
+			morePaging++
+		}
+	}
+	unmapped["alerts"], unmapped["more"], unmapped["more_paging"] = alerts, more, morePaging
 	msg := plural(win.Total, "new alert", "new alerts") + " in the last 24 h"
 	if len(alerts) > 0 {
 		msg = alerts[0].What

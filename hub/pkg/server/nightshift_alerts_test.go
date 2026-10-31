@@ -105,8 +105,8 @@ func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != feedAlertMax || um["more"] != float64(8-feedAlertMax) {
-		t.Fatalf("listed %d alerts, more=%v", len(got), um["more"])
+	if len(got) != feedAlertMax || um["more"] != float64(8-feedAlertMax) || um["more_paging"] != float64(0) {
+		t.Fatalf("listed %d alerts, more=%v more_paging=%v", len(got), um["more"], um["more_paging"])
 	}
 	first := got[0]
 	if first.ID != "a-sweep" || first.Process != "ssh" || strings.Contains(first.Command, "abcdef") ||
@@ -557,5 +557,66 @@ func TestRelayKeyIssuanceListIsCapped(t *testing.T) {
 	}
 	if !strings.Contains(f.Message, fmt.Sprintf("issued %d times in the last 24 h", total)) {
 		t.Fatalf("message = %q, want the full count %d", f.Message, total)
+	}
+}
+
+// The alerts that page are listed first, and more_paging counts the unlisted
+// ones that would: report-only alerts never hide a page, and a reader that
+// explains every listed page knows whether anything unseen still asks.
+func TestNightshiftFeedListsPagesFirstAndCountsUnlistedPages(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	add := func(id, sev string, age time.Duration) {
+		t.Helper()
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "srv-01", Hostname: "srv-01",
+			AnomalyType: "ENDPOINT_SILENT", Severity: sev, Title: "Agent stopped reporting on srv-01", Description: "d",
+			Timestamp: now.Add(-age)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Five newer report-only alerts and one older page.
+	for i := 0; i < 5; i++ {
+		add(fmt.Sprintf("m-%d", i), "MEDIUM", time.Duration(i+1)*time.Minute)
+	}
+	add("h-0", "HIGH", time.Hour)
+	key := issueFeedKey(t, srv)
+	summary := func() (map[string]any, []feedAlert) {
+		t.Helper()
+		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", key)
+		var doc feedDoc
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range doc.Findings {
+			if f.FindingInfo.UID == "ominull.anomalies.summary" {
+				raw, _ := json.Marshal(f.Unmapped["alerts"])
+				var got []feedAlert
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				return f.Unmapped, got
+			}
+		}
+		t.Fatal("no summary finding")
+		return nil, nil
+	}
+	um, got := summary()
+	if len(got) != feedAlertMax || got[0].ID != "h-0" || got[1].ID != "m-0" || um["more"] != float64(1) || um["more_paging"] != float64(0) {
+		t.Fatalf("first=%s second=%s more=%v more_paging=%v", got[0].ID, got[1].ID, um["more"], um["more_paging"])
+	}
+	// Six pages: one cannot be listed, and it is counted.
+	for i := 1; i < 6; i++ {
+		add(fmt.Sprintf("h-%d", i), "HIGH", time.Hour+time.Duration(i)*time.Minute)
+	}
+	um, got = summary()
+	if len(got) != feedAlertMax || um["more_paging"] != float64(1) || um["more"] != float64(6) {
+		t.Fatalf("listed %d, more=%v more_paging=%v", len(got), um["more"], um["more_paging"])
+	}
+	for _, a := range got {
+		if a.Severity != "HIGH" {
+			t.Fatalf("a %s alert listed while a page was left out", a.Severity)
+		}
 	}
 }
