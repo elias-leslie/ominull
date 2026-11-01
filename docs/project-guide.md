@@ -491,16 +491,12 @@ endpoints. A canary that fails the provenance check, or is not healthy within
 lists the last rollouts under `staged_rollouts`. A hub without staged rollouts
 gets the older two-request sequence.
 
-### Release cadence
+### Releases
 
-Hub releases are batched: at most one a day, and none when nothing the hub or
-agents ship has changed. `release.sh` enforces both against the last
-`Release X.Y.Z` commit (tests, test data and Markdown do not count as a change)
-and refuses otherwise. A change that cannot wait for the next batch, such as a
-live outage, an alert paging the owner in error or a security fix, is released
-with `--urgent "<why>"`, and the reason goes in the release commit and the
-operations brief. `--agents-only` rolls an already published release and is not
-held back.
+A hub release goes out whenever something the hub or agents ship has changed,
+as often as needed. `release.sh` refuses only when nothing shipped changed since
+the last `Release X.Y.Z` commit (tests, test data and Markdown do not count).
+`--agents-only` rolls an already published release.
 
 Detection thresholds, exemptions and vendor lists are tuning data on the hub
 (`hub/pkg/storage/detection_tuning.go`, changed through the detection policy

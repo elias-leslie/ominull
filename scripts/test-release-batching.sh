@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # release.sh batches hub releases: none when nothing shipped changed since the
-# last "Release" commit, at most one a day unless --urgent gives a reason.
+# last "Release" commit, and goes out whenever something shipped changed.
 # Runs release.sh in a scratch repository; a run that passes the guard goes on
 # and stops at whatever the scratch repository lacks (the deploy hook).
 set -euo pipefail
@@ -22,7 +22,7 @@ failures=0
 expect() {
     local want="$1"; shift
     local out
-    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD -u OMINULL_RELEASE_INTERVAL_SECONDS bash scripts/release.sh "$@" 2>&1 || true)"
+    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
     if ! grep -qF -- "${want}" <<<"${out}"; then
         echo "FAIL: release.sh $* should say: ${want}" >&2
         echo "${out}" | sed 's/^/    /' >&2
@@ -32,8 +32,8 @@ expect() {
 passed="Deploy hook is missing"
 expect_not_batched() {
     local out
-    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD -u OMINULL_RELEASE_INTERVAL_SECONDS bash scripts/release.sh "$@" 2>&1 || true)"
-    if grep -qE 'nothing to release|batched to one a day' <<<"${out}"; then
+    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
+    if grep -qE 'nothing to release' <<<"${out}"; then
         echo "FAIL: release.sh $* should not be held back:" >&2
         echo "${out}" | sed 's/^/    /' >&2
         failures=$((failures + 1))
@@ -50,11 +50,7 @@ expect_not_batched --agents-only # rolling agents is not a hub release
 echo '// changed' >> hub/pkg/a.go
 expect "nothing to release" # only committed changes count
 git add -A && git commit -qm "hub change"
-expect "went out 0m ago; hub releases are batched to one a day (next after"
-expect "--urgent needs a reason" --urgent --hub-only
-expect "--urgent needs a reason" --urgent
-expect "${passed}" --urgent "paging false alarm"
-expect "Releasing within a day of Release 1.0.0: paging false alarm" --urgent "paging false alarm"
+expect "${passed}" # a hub change goes out at once, however recent the last release
 git add -A
 GIT_COMMITTER_DATE="$(date -d "-2 days" -R)" git commit -q --allow-empty -m "Release 1.0.1: older"
 expect "nothing to release"
