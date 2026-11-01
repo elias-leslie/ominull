@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BPF_BUILD="${ROOT_DIR}/build/bpf"
-BPF_TOOL="${BPFTOOL:-$(command -v bpftool || true)}"
+BPF_TOOL="${BPFTOOL:-$(PATH="${PATH}:/usr/sbin:/sbin" command -v bpftool || true)}"
 if [ -z "${BPF_TOOL}" ]; then BPF_TOOL="/usr/lib/linux-tools/$(uname -r)/bpftool"; fi
 if [ -z "${BPFTOOL:-}" ] && ! "${BPF_TOOL}" version >/dev/null 2>&1; then
     # Distribution tools packages need not match the running runner kernel.
