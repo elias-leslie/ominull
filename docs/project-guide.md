@@ -297,7 +297,10 @@ reason is required, and so is an `expires_at` in the future when an entry is
 added or changed: past it the entry vouches for nothing, the next save drops
 it, and the Nightshift feed's detection-policy note lists it. Moving an expiry
 later loosens (authorized and audited); moving it earlier tightens. Entries saved
-before expiries existed were given one 90 days out at upgrade. A known workload silences only the novelty findings (new
+before expiries existed were given one 90 days out at upgrade. Exclusions and known workloads that lapse within
+`policy_expiry_warn_days` (hub setting, default 30, 1 to 89), or lapsed in the last week, make the Nightshift feed's
+`ominull.detection.expiring` medium (a daily agent item) with how to renew: re-POST the exclusion with the same id and
+fields and a later `expires_at`, or re-save the tuning with a later expiry on the workload. A known workload silences only the novelty findings (new
 destination, interpreter egress) and, for an owner-`*` entry, off-hours;
 beaconing, upload volume and threat-intelligence matches still judge it.
 Novelty and off-hours findings fold to one per program and counterparty per
