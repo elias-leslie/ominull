@@ -17,7 +17,7 @@ Two kinds of machine row are not counted:
 Where it reads, all overridable for tests and other hosts:
   AICO_WEB_URL         Aico on this machine (default http://127.0.0.1:3002)
   OMINULL_SITE_FILE    the site file naming the hub and its CA, as Aico reads it (default /etc/aico/site.json)
-  OMINULL_RELAY_KEY    the relay key file Aico's "That was me" uses (default ~/.config/nightshift/ominull-relay.key);
+  OMINULL_RELAY_KEY    the relay key file Aico's "That was me" uses (default ~/.config/aico/ominull-relay.key);
                        it opens the hub's agent-builds route (every enrolled agent with its host name)
 Run by the user timer ominull-fleet-coverage.timer (scripts/install-fleet-coverage.sh). Stdlib only.
 """
@@ -131,7 +131,7 @@ def _get(url: str, headers: dict[str, str], ctx: ssl.SSLContext | None = None) -
 def main() -> int:
     aico = os.environ.get("AICO_WEB_URL", "http://127.0.0.1:3002").rstrip("/")
     site = os.environ.get("OMINULL_SITE_FILE", "/etc/aico/site.json")
-    key_file = Path(os.environ.get("OMINULL_RELAY_KEY", "~/.config/nightshift/ominull-relay.key")).expanduser()
+    key_file = Path(os.environ.get("OMINULL_RELAY_KEY", "~/.config/aico/ominull-relay.key")).expanduser()
     now = dt.datetime.now(dt.UTC).replace(microsecond=0)
     status = _get(f"{aico}/api/status", {})
     machine = str(status.get("machine") or os.uname().nodename.split(".")[0]).lower()
