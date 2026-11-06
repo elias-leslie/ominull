@@ -17,14 +17,31 @@ STATUS = {"rows": [
     {"id": "fleet/davion-sidarli/aico", "kind": "machine", "machine": "aico"},
     {"id": "fleet/davion-sidarli/neri-hunters", "kind": "machine", "machine": "neri-hunters"},
     {"id": "portfolio-ai/machine", "kind": "machine", "machine": "apps"},
+    {"id": "ominull.machine", "kind": "machine", "machine": "ominull-hub"},
+    {"id": "jobinator-4000/machine", "kind": "machine", "machine": "jobinator", "state": "ok", "shown": "off"},
+    {"id": "fleet/davion-sidarli/agent-work", "kind": "machine", "machine": "agent-work", "state": "off", "shown": "off"},
+    {"id": "fleet/x/apps", "kind": "machine", "machine": "apps", "shown": "ok"},
     {"id": "backups-native", "kind": "job", "machine": "davion-sidarli"},
     {"id": "jobs/x", "kind": "job", "machine": "other-host"},
 ]}
 
 
 class FleetCoverage(unittest.TestCase):
-    def test_fleet_is_machine_rows_only(self):
-        self.assertEqual(fc.fleet_machines(STATUS), {"davion-sidarli", "aico", "neri-hunters", "apps"})
+    def test_fleet_is_machine_rows_only_less_the_hub(self):
+        self.assertEqual(fc.fleet_machines(STATUS),
+                         {"davion-sidarli", "aico", "neri-hunters", "apps", "jobinator", "agent-work"})
+
+    def test_off_is_every_row_of_the_machine_shown_off(self):
+        self.assertEqual(fc.off_machines(STATUS), {"jobinator", "agent-work"})
+
+    def test_off_machines_are_not_counted_but_named(self):
+        r = fc.row("m", NOW, fc.fleet_machines(STATUS), {"davion-sidarli", "aico", "neri-hunters", "agent-work"},
+                   off=fc.off_machines(STATUS))
+        self.assertEqual(r["meaning"], "1 of 5 running fleet machines has no OmniNull agent: apps; "
+                                       "not counted while off: jobinator")
+        r = fc.row("m", NOW, {"aico", "jobinator"}, {"aico"}, off={"jobinator"})
+        self.assertEqual((r["state"], r["meaning"]),
+                         ("ok", "All 1 running fleet machines run an OmniNull agent; not counted while off: jobinator"))
 
     def test_hosts_are_short_lower_case(self):
         builds = {"endpoints": [{"hostname": "DAVION-SIDARLI.lan"}, {"hostname": "aico"}, {"hostname": ""}, "x"]}
@@ -33,15 +50,16 @@ class FleetCoverage(unittest.TestCase):
             fc.protected_hosts({"error": "no"})
 
     def test_names_the_uncovered_machines(self):
-        r = fc.row("davion-sidarli", NOW, fc.fleet_machines(STATUS), {"davion-sidarli", "aico", "davion-gem"})
+        r = fc.row("davion-sidarli", NOW, {"davion-sidarli", "aico", "neri-hunters", "apps"},
+                   {"davion-sidarli", "aico", "davion-gem"})
         self.assertEqual(r["state"], "warn")
-        self.assertEqual(r["meaning"], "2 of 4 fleet machines have no OmniNull agent: apps, neri-hunters")
+        self.assertEqual(r["meaning"], "2 of 4 running fleet machines have no OmniNull agent: apps, neri-hunters")
         self.assertEqual(r["id"], "ominull.fleet.coverage")
         self.assertEqual(r["next_run"], "2026-11-06T14:30:00Z")
 
     def test_all_covered_is_ok(self):
         r = fc.row("davion-sidarli", NOW, {"aico"}, {"aico", "davion-gem"})
-        self.assertEqual((r["state"], r["meaning"]), ("ok", "All 1 fleet machines run an OmniNull agent"))
+        self.assertEqual((r["state"], r["meaning"]), ("ok", "All 1 running fleet machines run an OmniNull agent"))
 
     def test_unknown_is_never_covered(self):
         self.assertEqual(fc.row("m", NOW, {"aico"}, None, "the OmniNull hub was not read (x)")["state"], "warn")

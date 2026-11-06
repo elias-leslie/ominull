@@ -34,7 +34,7 @@ host="$("${RUN[@]}" hostname | tr -d '\r\n')"
 endpoint="linux-${host,,}"
 echo "[*] Enrolling ${host} as ${endpoint} (role ${ROLE})."
 # The agent package depends on iptables, which minimal images leave out.
-"${RUN[@]}" sh -c 'command -v iptables >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get -y -q install iptables >/dev/null'
+"${RUN[@]}" sh -c 'command -v iptables >/dev/null || { DEBIAN_FRONTEND=noninteractive apt-get -q update >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get -y -q install iptables >/dev/null; }'
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT

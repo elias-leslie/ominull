@@ -5,8 +5,14 @@ Aico's fleet is the machines that report a machine row to Aico Status; OmniNull'
 endpoints. This compares the two each run, so neither list can drift from the other unnoticed, and writes one row to
 Aico Status on this machine (POST /api/status/rows on loopback):
 
-  ok    every fleet machine has an enrolled agent
-  warn  N fleet machines have none, named; or the hub or Aico could not be read (unknown is never "all covered")
+  ok    every running fleet machine has an enrolled agent
+  warn  N running fleet machines have none, named; or the hub or Aico could not be read (unknown is never "all covered")
+
+Two kinds of machine row are not counted:
+  - the hub's own (row ominull.machine): the hub is the detection backend, not an endpoint; its co-installed agent was
+    retired on purpose (docs/DESIGN_HISTORY.md) and the hub reports its own health on that row.
+  - a machine Aico shows as off (shown "off": on demand and stopped, parked, or powered off). Nothing runs there to
+    protect; the meaning names it, and it counts again as soon as it runs.
 
 Where it reads, all overridable for tests and other hosts:
   AICO_WEB_URL         Aico on this machine (default http://127.0.0.1:3002)
@@ -29,16 +35,31 @@ from pathlib import Path
 from typing import Any
 
 ROW_ID = "ominull.fleet.coverage"
+HUB_ROW_ID = "ominull.machine"  # the hub's own machine row (hub/pkg/server/aico_push.go)
 BUILDS_ROUTE = "/api/v1/integrations/nightshift/agent-builds"
 EVERY_MIN = 15  # the timer's period; the row shows late after two missed runs
 MEANING_MAX = 300
 
 
-def fleet_machines(status: dict[str, Any]) -> set[str]:
-    """The machines with a machine row in Aico Status (GET /api/status)."""
+def _machine_rows(status: dict[str, Any]) -> list[dict[str, Any]]:
     rows = status.get("rows") if isinstance(status, dict) else None
-    return {str(r["machine"]).lower() for r in rows or [] if isinstance(r, dict) and r.get("kind") == "machine"
-            and isinstance(r.get("machine"), str) and r["machine"]}
+    return [r for r in rows or [] if isinstance(r, dict) and r.get("kind") == "machine"
+            and isinstance(r.get("machine"), str) and r["machine"]]
+
+
+def fleet_machines(status: dict[str, Any]) -> set[str]:
+    """The machines with a machine row in Aico Status (GET /api/status), less the hub's own machine."""
+    rows = _machine_rows(status)
+    hub = {str(r["machine"]).lower() for r in rows if r.get("id") == HUB_ROW_ID}
+    return {str(r["machine"]).lower() for r in rows} - hub
+
+
+def off_machines(status: dict[str, Any]) -> set[str]:
+    """Fleet machines Aico shows as off now. A machine with several rows is off only when every one says so."""
+    shown: dict[str, set[str]] = {}
+    for r in _machine_rows(status):
+        shown.setdefault(str(r["machine"]).lower(), set()).add(str(r.get("shown") or r.get("state")))
+    return {m for m, s in shown.items() if s == {"off"}} & fleet_machines(status)
 
 
 def protected_hosts(builds: dict[str, Any]) -> set[str]:
@@ -53,8 +74,9 @@ def _cut(text: str) -> str:
     return text if len(text) <= MEANING_MAX else text[: MEANING_MAX - 1] + "…"
 
 
-def row(machine: str, now: dt.datetime, fleet: set[str] | None, hosts: set[str] | None, error: str = "") -> dict[str, Any]:
-    """The Status row: ok, warn naming the uncovered machines, or warn saying what could not be read."""
+def row(machine: str, now: dt.datetime, fleet: set[str] | None, hosts: set[str] | None, error: str = "",
+        off: set[str] | frozenset[str] = frozenset()) -> dict[str, Any]:
+    """The Status row: ok, warn naming the uncovered running machines, or warn saying what could not be read."""
     base = {"id": ROW_ID, "what": "Fleet machines without an OmniNull agent", "kind": "check", "machine": machine,
             "project": "ominull", "last_run": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "next_run": (now + dt.timedelta(minutes=2 * EVERY_MIN)).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -62,12 +84,16 @@ def row(machine: str, now: dt.datetime, fleet: set[str] | None, hosts: set[str] 
         return {**base, "state": "warn", "meaning": _cut(f"Not known which fleet machines are covered: {error or 'nothing read'}")}
     if not fleet:
         return {**base, "state": "warn", "meaning": "Not known which fleet machines are covered: Aico Status lists no machines"}
-    missing = sorted(fleet - hosts)
+    idle = sorted((fleet - hosts) & off)
+    running = fleet - set(idle)
+    missing = sorted(running - hosts)
+    note = f"; not counted while off: {', '.join(idle)}" if idle else ""
     if not missing:
-        return {**base, "state": "ok", "meaning": f"All {len(fleet)} fleet machines run an OmniNull agent"}
+        return {**base, "state": "ok", "meaning": _cut(f"All {len(running)} running fleet machines run an OmniNull agent{note}")}
     n = len(missing)
     return {**base, "state": "warn", "meaning": _cut(
-        f"{n} of {len(fleet)} fleet machines {'has' if n == 1 else 'have'} no OmniNull agent: {', '.join(missing)}")}
+        f"{n} of {len(running)} running fleet machines {'has' if n == 1 else 'have'} no OmniNull agent: "
+        f"{', '.join(missing)}{note}")}
 
 
 def hub_source(site_file: str) -> tuple[str, str]:
@@ -116,7 +142,7 @@ def main() -> int:
                                      ssl.create_default_context(cafile=ca)))
     except Exception as e:  # unreachable hub, no key, unreadable site file: say so on the row
         error = f"the OmniNull hub was not read ({type(e).__name__}: {str(e)[:120]})"
-    out = row(machine, now, fleet, hosts, error)
+    out = row(machine, now, fleet, hosts, error, off_machines(status))
     req = urllib.request.Request(f"{aico}/api/status/rows", data=json.dumps(out).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310
