@@ -467,6 +467,11 @@ class PreparationTests(unittest.TestCase):
         self.mount_patch = patch.object(bk, "require_backup_mount")
         self.mount_patch.start()
         self.addCleanup(self.mount_patch.stop)
+        # The fixtures are bytes long; the 25 GiB production reserve would make every test depend on
+        # how full the machine's temp filesystem happens to be.
+        self.reserve_patch = patch.object(bk, "RESERVE_BYTES", 0)
+        self.reserve_patch.start()
+        self.addCleanup(self.reserve_patch.stop)
         self.payload = b"consistent-uncompressed-archive-fixture"
         self.calls = []
         self.task = "UPID:pve-fixture:fixture"
@@ -517,6 +522,14 @@ class PreparationTests(unittest.TestCase):
     def qualified_request(self, prior):
         return {**REQUEST, "qualified_previous": {"backup_id": prior["backup_id"],
                 "sha256": prior["sha256"], "snapshot_id": "restic-point", "repository_id": "repo-fixture"}}
+
+    def test_capacity_below_the_reserve_fails_before_publishing(self):
+        short = shutil._ntuple_diskusage(100, 100 - 1, 1)
+        with patch.object(bk, "RESERVE_BYTES", 25 * 1024**3), patch.object(bk.shutil, "disk_usage", return_value=short):
+            result = self.prepare()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "backup_local_capacity")
+        self.assertFalse((self.destination / "current").exists())
 
     def test_qualified_predecessor_retirement_allows_repeated_fresh_capture(self):
         prior = self.prepare()

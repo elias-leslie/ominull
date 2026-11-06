@@ -1,0 +1,9 @@
+# Extends the default rules. `aico check` scans a materialised copy of the tree, so the
+# path-and-line fingerprints in .gitleaksignore (which assume repo-relative paths) never match;
+# allow the third-party minified bundle by path instead.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Vendored xterm.js bundle: minified identifiers such as FourKeyMap trip generic-api-key"
+paths = ['''hub/pkg/server/web/vendor/xterm\.js$''']
