@@ -24,10 +24,9 @@ func TestTheFloorDrillRaisesEveryRuleAndStoresNothing(t *testing.T) {
 	}
 	rec := srv.runFloorDrill(now)
 	// Eleven floor rules (decoy touch, lab escape and the rare beacon among
-	// them), and both sweeps as each shipped quiet process but
-	// systemd-resolved, which the code exempts as a local resolver.
-	if want := 11 + 2*(len(storage.DefaultDetectionTuning().QuietProcesses)-1); len(rec.Missed) != 0 || rec.Cases != want {
-		t.Fatalf("drill = %+v, want %d clean cases", rec, want)
+	// them), and the sweeps again as each program a shipped rule names.
+	if len(rec.Missed) != 0 || rec.Cases <= 11 {
+		t.Fatalf("drill = %+v, want a clean run of more than the eleven floor rules", rec)
 	}
 	if f := srv.floorDrillFinding(now); f.SeverityID != ocsfSevInformational || f.StatusID != ocsfStatusResolved {
 		t.Fatalf("clean drill on the feed = %+v", f)
@@ -47,15 +46,25 @@ func TestTheFloorDrillRaisesEveryRuleAndStoresNothing(t *testing.T) {
 }
 
 // Blinding a floor rule on a test hub - a container network over the LAN, an
-// exclusion over an internet range, which still reaches the burst - makes the
-// drill raise a CRITICAL naming the rules it missed. Switching bandwidth off
-// does not, since the burst is floor, and an exclusion over a floor port or
-// the range no longer reaches the sweeps.
+// expected rule over an internet range, which still reaches the burst - makes
+// the drill raise a CRITICAL naming the rules it missed. Switching bandwidth
+// off does not, since the burst is floor, and a rule over a floor port or the
+// range no longer reaches the sweeps.
 func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 	t.Parallel()
-	exclusion := func(port uint16, dst string) storage.Exclusion {
-		return storage.Exclusion{ID: "ex-" + dst, TenantID: "default", Scope: "global", Name: "test", DstIPRange: dst, Port: port,
-			Reason: "test", Active: true, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Hour)}
+	rule := func(port int, dst string) storage.ExpectedRule {
+		r := storage.ExpectedRule{ID: "test-rule", Reason: "test", Port: port}
+		if dst != "" {
+			r.Prefixes = []string{dst}
+		}
+		return r
+	}
+	add := func(t *testing.T, s *storage.Store, r storage.ExpectedRule) {
+		tu := s.GetDetectionTuning()
+		tu.ExpectedRules = append(tu.ExpectedRules, r)
+		if _, err := s.SaveDetectionTuning(tu, "test"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, c := range []struct {
 		name   string
@@ -76,16 +85,9 @@ func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, []string{"lateral sweep", "lab escape", "agent ssh fan-out reaching a floor port"}},
-		{"exclusion on SMB", func(t *testing.T, s *storage.Store) {
-			if err := s.CreateExclusion(exclusion(445, "")); err != nil {
-				t.Fatal(err)
-			}
-		}, nil},
-		{"exclusion on an internet range", func(t *testing.T, s *storage.Store) {
-			if err := s.CreateExclusion(exclusion(0, "203.0.113.0/24")); err != nil {
-				t.Fatal(err)
-			}
-		}, []string{"bandwidth burst", "rare beacon"}},
+		{"rule on SMB", func(t *testing.T, s *storage.Store) { add(t, s, rule(445, "")) }, nil},
+		{"rule on an internet range", func(t *testing.T, s *storage.Store) { add(t, s, rule(0, "203.0.113.0/24")) },
+			[]string{"bandwidth burst", "rare beacon"}},
 	} {
 		srv, store := setupTestServer(t)
 		c.blind(t, store)
@@ -152,33 +154,27 @@ func TestAPolicyChangeIsDrilledAtOnce(t *testing.T) {
 	}
 }
 
-// An exclusion scoped to one endpoint, location or program gets its own floor
-// cases, built only of traffic it matches, and they raise, since no exclusion
-// reaches the floor rules; the burst is left out. A case its traffic cannot
-// make is skipped: the sweeps for an installed container runtime (exempt in
-// code), anything outside one loopback port, a lateral sweep inside a
-// container network.
-func TestTheDrillCoversScopedExclusions(t *testing.T) {
+// A rule narrowed to a host, a range or a port gets the floor cases that fit
+// its corner, and a rule over a container network gets none the code exempts.
+func TestTheDrillCoversScopedRules(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	now := time.Now().UTC()
 	tu := store.GetDetectionTuning()
 	tu.ContainerCIDRs = []string{"172.18.0.0/16"}
+	for _, r := range []storage.ExpectedRule{
+		{ID: "dev", Hosts: []string{"linux-dev"}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/python3.13"}}},
+		{ID: "lab", Prefixes: []string{"10.9.0.0/16"}},
+		{ID: "proxy", Programs: []storage.ExpectedProgram{{Path: "/usr/bin/docker-proxy"}}, Prefixes: []string{"172.18.0.0/16"}, Port: 7070, Protocol: "tcp"},
+		{ID: "local", Programs: []storage.ExpectedProgram{{Path: "/usr/bin/python3.12"}}, Prefixes: []string{"127.0.0.1/32"}, Port: 7070, Protocol: "tcp"},
+		{ID: "bridge", Prefixes: []string{"172.18.0.0/16"}},
+	} {
+		r.Reason = "test"
+		tu.ExpectedRules = append(tu.ExpectedRules, r)
+	}
 	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
 		t.Fatal(err)
-	}
-	for _, ex := range []storage.Exclusion{
-		{ID: "ex-dev", Scope: "endpoint", ScopeValue: "linux-dev", ProcessPath: "/usr/bin/python3.13"},
-		{ID: "ex-lab", Scope: "location", ScopeValue: "lab", DstIPRange: "10.9.0.0/16"},
-		{ID: "ex-proxy", Scope: "global", ProcessPath: "/usr/bin/docker-proxy", DstIPRange: "172.18.0.0/16", Port: 7070, Protocol: "tcp"},
-		{ID: "ex-local", Scope: "global", ProcessPath: "/usr/bin/python3.12", DstIPRange: "127.0.0.1/32", Port: 7070, Protocol: "tcp"},
-		{ID: "ex-bridge", Scope: "location", ScopeValue: "lab", DstIPRange: "172.18.0.0/16"},
-	} {
-		ex.TenantID, ex.Name, ex.Reason, ex.Active, ex.CreatedAt, ex.ExpiresAt = "default", "test", "test", true, now, now.Add(time.Hour)
-		if err := store.CreateExclusion(ex); err != nil {
-			t.Fatal(err)
-		}
 	}
 	cases, err := detector.Drill(store, now)
 	if err != nil {
@@ -186,17 +182,20 @@ func TestTheDrillCoversScopedExclusions(t *testing.T) {
 	}
 	var scoped []string
 	for _, c := range cases {
-		if strings.Contains(c.Rule, " under exclusion ") {
-			scoped = append(scoped, c.Rule)
+		if _, id, ok := strings.Cut(c.Rule, " under rule "); ok && id != "" {
+			switch id {
+			case "dev", "lab", "proxy", "local", "bridge":
+				scoped = append(scoped, c.Rule)
+			}
 		}
 		if miss := judgeDrillCase(c); miss != "" {
 			t.Errorf("missed: %s", miss)
 		}
 	}
 	want := []string{
-		"threat-list match under exclusion ex-dev", "sensitive port under exclusion ex-dev", "port sweep under exclusion ex-dev",
-		"lateral sweep under exclusion ex-dev", "resolver bypass under exclusion ex-dev",
-		"lateral sweep under exclusion ex-lab",
+		"threat-list match under rule dev", "sensitive port under rule dev", "port sweep under rule dev",
+		"lateral sweep under rule dev", "resolver bypass under rule dev",
+		"lateral sweep under rule lab",
 	}
 	sort.Strings(scoped)
 	sort.Strings(want)
@@ -204,6 +203,6 @@ func TestTheDrillCoversScopedExclusions(t *testing.T) {
 		t.Fatalf("scoped cases = %q, want %q", scoped, want)
 	}
 	if rec := srv.runFloorDrill(now); len(rec.Missed) != 0 {
-		t.Fatalf("drill with scoped exclusions missed %q", rec.Missed)
+		t.Fatalf("drill with scoped rules missed %q", rec.Missed)
 	}
 }

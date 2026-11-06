@@ -80,6 +80,13 @@ func (c policyChange) payload() ([]byte, error) {
 	if after, err = canonicalJSON(after); err != nil {
 		return nil, err
 	}
+	if c.policy == "detection_tuning" {
+		// Only what moved is digested and shown: the whole tuning, rules
+		// included, is more than the authority takes.
+		if before, after, err = changedOnly(before, after); err != nil {
+			return nil, err
+		}
+	}
 	body := map[string]interface{}{
 		"policy": c.policy, "op": c.op,
 		"before": json.RawMessage(before), "after": json.RawMessage(after),
@@ -89,6 +96,64 @@ func (c policyChange) payload() ([]byte, error) {
 		body["drill"] = append([]string{}, c.drill...)
 	}
 	return json.Marshal(body)
+}
+
+// changedOnly cuts two canonical tuning objects down to their difference: a
+// key that did not move is dropped from both, and a list keeps only the
+// entries the other side lacks.
+func changedOnly(before, after []byte) ([]byte, []byte, error) {
+	var a, b map[string]any
+	if err := json.Unmarshal(before, &a); err != nil {
+		return nil, nil, err
+	}
+	if err := json.Unmarshal(after, &b); err != nil {
+		return nil, nil, err
+	}
+	entries := func(v any) map[string]bool {
+		out := map[string]bool{}
+		list, _ := v.([]any)
+		for _, x := range list {
+			raw, _ := json.Marshal(x)
+			out[string(raw)] = true
+		}
+		return out
+	}
+	only := func(v any, other map[string]bool) []any {
+		list, _ := v.([]any)
+		out := []any{}
+		for _, x := range list {
+			if raw, _ := json.Marshal(x); !other[string(raw)] {
+				out = append(out, x)
+			}
+		}
+		return out
+	}
+	for k := range a {
+		if reflect.DeepEqual(a[k], b[k]) {
+			delete(a, k)
+			delete(b, k)
+			continue
+		}
+		_, aList := a[k].([]any)
+		_, bList := b[k].([]any)
+		if aList && bList {
+			hadA, hadB := entries(a[k]), entries(b[k])
+			a[k], b[k] = only(a[k], hadB), only(b[k], hadA)
+		}
+	}
+	ra, err := json.Marshal(a)
+	if err != nil {
+		return nil, nil, err
+	}
+	rb, err := json.Marshal(b)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ra, err = canonicalJSON(ra); err != nil {
+		return nil, nil, err
+	}
+	rb, err = canonicalJSON(rb)
+	return ra, rb, err
 }
 
 // drillProposed runs the floor drill against the policy a change would save
@@ -103,23 +168,7 @@ func (s *Server) drillProposed(c policyChange) ([]string, bool) {
 	var err error
 	switch after := c.after.(type) {
 	case storage.DetectionTuning:
-		cases, err = detector.DrillWith(s.store, now, &after, nil)
-	case storage.Exclusion:
-		var live []storage.Exclusion
-		if live, err = s.store.ListExclusions("default"); err != nil {
-			break
-		}
-		if after.ID == "" {
-			after.ID = "new"
-		}
-		after.Active, after.CreatedAt = true, now
-		proposed := make([]storage.Exclusion, 0, len(live)+1)
-		for _, ex := range live {
-			if ex.ID != after.ID {
-				proposed = append(proposed, ex)
-			}
-		}
-		cases, err = detector.DrillWith(s.store, now, nil, append(proposed, after))
+		cases, err = detector.DrillWith(s.store, now, &after)
 	default:
 		return nil, false
 	}
@@ -336,10 +385,8 @@ func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyCh
 			mid[k] = keptEntries(a[k], b[k])
 		case dir == removeLoosens:
 			mid[k] = unionEntries(a[k], b[k])
-		case dir == vendorField:
-			mid[k] = keptVendors(a[k], b[k])
-		case dir == workloadField:
-			mid[k] = keptWorkloads(a[k], b[k])
+		case dir == rulesField:
+			mid[k] = keptRules(a[k], b[k])
 		}
 	}
 	var half storage.DetectionTuning
@@ -418,138 +465,12 @@ func keptEntries(before, after any) any {
 	return kept
 }
 
-func vendorList(v any) []storage.AgentRuntimeVendor {
-	var out []storage.AgentRuntimeVendor
-	raw, _ := json.Marshal(v)
-	_ = json.Unmarshal(raw, &out)
-	return out
-}
-
-func vendorByRuntime(list []storage.AgentRuntimeVendor) map[string]storage.AgentRuntimeVendor {
-	m := map[string]storage.AgentRuntimeVendor{}
-	for _, v := range list {
-		m[v.Runtime] = v
-	}
-	return m
-}
-
 func setOf(list []string) map[string]bool {
 	m := map[string]bool{}
 	for _, x := range list {
 		m[x] = true
 	}
 	return m
-}
-
-// vendorsLoosen reports agent runtime vendors that vouch for more than
-// before: a runtime's maker renamed, or a service domain, published prefix or
-// network it did not have, or an excluded domain taken away. Each one exempts
-// flows to it from the per-connection bandwidth baseline and the new-place
-// upload rule, so only removing vouching entries (or excluding more) tightens.
-func vendorsLoosen(before, after any) bool {
-	was := vendorByRuntime(vendorList(before))
-	for _, v := range vendorList(after) {
-		old, ok := was[v.Runtime]
-		if !ok {
-			if len(v.Domains) > 0 || len(v.Prefixes) > 0 || len(v.Networks) > 0 {
-				return true
-			}
-			continue
-		}
-		if v.Vendor != old.Vendor && len(v.Domains) > 0 {
-			return true
-		}
-		for _, pair := range [][2][]string{{old.Domains, v.Domains}, {old.Prefixes, v.Prefixes}, {old.Networks, v.Networks}} {
-			had := setOf(pair[0])
-			for _, x := range pair[1] {
-				if !had[x] {
-					return true
-				}
-			}
-		}
-		// An excluded host taken away vouches for it again, unless the
-		// domain it sat under went with it.
-		still := setOf(v.ExcludeDomains)
-		for _, x := range old.ExcludeDomains {
-			if !still[x] && storage.VendorNames(v, x) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// keptVendors is the vendors before, holding only the domains, prefixes and
-// networks after keeps and excluding what either excludes: the tightening
-// half of a vendor change.
-func keptVendors(before, after any) any {
-	next := vendorByRuntime(vendorList(after))
-	kept := []storage.AgentRuntimeVendor{}
-	for _, v := range vendorList(before) {
-		n, ok := next[v.Runtime]
-		if !ok {
-			continue
-		}
-		both := func(was, now []string) []string {
-			keep, out := setOf(now), []string{}
-			for _, x := range was {
-				if keep[x] {
-					out = append(out, x)
-				}
-			}
-			return out
-		}
-		excluded := append(append([]string{}, v.ExcludeDomains...), n.ExcludeDomains...)
-		kept = append(kept, storage.AgentRuntimeVendor{Runtime: v.Runtime, Vendor: v.Vendor,
-			Domains: both(v.Domains, n.Domains), ExcludeDomains: excluded,
-			Prefixes: both(v.Prefixes, n.Prefixes), Networks: both(v.Networks, n.Networks)})
-	}
-	return kept
-}
-
-func workloadList(v any) []storage.KnownWorkload {
-	var out []storage.KnownWorkload
-	raw, _ := json.Marshal(v)
-	_ = json.Unmarshal(raw, &out)
-	return out
-}
-
-// workloadsLoosen reports known workloads that vouch for more than before: a
-// program, owner or reach that was not there, or an expiry moved later. A
-// changed reason alone vouches for nothing new.
-func workloadsLoosen(before, after any) bool {
-	was := map[string]time.Time{}
-	for _, k := range workloadList(before) {
-		was[k.Key()] = k.ExpiresAt
-	}
-	for _, k := range workloadList(after) {
-		until, ok := was[k.Key()]
-		if !ok || k.ExpiresAt.After(until) {
-			return true
-		}
-	}
-	return false
-}
-
-// keptWorkloads is the known workloads before that after still names, each
-// with the earlier of its two expiries: the tightening half of a change.
-func keptWorkloads(before, after any) any {
-	next := map[string]storage.KnownWorkload{}
-	for _, k := range workloadList(after) {
-		next[k.Key()] = k
-	}
-	kept := []storage.KnownWorkload{}
-	for _, k := range workloadList(before) {
-		n, ok := next[k.Key()]
-		if !ok {
-			continue
-		}
-		if n.ExpiresAt.Before(k.ExpiresAt) {
-			k.ExpiresAt = n.ExpiresAt
-		}
-		kept = append(kept, k)
-	}
-	return kept
 }
 
 // changed reports whether a change changes anything at all.
@@ -573,8 +494,7 @@ const (
 	addLoosens                           // a list entry that was not there loosens
 	anyLoosens                           // any change loosens
 	windowField                          // the off-hours window, judged as a whole
-	vendorField                          // agent runtime vendors: a domain, prefix or network that was not there, or an exclusion taken away, loosens
-	workloadField                        // known workloads: a new entry or a later expiry loosens
+	rulesField                           // expected rules: a new rule, or one that covers more (ruleLoosens), loosens
 	removeLoosens                        // a list entry taken away loosens
 )
 
@@ -601,12 +521,8 @@ var tuningDirections = map[string]tuningDirection{
 	"silence_after_minutes":       higherLoosens,
 	"warmup_hours":                higherLoosens,
 
-	"quiet_processes": addLoosens,
-	"quiet_orgs":      addLoosens,
-	"quiet_clients":   addLoosens,
-	"quiet_pairs":     addLoosens,
 	"container_cidrs": addLoosens,
-	"known_workloads": workloadField,
+	"expected_rules":  rulesField,
 
 	"agent_egress_enabled":  offLoosens,
 	"agent_runtimes":        anyLoosens, // a runtime named is also muted where it runs
@@ -616,11 +532,6 @@ var tuningDirections = map[string]tuningDirection{
 	"agent_heavy_endpoints": addLoosens,
 	"agent_heavy_roles":     addLoosens,
 	"agent_heavy_observed":  onLoosens,
-	"agent_runtime_vendors": vendorField,
-
-	"admin_fanout_sources":   addLoosens,
-	"admin_fanout_targets":   addLoosens,
-	"admin_fanout_max_hosts": higherLoosens,
 
 	// Any change to a zone loosens something: a network added mutes the
 	// admin and sweep rules there, one removed drops its hosts' lab escape
@@ -683,10 +594,8 @@ func tuningLoosens(before, after storage.DetectionTuning) []string {
 			loose = addsEntries(a[k], b[k])
 		case removeLoosens:
 			loose = addsEntries(b[k], a[k])
-		case vendorField:
-			loose = vendorsLoosen(a[k], b[k])
-		case workloadField:
-			loose = workloadsLoosen(a[k], b[k])
+		case rulesField:
+			loose = rulesLoosen(a[k], b[k])
 		default:
 			loose = true
 		}
@@ -757,16 +666,6 @@ func windowCovers(after, before storage.DetectionTuning) bool {
 		}
 	}
 	return true
-}
-
-// exclusionView is an exclusion as the authority words it: without the time it
-// happens to be written at, and without an id the hub has yet to pick.
-func exclusionView(ex storage.Exclusion, keepID bool) storage.Exclusion {
-	ex.CreatedAt = time.Time{}
-	if !keepID {
-		ex.ID = ""
-	}
-	return ex
 }
 
 // detectionPolicySection is the Nightshift feed's view of detection policy: a
@@ -881,7 +780,7 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		}
 	}
 	// The floor runs wherever the saved row is weaker (detector.ClampToFloor),
-	// and a known workload past its expiry stops vouching; neither changes
+	// and an expected rule past its expiry stops matching; neither changes
 	// what the console shows, so both are named here.
 	saved := s.store.GetDetectionTuning()
 	_, clamped := detector.ClampToFloor(saved)
@@ -889,17 +788,17 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		unmapped["floor_clamped"] = clamped
 	}
 	var expired []string
-	for _, k := range saved.KnownWorkloads {
-		if k.Expired(now) {
-			expired = append(expired, k.Workload+"@"+k.Owner)
+	for _, r := range saved.ExpectedRules {
+		if r.Expired(now) {
+			expired = append(expired, r.ID)
 		}
 	}
 	if len(expired) > 0 {
 		if len(expired) > feedDismissedListShown {
-			unmapped["known_workloads_expired_omitted"] = len(expired) - feedDismissedListShown
+			unmapped["expected_rules_expired_omitted"] = len(expired) - feedDismissedListShown
 			expired = expired[:feedDismissedListShown]
 		}
-		unmapped["known_workloads_expired"] = expired
+		unmapped["expected_rules_expired"] = expired
 	}
 	if len(changes) == 0 && len(dismissed) == 0 && len(issued) == 0 && len(clamped) == 0 && len(expired) == 0 {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
@@ -931,8 +830,8 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	if len(clamped) > 0 {
 		parts = append(parts, "the saved tuning is weaker than the detection floor, which runs instead: "+strings.Join(clamped, "; "))
 	}
-	if n, _ := unmapped["known_workloads_expired_omitted"].(int); len(expired) > 0 {
-		parts = append(parts, fmt.Sprintf("expired known workloads no longer vouch for anything: %d; renew or remove them in the tuning", len(expired)+n))
+	if n, _ := unmapped["expected_rules_expired_omitted"].(int); len(expired) > 0 {
+		parts = append(parts, fmt.Sprintf("expired expected rules no longer match anything: %d; renew or remove them", len(expired)+n))
 	}
 	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil

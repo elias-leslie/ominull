@@ -29,7 +29,7 @@ const (
 	ActionKindAutoIsolate     ActionKind = "auto_isolate"
 	ActionKindCapability      ActionKind = "capability_change"
 	// ActionKindDetectionPolicy is an authority-signed loosening of the hub's
-	// own detection policy (tuning, exclusions). The hub applies it; no agent
+	// own detection policy (tuning, expected rules). The hub applies it; no agent
 	// ever receives a grant of this kind.
 	ActionKindDetectionPolicy ActionKind = "detection_policy"
 )

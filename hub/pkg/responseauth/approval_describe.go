@@ -459,8 +459,8 @@ var detectionPolicyKeys = map[string]bool{"policy": true, "op": true, "before": 
 // the full form names the first two cases the change would blind, the short
 // form only counts them. The short form is used when the change itself leaves
 // no room for the full one; the change is never cut for it. The 10 MB burst
-// is not drilled under exclusions or quiet processes, which it yields to by
-// design, so the clean verdict says so.
+// is not drilled under expected rules, which it yields to by design, so the
+// clean verdict says so.
 func drillLead(drill *[]string) (full, short string) {
 	if drill == nil {
 		return "", ""
@@ -468,7 +468,7 @@ func drillLead(drill *[]string) (full, short string) {
 	cases := *drill
 	switch {
 	case len(cases) == 0:
-		return "floor drill: blinds no floor case (the 10 MB burst yields to exclusions and quiet processes)", "floor drill: blinds no floor case"
+		return "floor drill: blinds no floor case (the 10 MB burst yields to expected rules)", "floor drill: blinds no floor case"
 	case len(cases) == 1 && cases[0] == "the drill could not run":
 		return "floor drill could not run: what this blinds is unknown", "floor drill could not run"
 	}
@@ -496,11 +496,8 @@ var detectionPolicyOps = map[string]map[string]string{
 	"detection_tuning": {
 		"save":          "Loosen detection tuning",
 		"reset":         "Restore shipped detection tuning",
-		"suppress_pair": "Mark a conversation expected",
-	},
-	"exclusion": {
-		"create": "Add a detection exclusion",
-		"enable": "Turn a detection exclusion on",
+		"mark_expected": "Mark a finding expected",
+		"rule_save":     "Save an expected rule",
 	},
 	// The silence floor itself cannot be switched off, but each host's
 	// presence decides when its going quiet is reported, and a retired host
@@ -628,38 +625,7 @@ func describeDetectionPolicy(payload []byte, targets []string) (string, string, 
 		summary, err := SoftwareCatalogWording(targets[0], before, after)
 		return action, summary, err
 	}
-	if !strings.HasPrefix(targets[0], "exclusion:") {
-		return "", "", errors.New("an exclusion change targets exclusion:<id>")
-	}
-	if p.Op == "enable" && before == nil {
-		return "", "", errors.New("turning an exclusion on carries the saved exclusion")
-	}
-	// What the exclusion matches comes first and must fit in full; its name
-	// and reason only label it, so they take whatever room is left.
-	var parts, labels []string
-	shown := map[string]bool{"id": true, "tenant_id": true, "active": true, "created_at": true}
-	for _, k := range append([]string{"process_path", "dst_ip_range", "port", "protocol", "scope", "scope_value", "expires_at"}, sortedKeys(after)...) {
-		v, present := after[k]
-		if shown[k] || !present {
-			continue
-		}
-		shown[k] = true
-		if v == nil || v == "" || v == float64(0) {
-			continue
-		}
-		if policyLabels[k] {
-			labels = append(labels, k+" "+policyValue(v))
-		} else {
-			parts = append(parts, k+" "+policyValue(v))
-		}
-	}
-	if before != nil && p.Op == "create" {
-		// Saving over an existing exclusion renews or rewrites it.
-		parts = append([]string{"rewrites " + targets[0][len("exclusion:"):]}, policyDiff(before, after, func(k string) bool { return !policyLabels[k] })...)
-		labels = policyDiff(before, after, func(k string) bool { return policyLabels[k] })
-	}
-	summary, err := fitLead(lead, leadShort, parts, labels)
-	return action, summary, err
+	return "", "", errors.New("not a detection policy change")
 }
 
 // policyLabels are the fields that name or explain a policy entry without

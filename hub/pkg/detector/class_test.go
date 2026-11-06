@@ -264,7 +264,8 @@ func TestABulkUploadToANewPlacePages(t *testing.T) {
 func TestNewPlaceUploadSkipsKnownDestinationsByRole(t *testing.T) {
 	engine, store := noiseEngine(t)
 	cfg := store.GetDetectionTuning()
-	cfg.QuietPairs = []string{"/usr/local/bin/rclone@as15169"}
+	cfg.ExpectedRules = append(cfg.ExpectedRules, storage.ExpectedRule{ID: "rclone-google", Reason: "fixture", Findings: []string{storage.KindNewPlaceUpload},
+		Programs: []storage.ExpectedProgram{{Path: "/usr/local/bin/rclone"}}, Networks: []string{"as15169"}})
 	if _, err := store.SaveDetectionTuning(cfg, "test"); err != nil {
 		t.Fatal(err)
 	}

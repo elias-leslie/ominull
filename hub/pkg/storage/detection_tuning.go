@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/netip"
 	"sort"
 	"strings"
@@ -68,50 +67,14 @@ type DetectionTuning struct {
 	// first-boot conversations is a first-seen destination.
 	WarmupHours int `json:"warmup_hours"`
 
-	// QuietProcesses and QuietOrgs are the operator's own answers to "this is
-	// normal here". A process is named by its installed path (see
-	// MatchesQuietPath), never its base name: malware called svchost.exe in a
-	// temp directory is not svchost. A network is named by its AS number, and
-	// rented compute inside that AS is never quiet (IsQuietOrg).
-	QuietProcesses []string `json:"quiet_processes"`
-	QuietOrgs      []string `json:"quiet_orgs"`
-
-	// QuietClients are the processes whose regular traffic to a vouched network
-	// is expected: browsers, updaters, this agent.
-	//
-	// A quiet org on its own is far wider than it reads. "Cloudflare is normal
-	// here" silences every process on every port to a network that fronts a
-	// large part of the web, which is exactly where beaconing is easiest to
-	// hide - the published allowlist is the point of the technique. Silence is
-	// therefore granted to a process talking to a vouched network, never to the
-	// network alone: chrome to Cloudflare is ordinary, python to Cloudflare is
-	// the finding.
-	QuietClients []string `json:"quiet_clients"`
-
-	// QuietPairs are one-off exceptions, written "path@owner" - the shape the
-	// console's Expected button and the learning proposals produce. The owner
-	// is an AS number or the network's exact name (OwnerMatches).
-	QuietPairs []string `json:"quiet_pairs"`
+	// ExpectedRules are the operator's answers to "this is normal here": the
+	// one list every detector consults before it raises something that can be
+	// made expected (expected_rules.go). A rule names a program, a destination,
+	// a host and the findings it covers; the floor rules cannot be covered.
+	ExpectedRules []ExpectedRule `json:"expected_rules"`
 
 	// ContainerCIDRs are explicit lateral-movement exemptions, never guessed from private address space.
 	ContainerCIDRs []string `json:"container_cidrs"`
-
-	// KnownWorkloads name the long-running programs whose outbound
-	// conversations are their job, each with the reason it is known.
-	//
-	// An interpreter's base name says almost nothing: on a developer machine
-	// every service, test run and one-off script is "python3.13", so vouching
-	// for "python3.13 to Google" would vouch for all of them, including the
-	// script a prompt-injected agent writes. A workload is the interpreter
-	// together with the program it runs (see detector.WorkloadOf), so a market
-	// data worker or a web-research crawler can be named without naming every
-	// other python on the host. Inline code (-c, -e) is never a workload.
-	//
-	// A known workload silences only the novelty findings: a new destination,
-	// an interpreter reaching out, activity off-hours. Beaconing, upload volume
-	// and threat-intelligence matches still judge it, so a known crawler that
-	// starts sending data out is still reported.
-	KnownWorkloads []KnownWorkload `json:"known_workloads"`
 
 	// AgentRuntimes name the AI agent runtimes whose egress is judged against
 	// their own baselines (detector/agent_egress.go): where each has gone
@@ -121,12 +84,6 @@ type DetectionTuning struct {
 	AgentBaselineDays  int            `json:"agent_baseline_days"`
 	AgentUploadFloorMB int            `json:"agent_upload_floor_mb"`
 	AgentUploadFactor  int            `json:"agent_upload_factor"`
-	// AgentRuntimeVendors name each runtime's maker, its service domains and
-	// the address ranges it publishes for them (AgentRuntimeVendor). A flow
-	// from the runtime to its maker's range is judged by the runtime's hourly
-	// upload volume, not the per-connection bandwidth baseline. Adding a
-	// domain or prefix loosens detection; removing one tightens it.
-	AgentRuntimeVendors []AgentRuntimeVendor `json:"agent_runtime_vendors"`
 
 	// AgentHeavyEndpoints and AgentHeavyRoles name the endpoints (by id) and
 	// role tags where AI agents run programs and open connections all day.
@@ -139,25 +96,12 @@ type DetectionTuning struct {
 	// telemetry has shown one of the agent runtimes (agent_runtimes).
 	AgentHeavyObserved bool `json:"agent_heavy_observed"`
 
-	// AdminFanoutSources, AdminFanoutTargets and AdminFanoutMax describe the
-	// routine administration that the lateral sweep detector does not page
-	// on: ssh from one of these endpoints (by id), to port 22 only, on hosts
-	// that are all inventoried (an enrolled endpoint's address, or inside
-	// AdminFanoutTargets: managed hosts without an agent such as the gateway),
-	// at most AdminFanoutMax of them in the window. Anything else - another
-	// source, another port, one unknown host, more hosts - is judged as
-	// before. Empty sources switch the rule off (detector/admin_fanout.go).
-	AdminFanoutSources []string `json:"admin_fanout_sources"`
-	AdminFanoutTargets []string `json:"admin_fanout_targets"`
-	AdminFanoutMax     int      `json:"admin_fanout_max_hosts"`
-
 	// Roles and zones (detector/class.go). LabCIDRs are the lab networks
 	// (target VMs, labnet) and InfraCIDRs the estate's own infrastructure
 	// (hypervisor, gateway, vault, guests without an agent): a sweep from an
 	// agent workstation into either is recorded, never paged, and anything a
 	// lab host reaches outside the lab is a lab escape, which pages. Enrolled
 	// endpoints take their zone from their role without being listed.
-	// InfraCIDRs replaces AdminFanoutTargets, whose entries move here.
 	LabCIDRs   []string `json:"lab_cidrs"`
 	InfraCIDRs []string `json:"infra_cidrs"`
 	// DecoyAddrs are LAN addresses ("ip" or "ip:port") nothing legitimate
@@ -239,13 +183,12 @@ func defaultDetectionTuning() DetectionTuning {
 		OffHoursZone:  "Local",
 		OffHoursOn:    true,
 
-		AgentEgressOn:       true,
-		AgentHeavyObserved:  true,
-		AgentRuntimes:       defaultAgentRuntimes(),
-		AgentRuntimeVendors: defaultAgentRuntimeVendors(),
-		AgentBaselineDays:   7,
-		AgentUploadFloorMB:  100,
-		AgentUploadFactor:   5,
+		AgentEgressOn:      true,
+		AgentHeavyObserved: true,
+		AgentRuntimes:      defaultAgentRuntimes(),
+		AgentBaselineDays:  7,
+		AgentUploadFloorMB: 100,
+		AgentUploadFactor:  5,
 
 		BeaconOn:          true,
 		BeaconMinSamples:  12,
@@ -266,9 +209,7 @@ func defaultDetectionTuning() DetectionTuning {
 
 		WarmupHours: 24,
 
-		QuietProcesses: defaultQuietProcesses(),
-		QuietOrgs:      defaultQuietOrgs(),
-		QuietClients:   defaultQuietClients(),
+		ExpectedRules: seedExpectedRules(),
 
 		TunnelServices:       defaultTunnelServices(),
 		BeaconBrowsers:       defaultBeaconBrowsers(),
@@ -311,72 +252,6 @@ func defaultBeaconBrowsers() []string {
 	return []string{"chrome", "chromium", "chromium-browser", "firefox", "msedge", "brave", "safari", "opera", "vivaldi"}
 }
 
-// defaultQuietProcesses is a starting point, not a security boundary. Every
-// entry here is an operating system component whose whole job is to talk to its
-// vendor on a timer; leaving them in makes the detector describe the platform
-// rather than the intruder. They are listed in the console and can be removed.
-//
-// Each is the path the component is installed at, in directories only an
-// administrator can write, and matches only while it runs as the system or as
-// its own service account (IsServiceAccount): a login user can make any
-// program appear at one of these paths, but not run it as that account.
-// Components that were listed only because they are familiar, and in two weeks
-// of this estate's traffic never reached the network, are not: an entry that
-// silences nothing real is cover for whatever borrows its path.
-func defaultQuietProcesses() []string {
-	return []string{
-		// Windows
-		"c:/windows/system32/svchost.exe", "c:/windows/system32/lsass.exe",
-		"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe",
-		// Linux
-		"/usr/lib/systemd/systemd-resolved user:systemd-resolve",
-		"/usr/lib/systemd/systemd-timesyncd user:systemd-timesync",
-		"/usr/sbin/chronyd user:_chrony", "/usr/sbin/chronyd user:chrony",
-		"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd",
-		// This fleet's own agent, which heartbeats on a fixed interval and is
-		// therefore the most perfect beacon on any host it is installed on.
-		"/opt/ominull/bin/ominulld", "c:/program files/ominull/ominulld.exe",
-	}
-}
-
-// defaultQuietClients are the programs that talk to vendor networks all day by
-// design. Being on this list silences nothing on its own: it only means that
-// this program talking to an already-vouched owner is unremarkable.
-func defaultQuietClients() []string {
-	return []string{
-		// Browsers, which account for most traffic to CDN and vendor networks.
-		"/opt/google/chrome/chrome", "c:/program files/google/chrome/application/chrome.exe",
-		"c:/program files (x86)/google/chrome/application/chrome.exe",
-		"/usr/lib/chromium/chromium", "/snap/chromium/*/usr/lib/chromium-browser/chrome",
-		"/usr/lib/firefox/firefox", "/snap/firefox/*/usr/lib/firefox/firefox",
-		"c:/program files/mozilla firefox/firefox.exe",
-		"c:/program files (x86)/microsoft/edge/application/msedge.exe",
-		"/applications/safari.app/contents/macos/safari",
-		"/opt/brave.com/brave/brave", "c:/program files/bravesoftware/brave-browser/application/brave.exe",
-		// Platform updaters and stores.
-		"c:/windows/system32/svchost.exe", "c:/windows/system32/usocoreworker.exe",
-		"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe",
-		"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd", "/usr/libexec/packagekitd",
-		"/usr/libexec/nsurlsessiond",
-		"/system/library/privateframeworks/softwareupdate.framework/resources/softwareupdated",
-		// This fleet's own agent, which is the most regular talker on any host
-		// it is installed on.
-		"/opt/ominull/bin/ominulld", "c:/program files/ominull/ominulld.exe",
-		// Chat and assistant clients with fixed keepalives. These hold a
-		// websocket open and ping it on a timer, which is regular, uniform and
-		// entirely ordinary - the shape the beacon detector exists to find,
-		// produced by an application the operator installed on purpose.
-		"/usr/lib/chatgpt/chatgpt", "/usr/lib/claude-desktop/claude-desktop",
-	}
-}
-
-// defaultQuietOrgs are the vendors' own AS numbers: Apple, Microsoft, Google,
-// Cloudflare, Amazon, Akamai and Fastly. Rented compute inside them (EC2,
-// Azure, the published cloud ranges) is never quiet.
-func defaultQuietOrgs() []string {
-	return []string{"as714", "as8075", "as15169", "as13335", "as16509", "as20940", "as54113"}
-}
-
 func (s *Store) initDetectionTuningSchema() error {
 	_, err := s.db.Exec(`
 	CREATE TABLE IF NOT EXISTS detection_tuning (
@@ -388,209 +263,8 @@ func (s *Store) initDetectionTuningSchema() error {
 	if err != nil {
 		return err
 	}
-	s.migrateSavedTuning(time.Now().UTC())
+	s.migrateExpectedRules(time.Now().UTC())
 	return nil
-}
-
-// legacyQuietProcesses are the quiet-process entries the shipped quiet names
-// become, for rewriting a row saved when the quiet lists matched base names.
-// The components that never reached the network (defaultQuietProcesses) are
-// left out, and so dropped from the row, like any name not here: kept, a name
-// would match nothing anyway.
-var legacyQuietProcesses = map[string][]string{
-	"svchost.exe":       {"c:/windows/system32/svchost.exe"},
-	"lsass.exe":         {"c:/windows/system32/lsass.exe"},
-	"msmpeng.exe":       {"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe"},
-	"systemd-resolved":  {"/usr/lib/systemd/systemd-resolved user:systemd-resolve"},
-	"systemd-timesyncd": {"/usr/lib/systemd/systemd-timesyncd user:systemd-timesync"},
-	"chronyd":           {"/usr/sbin/chronyd user:_chrony", "/usr/sbin/chronyd user:chrony"},
-	"snapd":             {"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd"},
-	"ominull-agent":     {"/opt/ominull/bin/ominulld"},
-	"ominulld":          {"/opt/ominull/bin/ominulld"},
-	"ominulld.exe":      {"c:/program files/ominull/ominulld.exe"},
-	"ominull_agent.exe": {"c:/program files/ominull/ominulld.exe"},
-}
-
-// legacyQuietPaths are the paths the shipped expected-client and pair names
-// are installed at. A program in a folder any account can write to, such as
-// ~/.local/bin/rclone, is not carried over: by path alone that is whatever
-// was put there last. Nor is a path where nothing ran: rclone was never at
-// /usr/bin/rclone, and an unpinned entry there would vouch for whatever a
-// login user presents at that path through a user namespace bind mount.
-var legacyQuietPaths = map[string][]string{
-	"svchost.exe":       {"c:/windows/system32/svchost.exe"},
-	"usocoreworker.exe": {"c:/windows/system32/usocoreworker.exe"},
-	"msmpeng.exe":       {"c:/programdata/microsoft/windows defender/platform/*/msmpeng.exe"},
-	"snapd":             {"/usr/lib/snapd/snapd", "/snap/snapd/*/usr/lib/snapd/snapd"},
-	"packagekitd":       {"/usr/libexec/packagekitd"},
-	"ominull-agent":     {"/opt/ominull/bin/ominulld"},
-	"ominulld":          {"/opt/ominull/bin/ominulld"},
-	"ominulld.exe":      {"c:/program files/ominull/ominulld.exe"},
-	"ominull_agent.exe": {"c:/program files/ominull/ominulld.exe"},
-	"chrome":            {"/opt/google/chrome/chrome"},
-	"chrome.exe": {"c:/program files/google/chrome/application/chrome.exe",
-		"c:/program files (x86)/google/chrome/application/chrome.exe"},
-	"chromium":        {"/usr/lib/chromium/chromium", "/snap/chromium/*/usr/lib/chromium-browser/chrome"},
-	"firefox":         {"/usr/lib/firefox/firefox", "/snap/firefox/*/usr/lib/firefox/firefox"},
-	"firefox.exe":     {"c:/program files/mozilla firefox/firefox.exe"},
-	"msedge.exe":      {"c:/program files (x86)/microsoft/edge/application/msedge.exe"},
-	"safari":          {"/applications/safari.app/contents/macos/safari"},
-	"brave":           {"/opt/brave.com/brave/brave"},
-	"brave.exe":       {"c:/program files/bravesoftware/brave-browser/application/brave.exe"},
-	"nsurlsessiond":   {"/usr/libexec/nsurlsessiond"},
-	"softwareupdated": {"/system/library/privateframeworks/softwareupdate.framework/resources/softwareupdated"},
-	"chatgpt":         {"/usr/lib/chatgpt/chatgpt"},
-	"claude-desktop":  {"/usr/lib/claude-desktop/claude-desktop"},
-}
-
-// legacyQuietOwners are the AS numbers behind the name fragments the shipped
-// quiet networks and known-workload owners used.
-var legacyQuietOwners = map[string]string{
-	"apple": "as714", "microsoft": "as8075", "google": "as15169", "cloudflare": "as13335",
-	"amazon": "as16509", "akamai": "as20940", "fastly": "as54113", "github": "as36459",
-}
-
-// migrateQuietLists rewrites quiet entries saved when processes matched by base
-// name and networks by a fragment of their name. Entries already written as
-// paths and AS numbers are kept as they are, so running it twice changes
-// nothing. It returns what it could not carry over.
-func migrateQuietLists(t DetectionTuning) (DetectionTuning, []string) {
-	var dropped []string
-	paths := func(list []string, what string, valid func(string) error, legacy map[string][]string) []string {
-		out := []string{}
-		for _, v := range list {
-			switch {
-			case valid(v) == nil:
-				out = append(out, v)
-			case legacy[v] != nil:
-				out = append(out, legacy[v]...)
-			default:
-				dropped = append(dropped, what+" "+v)
-			}
-		}
-		return out
-	}
-	t.QuietProcesses = paths(t.QuietProcesses, "quiet process", ValidQuietPath, legacyQuietProcesses)
-	t.QuietClients = paths(t.QuietClients, "expected client", validClientPath, legacyQuietPaths)
-
-	orgs := []string{}
-	for _, v := range t.QuietOrgs {
-		switch {
-		case IsASN(v):
-			orgs = append(orgs, v)
-		case legacyQuietOwners[v] != "":
-			orgs = append(orgs, legacyQuietOwners[v])
-		default:
-			dropped = append(dropped, "quiet network "+v)
-		}
-	}
-	t.QuietOrgs = orgs
-
-	pairs := []string{}
-	for _, v := range t.QuietPairs {
-		proc, owner, ok := splitPair(v)
-		procs := []string{proc}
-		if validClientPath(proc) != nil {
-			procs = legacyQuietPaths[proc]
-		}
-		if asn := legacyQuietOwners[owner]; asn != "" {
-			owner = asn
-		}
-		if !ok || len(procs) == 0 {
-			dropped = append(dropped, "expected pair "+v)
-			continue
-		}
-		for _, p := range procs {
-			pairs = append(pairs, p+"@"+owner)
-		}
-	}
-	t.QuietPairs = pairs
-
-	for i, k := range t.KnownWorkloads {
-		if asn := legacyQuietOwners[k.Owner]; asn != "" {
-			t.KnownWorkloads[i].Owner = asn
-		}
-	}
-	return t.normalised(), dropped
-}
-
-// boundWorkloadExpiry gives each known workload saved before entries had an
-// expiry one at = now + KnownWorkloadMaxLifetime. An entry that already has
-// an expiry keeps it, so running it twice changes nothing and it never
-// extends one. A row an older hub re-saved has lost its expiries and gets
-// fresh ones here: an accepted limit of downgrading. It returns how many it
-// bounded.
-func boundWorkloadExpiry(t DetectionTuning, now time.Time) (DetectionTuning, int) {
-	n := 0
-	until := now.UTC().Add(KnownWorkloadMaxLifetime).Truncate(time.Second)
-	out := make([]KnownWorkload, len(t.KnownWorkloads))
-	for i, k := range t.KnownWorkloads {
-		if k.ExpiresAt.IsZero() {
-			k.ExpiresAt = until
-			n++
-		}
-		out[i] = k
-	}
-	t.KnownWorkloads = out
-	return t, n
-}
-
-// migrateSavedTuning rewrites the stored row once, on the first start that
-// matches by path and AS number, and on the first start that requires known
-// workloads to expire. A row it cannot save is left as it is: its old quiet
-// entries match nothing now, and its known workloads without an expiry vouch
-// for nothing, which is quieter for nobody (DetectionTuningProblem reports
-// the row on the Nightshift feed).
-func (s *Store) migrateSavedTuning(now time.Time) {
-	var exists int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM detection_tuning WHERE id = 1`).Scan(&exists); err != nil || exists == 0 {
-		return
-	}
-	before := s.GetDetectionTuning()
-	after, dropped := migrateQuietLists(before)
-	after, bounded := boundWorkloadExpiry(after, now)
-	was, _ := json.Marshal(quietListsOf(before))
-	is, _ := json.Marshal(quietListsOf(after))
-	if string(was) == string(is) {
-		return
-	}
-	if _, err := s.SaveDetectionTuning(after, "upgrade"); err != nil {
-		log.Printf("[-] Detection tuning: the saved row could not be upgraded (quiet lists as paths and AS numbers, known workloads with an expiry); old quiet entries and known workloads without an expiry now match nothing: %v", err)
-		return
-	}
-	if len(dropped) > 0 {
-		log.Printf("[+] Detection tuning: quiet lists rewritten as paths and AS numbers (dropped: %s)", strings.Join(dropped, ", "))
-	}
-	if bounded > 0 {
-		log.Printf("[+] Detection tuning: %d known workloads saved without an expiry now expire at %s", bounded, now.UTC().Add(KnownWorkloadMaxLifetime).Format(time.RFC3339))
-	}
-}
-
-// CheckNewWorkloadExpiry refuses a known workload a save adds or changes
-// without an expiry in the future, or with one further out than
-// KnownWorkloadMaxLifetime. An entry carried over exactly as saved may have
-// expired since; the save then drops it (PrepareDetectionTuning).
-func CheckNewWorkloadExpiry(before, after []KnownWorkload, now time.Time) error {
-	saved := map[string]bool{}
-	for _, k := range tidyWorkloads(before) {
-		saved[k.Key()+"@"+k.ExpiresAt.Format(time.RFC3339)] = true
-	}
-	for _, k := range tidyWorkloads(after) {
-		if saved[k.Key()+"@"+k.ExpiresAt.Format(time.RFC3339)] {
-			continue
-		}
-		if !k.ExpiresAt.After(now) {
-			return fmt.Errorf("%w: known workload %q needs an expires_at in the future", ErrInvalidDetectionTuning, k.Workload)
-		}
-		if k.ExpiresAt.After(now.Add(KnownWorkloadMaxLifetime)) {
-			return fmt.Errorf("%w: known workload %q expires_at is more than %d days out; renew it when it nears expiry instead", ErrInvalidDetectionTuning, k.Workload, int(KnownWorkloadMaxLifetime.Hours()/24))
-		}
-	}
-	return nil
-}
-
-func quietListsOf(t DetectionTuning) []any {
-	return []any{t.QuietProcesses, t.QuietOrgs, t.QuietClients, t.QuietPairs, t.KnownWorkloads}
 }
 
 // GetDetectionTuning returns the stored tuning, or the defaults if the hub has
@@ -659,31 +333,15 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 		t.ContainerCIDRs[i] = p.Masked().String()
 	}
 	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
-	live := make([]KnownWorkload, 0, len(t.KnownWorkloads))
-	now := time.Now()
-	for _, k := range t.KnownWorkloads {
-		if err := k.validate(); err != nil {
-			return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
-		}
-		// An expired entry vouches for nothing; a save drops it, which only
-		// tightens.
-		if !k.Expired(now) {
-			live = append(live, k)
-		}
-	}
-	t.KnownWorkloads = live
-	if err := t.validQuietLists(); err != nil {
+	// An expired rule covers nothing; a save drops it, which only tightens.
+	t.ExpectedRules = withoutExpired(t.ExpectedRules, time.Now())
+	if err := validExpectedRules(t.ExpectedRules); err != nil {
 		return t, err
 	}
 	t, err := t.validZones()
 	if err != nil {
 		return t, err
 	}
-	vendors, err := validAgentRuntimeVendors(t.AgentRuntimeVendors)
-	if err != nil {
-		return t, err
-	}
-	t.AgentRuntimeVendors = vendors
 	return t, nil
 }
 
@@ -709,47 +367,6 @@ func (s *Store) DetectionTuningProblem() string {
 		return "the saved detection tuning holds an entry a save would refuse: " + err.Error()
 	}
 	return ""
-}
-
-// validQuietLists refuses an entry the matchers would read more widely than it
-// is written, or never match: a process by name, a network by a fragment of
-// its name.
-func (t DetectionTuning) validQuietLists() error {
-	for _, entry := range t.QuietProcesses {
-		if err := ValidQuietPath(entry); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
-		}
-	}
-	for _, entry := range t.QuietClients {
-		if err := validClientPath(entry); err != nil {
-			return fmt.Errorf("%w: expected client %v", ErrInvalidDetectionTuning, err)
-		}
-	}
-	for _, org := range t.QuietOrgs {
-		if !IsASN(org) {
-			return fmt.Errorf("%w: quiet network %q must be an AS number such as AS15169", ErrInvalidDetectionTuning, org)
-		}
-	}
-	for _, pair := range t.QuietPairs {
-		proc, _, _ := splitPair(pair)
-		if err := validClientPath(proc); err != nil {
-			return fmt.Errorf("%w: expected pair %q: %v", ErrInvalidDetectionTuning, pair, err)
-		}
-	}
-	return nil
-}
-
-// validClientPath is ValidQuietPath for the expected-client and pair lists,
-// which are about the programs a person runs and so are not bound to an
-// account.
-func validClientPath(entry string) error {
-	if err := ValidQuietPath(entry); err != nil {
-		return err
-	}
-	if splitQuietPath(entry).hasAccount {
-		return fmt.Errorf("%q: only a quiet process is bound to the account it runs as", entry)
-	}
-	return nil
 }
 
 func (t DetectionTuning) normalised() DetectionTuning {
@@ -796,26 +413,16 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	if t.WarmupHours > 720 {
 		t.WarmupHours = 720
 	}
-	t.QuietProcesses = tidyList(t.QuietProcesses)
-	t.QuietOrgs = tidyList(t.QuietOrgs)
-	t.QuietClients = tidyList(t.QuietClients)
-	t.QuietPairs = tidyPairs(t.QuietPairs)
+	t.ExpectedRules = tidyRules(t.ExpectedRules)
 	t.ContainerCIDRs = tidyList(t.ContainerCIDRs)
-	t.KnownWorkloads = tidyWorkloads(t.KnownWorkloads)
 	t.AgentHeavyEndpoints = tidyList(t.AgentHeavyEndpoints)
 	t.AgentHeavyRoles = tidyList(t.AgentHeavyRoles)
 	t.AgentRuntimes = tidyAgentRuntimes(t.AgentRuntimes)
-	t.AgentRuntimeVendors = tidyAgentRuntimeVendors(t.AgentRuntimeVendors)
 	t.AgentBaselineDays = clampInt(t.AgentBaselineDays, 1, 90, 7)
 	t.AgentUploadFloorMB = clampInt(t.AgentUploadFloorMB, 1, 100000, 100)
 	t.AgentUploadFactor = clampInt(t.AgentUploadFactor, 2, 100, 5)
-	t.AdminFanoutSources = tidyList(t.AdminFanoutSources)
-	t.AdminFanoutTargets = tidyList(t.AdminFanoutTargets)
-	t.AdminFanoutMax = clampInt(t.AdminFanoutMax, 2, 20, AdminFanoutMaxDefault)
-	// The managed-host list became the infrastructure zone.
-	t.InfraCIDRs = tidyList(append(t.InfraCIDRs, t.AdminFanoutTargets...))
-	t.AdminFanoutTargets = []string{}
 	t.LabCIDRs = tidyList(t.LabCIDRs)
+	t.InfraCIDRs = tidyList(t.InfraCIDRs)
 	t.DecoyAddrs = tidyList(t.DecoyAddrs)
 	t.TunnelServices = tidyList(t.TunnelServices)
 	if t.BeaconBrowsers == nil {
@@ -1005,61 +612,12 @@ func privatePrefix(p netip.Prefix) bool {
 	return false
 }
 
-// IsAdminFanoutSource says whether an endpoint's routine ssh fan-out is
-// judged by the admin rule.
-func (t DetectionTuning) IsAdminFanoutSource(endpointID string) bool {
-	id := strings.ToLower(strings.TrimSpace(endpointID))
-	for _, s := range t.AdminFanoutSources {
-		if s == id {
-			return true
-		}
-	}
-	return false
-}
-
-// IsAdminFanoutTarget says whether an address lies inside a configured
-// managed-host prefix.
-func (t DetectionTuning) IsAdminFanoutTarget(raw string) bool {
-	a, err := netaddr.Parse(raw)
-	if err != nil {
-		return false
-	}
-	for _, cidr := range append(t.InfraCIDRs, t.AdminFanoutTargets...) {
-		if p, err := netip.ParsePrefix(cidr); err == nil && p.Contains(a.WithZone("")) {
-			return true
-		}
-	}
-	return false
-}
-
 func tidyList(in []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(in))
 	for _, v := range in {
 		v = strings.ToLower(strings.TrimSpace(v))
 		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// tidyPairs keeps only entries shaped "process@owner". A pair missing either
-// half would otherwise widen into "this process anywhere" or "this owner for
-// anything", which is the failure the pair exists to avoid.
-func tidyPairs(in []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(in))
-	for _, v := range in {
-		proc, org, ok := splitPair(v)
-		if !ok {
-			continue
-		}
-		v = proc + "@" + org
-		if seen[v] {
 			continue
 		}
 		seen[v] = true
@@ -1157,60 +715,6 @@ func splitQuietPath(entry string) quietPath {
 	}
 }
 
-// userWritablePrefixes are directories any local account can put a program
-// in. A path there names whatever was copied there last, so an entry under one
-// has to pin the build it means.
-var userWritablePrefixes = []string{
-	"/home/", "/tmp/", "/var/tmp/", "/dev/shm/", "/run/user/",
-	"c:/users/", "c:/windows/temp/",
-}
-
-// ValidQuietPath accepts an absolute path, "*" standing for one path segment
-// as in known workloads (a versioned directory), with its first directory and
-// file name spelled out, optionally followed by the account it runs as
-// ("user:systemd-resolve") and the executable's SHA-256. A path in a directory
-// anyone can write to must carry the hash.
-func ValidQuietPath(entry string) error {
-	q := splitQuietPath(entry)
-	if q.hasSHA && (len(q.sha) != 64 || strings.Trim(q.sha, "0123456789abcdef") != "") {
-		return fmt.Errorf("%q: the hash must be sha256: and 64 hex digits", entry)
-	}
-	if q.hasAccount && (q.account == "" || strings.ContainsAny(q.account, "@*")) {
-		return fmt.Errorf("%q: user: must name one account, such as user:systemd-resolve", entry)
-	}
-	if !isPathWorkload(q.pattern) {
-		return fmt.Errorf("%q is not an absolute path; a program is named by where it is installed, not by its name", entry)
-	}
-	for _, dir := range userWritablePrefixes {
-		if strings.HasPrefix(q.pattern, dir) && !q.hasSHA {
-			return fmt.Errorf("%q is in a folder any account can write to; add sha256:<hash> to name the build you mean", entry)
-		}
-	}
-	pattern := q.pattern
-	if len(pattern) > 2 && pattern[1] == ':' {
-		pattern = pattern[2:]
-	}
-	return literalPath(pattern)
-}
-
-// MatchesQuietPath reports whether a process, by its executable path and
-// (when the entry names one) its hash, is the one an expected-client or pair
-// entry names. An entry that is not a path - a base name left from before
-// paths were required - matches nothing, and neither does one bound to an
-// account, which only the quiet-process list can check.
-func MatchesQuietPath(entry, path, sha string) bool {
-	q := splitQuietPath(entry)
-	return !q.hasAccount && q.matches(path, sha)
-}
-
-func (q quietPath) matches(path, sha string) bool {
-	key := ProcessPathKey(path)
-	if key == "" || !isPathWorkload(q.pattern) || !matchWorkload(q.pattern, key) {
-		return false
-	}
-	return !q.hasSHA || strings.EqualFold(q.sha, strings.TrimSpace(sha))
-}
-
 // IsServiceAccount reports a process running as the system itself, or as the
 // one service account an entry names. Any program can be started from a
 // listed path by a login user - bind-mounted over it in a user namespace, or
@@ -1226,30 +730,6 @@ func IsServiceAccount(user, account string) bool {
 		return true
 	}
 	return account != "" && u == strings.ToLower(account)
-}
-
-// QuietProcessSample is a process a quiet-process entry matches: its path with
-// each "*" filled in, the hash it pins and the account it names (root when it
-// names none). The floor drill runs its sweeps as this process.
-func QuietProcessSample(entry string) (path, sha, user string) {
-	q := splitQuietPath(entry)
-	user = "root"
-	if q.hasAccount {
-		user = q.account
-	}
-	return strings.ReplaceAll(q.pattern, "*", "floor-drill"), q.sha, user
-}
-
-// IsQuietProcess matches the process's installed path, and the account it
-// runs as: the system's, or the one the entry names.
-func (t DetectionTuning) IsQuietProcess(path, sha, user string) bool {
-	for _, entry := range t.QuietProcesses {
-		q := splitQuietPath(entry)
-		if q.matches(path, sha) && IsServiceAccount(user, q.account) {
-			return true
-		}
-	}
-	return false
 }
 
 // IsASN reports an entry written as an AS number ("AS15169", any case).
@@ -1270,160 +750,6 @@ func OwnerMatches(owner, asn, org string) bool {
 		return strings.EqualFold(owner, strings.TrimSpace(asn))
 	}
 	return owner == strings.ToLower(strings.TrimSpace(org))
-}
-
-// IsQuietOrg matches the destination's AS number. Rented compute is never
-// quiet, whoever's AS it sits in: an EC2 instance is Amazon's address and
-// somebody else's machine.
-func (t DetectionTuning) IsQuietOrg(asn, tenancy string) bool {
-	if strings.TrimSpace(asn) == "" || strings.TrimSpace(tenancy) == TenancyHosting {
-		return false
-	}
-	for _, q := range t.QuietOrgs {
-		if IsASN(q) && strings.EqualFold(q, strings.TrimSpace(asn)) {
-			return true
-		}
-	}
-	return false
-}
-
-// IsQuietClient matches the process's installed path against the
-// expected-client list.
-func (t DetectionTuning) IsQuietClient(path, sha string) bool {
-	for _, q := range t.QuietClients {
-		if MatchesQuietPath(q, path, sha) {
-			return true
-		}
-	}
-	return false
-}
-
-// IsVouchedPair answers the only question that should silence a conversation:
-// is this process, talking to this owner, expected here?
-//
-// Two things can refuse. Rented compute is never vouched for whatever its
-// owner's name is - an EC2 instance is Amazon's address and somebody else's
-// machine - and a process nobody has vouched for is a finding even on the most
-// ordinary network in the estate.
-func (t DetectionTuning) IsVouchedPair(path, sha, asn, org, tenancy string) bool {
-	if strings.TrimSpace(tenancy) == TenancyHosting {
-		return false
-	}
-
-	return t.IsExpectedPair(path, sha, asn, org, tenancy) || (t.IsQuietOrg(asn, tenancy) && t.IsQuietClient(path, sha))
-}
-
-// IsExpectedPair is the narrowest vouching: an explicit pair, the operator
-// naming this exact program talking to this exact network as its job (rclone
-// to Google for the Drive backup). Rented compute is never covered.
-func (t DetectionTuning) IsExpectedPair(path, sha, asn, org, tenancy string) bool {
-	if strings.TrimSpace(tenancy) == TenancyHosting {
-		return false
-	}
-	for _, entry := range t.QuietPairs {
-		proc, owner, ok := splitPair(entry)
-		if ok && MatchesQuietPath(proc, path, sha) && OwnerMatches(owner, asn, org) {
-			return true
-		}
-	}
-	return false
-}
-
-// KnownWorkload is one program whose outbound conversations are its job.
-//
-// Workload is a pattern over detector.WorkloadOf's output, where "*" stands
-// for any run of characters within one path segment of one argument (never a
-// "/" or a space), so a release directory named by its hash can be matched
-// without matching every directory. Owner is the network's AS number or exact
-// name (OwnerMatches), or "*" for a program whose destinations are arbitrary
-// by design, such as a web crawler. Reason is required: an exclusion nobody can explain
-// later is one nobody can remove.
-//
-// IncludeRented widens an interpreter's "*" to rented compute and unnamed
-// addresses, which it otherwise never covers (see KnownWorkloadFor). It is
-// for a program whose job is those destinations - a crawler fetching sites
-// hosted on cloud machines, a worker reading data providers with no
-// registered name - and its reason should say so.
-//
-// ExpiresAt is when the entry stops vouching. A new entry needs one in the
-// future; an entry without one, or past it, vouches for nothing. Moving it
-// later loosens detection and is authorized by the authority; moving it earlier tightens.
-type KnownWorkload struct {
-	Workload      string    `json:"workload"`
-	Owner         string    `json:"owner"`
-	Reason        string    `json:"reason"`
-	IncludeRented bool      `json:"include_rented,omitempty"`
-	ExpiresAt     time.Time `json:"expires_at"`
-}
-
-// Expired reports an entry that no longer vouches: past its expiry, or saved
-// before entries had one.
-func (k KnownWorkload) Expired(now time.Time) bool {
-	return !now.Before(k.ExpiresAt)
-}
-
-// Key names an entry without its reason and expiry: the same
-// program, owner and reach.
-func (k KnownWorkload) Key() string {
-	return fmt.Sprintf("%s@%s@%v", k.Workload, k.Owner, k.IncludeRented)
-}
-
-// KnownWorkloadMaxLifetime is the longest term a known workload can be added,
-// changed or renewed for, like an exclusion (ExclusionMaxLifetime), and the
-// expiry the upgrade gives each one saved before entries had one: bounded, so
-// an entry nobody renews stops vouching.
-const KnownWorkloadMaxLifetime = 90 * 24 * time.Hour
-
-// AnyOwner is the Owner of a workload known to reach arbitrary destinations.
-const AnyOwner = "*"
-
-func (k KnownWorkload) validate() error {
-	if strings.Trim(k.Workload, "* ") == "" || strings.HasPrefix(k.Workload, "*") {
-		return fmt.Errorf("known workload %q names no program", k.Workload)
-	}
-	// An interpreter is only a known program together with what it runs:
-	// "python3.13 *" would be every python on the host, "python3 -m *" every
-	// module, and "node npm ci" is named only by argv[0], which the process
-	// chooses (exec -a). The program must be a module after -m, a jar after
-	// -jar, or a script by its absolute path, and must be spelled out.
-	if !isPathWorkload(k.Workload) {
-		tokens := strings.Fields(k.Workload)
-		if len(tokens) < 2 {
-			return fmt.Errorf("known workload %q is an interpreter without the program it runs", k.Workload)
-		}
-		prog := tokens[len(tokens)-1]
-		switch flag := ""; {
-		case len(tokens) >= 3 && tokens[len(tokens)-2] == "-m":
-			flag = "-m"
-			if strings.Contains(prog, "*") {
-				return fmt.Errorf("known workload %q: a module after %s is named exactly", k.Workload, flag)
-			}
-		case len(tokens) >= 3 && tokens[len(tokens)-2] == "-jar":
-			if err := literalPath(prog); err != nil {
-				return fmt.Errorf("known workload %q: the jar %v", k.Workload, err)
-			}
-		default:
-			if err := literalPath(prog); err != nil {
-				return fmt.Errorf("known workload %q must end with the program it runs (an absolute script path, -m module or -jar file): the script %v", k.Workload, err)
-			}
-		}
-	}
-	if k.Owner == "" {
-		return fmt.Errorf("known workload %q needs an owner (a network name, or %q)", k.Workload, AnyOwner)
-	}
-	if k.IncludeRented && k.Owner != AnyOwner {
-		return fmt.Errorf("known workload %q: include_rented widens only the owner %q; a named owner never covers rented compute", k.Workload, AnyOwner)
-	}
-	if strings.TrimSpace(k.Reason) == "" {
-		return fmt.Errorf("known workload %q needs a reason", k.Workload)
-	}
-	if k.ExpiresAt.IsZero() {
-		return fmt.Errorf("known workload %q needs an expires_at, the time it stops vouching", k.Workload)
-	}
-	if isInlineWorkload(k.Workload) {
-		return fmt.Errorf("known workload %q is inline code, which is never a known program", k.Workload)
-	}
-	return nil
 }
 
 // isInlineWorkload reports a workload that runs code given on its command
@@ -1455,45 +781,6 @@ func isPathWorkload(w string) bool {
 	return strings.HasPrefix(w, "/") || (len(w) > 2 && w[1] == ':' && w[2] == '/')
 }
 
-func tidyWorkloads(in []KnownWorkload) []KnownWorkload {
-	seen := map[string]int{}
-	out := make([]KnownWorkload, 0, len(in))
-	for _, k := range in {
-		k.Workload = strings.Join(strings.Fields(k.Workload), " ")
-		if isPathWorkload(k.Workload) {
-			k.Workload = strings.ToLower(k.Workload) // detector.WorkloadOf lower-cases paths
-		}
-		k.Owner = strings.ToLower(strings.TrimSpace(k.Owner))
-		k.Reason = strings.TrimSpace(k.Reason)
-		if !k.ExpiresAt.IsZero() {
-			k.ExpiresAt = k.ExpiresAt.UTC().Truncate(time.Second)
-		}
-		if k.Workload == "" {
-			continue
-		}
-		// One entry per program, owner and reach; a duplicate keeps the later
-		// expiry, so the judgment of a change sees everything it vouches for.
-		if i, dup := seen[k.Key()]; dup {
-			if k.ExpiresAt.After(out[i].ExpiresAt) {
-				out[i].ExpiresAt = k.ExpiresAt
-			}
-			continue
-		}
-		seen[k.Key()] = len(out)
-		out = append(out, k)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Workload != out[j].Workload {
-			return out[i].Workload < out[j].Workload
-		}
-		if out[i].Owner != out[j].Owner {
-			return out[i].Owner < out[j].Owner
-		}
-		return !out[i].IncludeRented && out[j].IncludeRented
-	})
-	return out
-}
-
 // matchWorkload matches pattern against workload, "*" spanning any run of
 // characters within one path segment of one argument: never a "/" or a space.
 func matchWorkload(pattern, workload string) bool {
@@ -1512,63 +799,6 @@ func matchWorkload(pattern, workload string) bool {
 		return false
 	}
 	return workload != "" && pattern[0] == workload[0] && matchWorkload(pattern[1:], workload[1:])
-}
-
-// KnownWorkloadFor returns the entry that makes this conversation expected:
-// this workload, talking to this owner.
-//
-// A named owner never covers rented compute or an unnamed address, for the
-// reason IsVouchedPair gives. AnyOwner covers them only for an installed
-// program known by its path. An interpreter's workload is read from its own
-// command line, which any process can imitate, so for an interpreter AnyOwner
-// means any named network that is not rented compute - which is where a
-// command-and-control server would be - unless the entry says IncludeRented.
-// Either way only the novelty detectors are silenced: a disguised process
-// that beacons or moves volume is still judged by the detectors that see it.
-func (t DetectionTuning) KnownWorkloadFor(workload, asn, org, tenancy string) (KnownWorkload, bool) {
-	if workload == "" || isInlineWorkload(workload) {
-		return KnownWorkload{}, false
-	}
-	named := strings.TrimSpace(org) != "" && strings.TrimSpace(tenancy) != TenancyHosting
-	now := time.Now()
-	for _, k := range t.KnownWorkloads {
-		if k.Expired(now) || !matchWorkload(k.Workload, workload) {
-			continue
-		}
-		if k.Owner == AnyOwner && k.coversAnywhere(workload, named) {
-			return k, true
-		}
-		if named && k.Owner != AnyOwner && OwnerMatches(k.Owner, asn, org) {
-			return k, true
-		}
-	}
-	return KnownWorkload{}, false
-}
-
-// coversAnywhere is the reach of an AnyOwner entry: every destination for an
-// installed program, named networks only for an interpreter unless the entry
-// says IncludeRented.
-func (k KnownWorkload) coversAnywhere(workload string, named bool) bool {
-	return named || isPathWorkload(workload) || k.IncludeRented
-}
-
-// KnownService returns the entry naming this workload as a service: one known
-// for any owner, judged with the same reach as KnownWorkloadFor. A service
-// runs around the clock, so the hour it talks is not a finding; a build tool
-// known for one registry is not a service, and a build at three in the
-// morning is still news.
-func (t DetectionTuning) KnownService(workload, org, tenancy string) (KnownWorkload, bool) {
-	if workload == "" || isInlineWorkload(workload) {
-		return KnownWorkload{}, false
-	}
-	named := strings.TrimSpace(org) != "" && strings.TrimSpace(tenancy) != TenancyHosting
-	now := time.Now()
-	for _, k := range t.KnownWorkloads {
-		if !k.Expired(now) && k.Owner == AnyOwner && matchWorkload(k.Workload, workload) && k.coversAnywhere(workload, named) {
-			return k, true
-		}
-	}
-	return KnownWorkload{}, false
 }
 
 // OffHoursLabel renders the window the way it is shown next to an alert.

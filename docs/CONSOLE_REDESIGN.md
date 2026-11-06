@@ -11,7 +11,7 @@ separately. It does not invent endpoint identity or enforcement state.
 - Traffic: flow counts, measured byte coverage, countries, processes, and
   cached analytics.
 - Containment: readiness, baseline isolation, host release, and mesh quarantine.
-- Detection: stored behavioral tuning, exclusions, alerts, and acknowledgements.
+- Detection: stored behavioral tuning, expected rules, alerts, and acknowledgements.
 - Enrolment: retained Linux/Windows installer commands and bounded self-service
   enrolment windows.
 - Updates: desired version, pending jobs, package identity, registered version,

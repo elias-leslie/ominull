@@ -120,7 +120,7 @@ approval sheet), and what it signed or refused is in the audit and the Timeline.
 ### Settings
 
 - Policy: detection tuning as on/off chips; threat indicators folded with count
-  and search; exclusion state never clipped.
+  and search; expected-rule state never clipped.
 - Access and Audit unchanged apart from shared patterns.
 
 ## Order of work
@@ -198,12 +198,12 @@ in demo mode, with the fixture browser suite and the axe responsive check.
 
 ### Settings (Policy, Access, Audit)
 
-- Policy: two views, **Detection** (isolation baseline, tuning, exclusions,
+- Policy: two views, **Detection** (isolation baseline, tuning, expected rules,
   threat indicators, peer-mesh quarantine) and **Hub health**
   (diagnostics, release convergence). Detection tuning is a row of on/off
   chips with one line per detector and a head chip for how many values differ
   from what shipped. Threat indicators fold after 10 with the count in the
-  head. Every card's explanation is behind "?"; exclusion state and long
+  head. Every card's explanation is behind "?"; expected-rule state and long
   process paths wrap instead of clipping. On a phone each policy row is a
   compact block.
 - Access: the Cloudflare Access explanation moved behind "?"; the one-line

@@ -53,7 +53,8 @@ func seedNpmFindings(t *testing.T, store *storage.Store, n int) time.Time {
 	return at
 }
 
-var npmKnown = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry}}
+var npmKnown = []storage.ExpectedRule{{ID: "npm", Workload: "node /opt/node/lib/npm-cli.js", Networks: []string{"as13335"}, Reason: "npm registry", ExpiresAt: testExpiry,
+	Findings: []string{storage.KindNovelDestination, storage.KindNovelProcess}}}
 
 func TestTuningReplayPreviewsADraftWithoutSavingIt(t *testing.T) {
 	t.Parallel()
@@ -67,15 +68,15 @@ func TestTuningReplayPreviewsADraftWithoutSavingIt(t *testing.T) {
 		t.Fatalf("saved tuning replay = %d %s", w.Code, w.Body.String())
 	}
 	draft := store.GetDetectionTuning()
-	draft.KnownWorkloads = npmKnown
+	draft.ExpectedRules = npmKnown
 	w = replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning/replay", "mock_admin_token", map[string]any{"tuning": draft})
 	if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil || got.Before != 5 || got.After != 1 {
 		t.Fatalf("draft replay = %d %s", w.Code, w.Body.String())
 	}
-	if len(store.GetDetectionTuning().KnownWorkloads) != 0 {
+	if len(store.GetDetectionTuning().ExpectedRules) != len(storage.DefaultDetectionTuning().ExpectedRules) {
 		t.Fatal("a replay must not save the draft")
 	}
-	draft.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "cloudflare"}}
+	draft.ExpectedRules = []storage.ExpectedRule{{ID: "npm", Workload: "node /opt/node/lib/npm-cli.js", Networks: []string{"cloudflare"}}}
 	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning/replay", "mock_admin_token", map[string]any{"tuning": draft}); w.Code != http.StatusBadRequest {
 		t.Fatalf("a draft with an unexplained exclusion was replayed: %d", w.Code)
 	}
@@ -90,7 +91,7 @@ func TestResolvingFindingsRecordsWhy(t *testing.T) {
 	defer store.Close()
 	seedNpmFindings(t, store, 3)
 	tu := store.GetDetectionTuning()
-	tu.KnownWorkloads = npmKnown
+	tu.ExpectedRules = append(tu.ExpectedRules, npmKnown...)
 	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestResolvingFindingsRecordsWhy(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); w.Code != http.StatusOK || err != nil || got.Resolved != 3 {
 		t.Fatalf("covered resolve = %d %s", w.Code, w.Body.String())
 	}
-	if reason, _, _, ok := store.AnomalyResolution("npm-0"); !ok || reason != "covered by tuning: known workload: npm registry" {
+	if reason, _, _, ok := store.AnomalyResolution("npm-0"); !ok || reason != "covered by tuning: expected: npm registry" {
 		t.Fatalf("resolution reason = %q %v", reason, ok)
 	}
 	if a, _ := store.GetAnomalyAlert("curl-1"); a.Acknowledged {
@@ -197,7 +198,7 @@ func TestResolvingFindingsIsCountedOnTheFeedNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	tu := store.GetDetectionTuning()
-	tu.KnownWorkloads = npmKnown
+	tu.ExpectedRules = append(tu.ExpectedRules, npmKnown...)
 	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -235,13 +236,13 @@ func TestResolvingFindingsIsCountedOnTheFeedNote(t *testing.T) {
 }
 
 // The console's tuning sheet posts only the fields it shows; saving it must
-// not erase the known workloads it does not show.
-func TestASaveWithoutKnownWorkloadsKeepsThem(t *testing.T) {
+// not erase the expected rules it does not show.
+func TestASaveWithoutRulesKeepsThem(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	tu := store.GetDetectionTuning()
-	tu.KnownWorkloads = npmKnown
+	tu.ExpectedRules = append(tu.ExpectedRules, npmKnown...)
 	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -252,13 +253,14 @@ func TestASaveWithoutKnownWorkloadsKeepsThem(t *testing.T) {
 	if w := serveAuthorized(t, srv.Handler(), sheet); w.Code != http.StatusOK {
 		t.Fatalf("sheet-shaped save = %d %s", w.Code, w.Body.String())
 	}
-	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 1 || got.OffHoursStart != 23 {
-		t.Fatalf("after a sheet save: %d known workloads, start %d", len(got.KnownWorkloads), got.OffHoursStart)
+	kept := len(storage.DefaultDetectionTuning().ExpectedRules) + 1
+	if got := store.GetDetectionTuning(); len(got.ExpectedRules) != kept || got.OffHoursStart != 23 {
+		t.Fatalf("after a sheet save: %d expected rules, start %d, want %d", len(got.ExpectedRules), got.OffHoursStart, kept)
 	}
-	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning", "mock_admin_token", map[string]any{"Known_Workloads": []any{}}); w.Code != http.StatusOK {
+	if w := replayRequest(srv, http.MethodPost, "/api/v1/detection/tuning", "mock_admin_token", map[string]any{"Expected_Rules": []any{}}); w.Code != http.StatusOK {
 		t.Fatalf("explicit clear = %d", w.Code)
 	}
-	if got := store.GetDetectionTuning(); len(got.KnownWorkloads) != 0 {
-		t.Fatal("an explicit empty list should clear the known workloads")
+	if got := store.GetDetectionTuning(); len(got.ExpectedRules) != 0 {
+		t.Fatal("an explicit empty list should clear the expected rules")
 	}
 }

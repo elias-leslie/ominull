@@ -16,8 +16,7 @@ import (
 
 // checkDecoy pages on any connection to a decoy address (decoy_addrs): an
 // address that nothing legitimate on the network uses, so a single touch is
-// someone mapping it. Like the sweeps it runs before exclusions and quiet
-// lists.
+// someone mapping it. Like the sweeps it runs before the expected rules.
 func (e *Engine) checkDecoy(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning, now time.Time) {
 	if ev.Direction != "OUTBOUND" || len(cfg.DecoyAddrs) == 0 || !cfg.IsDecoy(ev.DstIP, ev.DstPort) {
 		return

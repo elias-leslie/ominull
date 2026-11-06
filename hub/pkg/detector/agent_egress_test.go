@@ -336,25 +336,34 @@ func TestARuntimeVendorRangeComesFromThePolicy(t *testing.T) {
 	const claude = "/home/u/.local/share/claude/versions/2.1.301"
 	ev := storage.Event{TenantID: "default", EndpointID: "linux-ws", Action: "PERMIT", Direction: "OUTBOUND",
 		DstIP: "198.51.100.9", DstPort: 443, Domain: "api.anthropic.com", ProcessPath: claude}
+	covered := func(cfg storage.DetectionTuning) bool {
+		return expectedFor(cfg, expectCtx(ev, threatintel.GeoRecord{}, storage.Endpoint{ID: ev.EndpointID}, "", claude, ""))(storage.KindBandwidthSpike)
+	}
 	cfg := storage.DefaultDetectionTuning()
-	if runtimeToOwnVendor(cfg, ev, threatintel.GeoRecord{}) {
+	if covered(cfg) {
 		t.Fatal("an address outside the shipped ranges counted as Anthropic's")
 	}
-	for i := range cfg.AgentRuntimeVendors {
-		if cfg.AgentRuntimeVendors[i].Runtime == "claude" {
-			cfg.AgentRuntimeVendors[i].Prefixes = append(cfg.AgentRuntimeVendors[i].Prefixes, "198.51.100.0/24")
+	for i := range cfg.ExpectedRules {
+		if cfg.ExpectedRules[i].Runtime == "claude" {
+			cfg.ExpectedRules[i].Prefixes = append(cfg.ExpectedRules[i].Prefixes, "198.51.100.0/24")
 		}
 	}
 	cfg, err := storage.PrepareDetectionTuning(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !runtimeToOwnVendor(cfg, ev, threatintel.GeoRecord{}) {
+	if !covered(cfg) {
 		t.Fatal("a range added to the policy was not honoured")
 	}
-	cfg.AgentRuntimeVendors = nil
+	var kept []storage.ExpectedRule
+	for _, r := range cfg.ExpectedRules {
+		if r.Runtime != "claude" {
+			kept = append(kept, r)
+		}
+	}
+	cfg.ExpectedRules = kept
 	ev.DstIP = "160.79.104.10"
-	if runtimeToOwnVendor(cfg, ev, threatintel.GeoRecord{}) {
+	if covered(cfg) {
 		t.Fatal("a maker removed from the policy still exempted its flows")
 	}
 }

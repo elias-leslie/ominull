@@ -450,37 +450,52 @@ func TestABrowserTalkingToRentedComputeIsNotVouchedFor(t *testing.T) {
 		{"shared edge", storage.TenancySharedCDN, true},
 		{"rented compute", storage.TenancyHosting, false},
 	} {
-		got := tuning.IsVouchedPair("/opt/google/chrome/chrome", "", "AS16509", "Amazon Web Services", tc.tenancy)
+		_, got := tuning.Expected(storage.ExpectCtx{Kind: storage.KindBeacon, Path: "/opt/google/chrome/chrome",
+			ASN: "AS16509", Org: "Amazon Web Services", Tenancy: tc.tenancy, Direction: "OUTBOUND"})
 		if got != tc.want {
-			t.Fatalf("%s: IsVouchedPair returned %v, want %v", tc.name, got, tc.want)
+			t.Fatalf("%s: the shipped rules expected a beacon = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
 
-func TestAnExplicitPairVouchesForThatConversationAndNoOther(t *testing.T) {
+func TestAnExplicitRuleCoversThatConversationAndNoOther(t *testing.T) {
 	tuning := storage.DefaultDetectionTuning()
-	tuning.QuietPairs = []string{"/opt/backup/backup-agent@backblaze, inc."}
+	tuning.ExpectedRules = append(tuning.ExpectedRules, storage.ExpectedRule{ID: "backup", Reason: "fixture",
+		Findings: []string{storage.KindBeacon}, Programs: []storage.ExpectedProgram{{Path: "/opt/backup/backup-agent"}}, Networks: []string{"backblaze, inc."}})
 	tuning = mustSaveTuning(t, tuning)
 
-	if !tuning.IsVouchedPair("/opt/backup/backup-agent", "", "", "Backblaze, Inc.", storage.TenancyVendor) {
-		t.Fatal("the pair the operator named was not honoured")
+	covered := func(path, asn, org string) bool {
+		_, ok := tuning.Expected(storage.ExpectCtx{Kind: storage.KindBeacon, Path: path, ASN: asn, Org: org,
+			Tenancy: storage.TenancyVendor, Source: "published-feed", Direction: "OUTBOUND"})
+		return ok
 	}
-	if tuning.IsVouchedPair("/usr/bin/python3", "", "", "Backblaze, Inc.", storage.TenancyVendor) ||
-		tuning.IsVouchedPair("/tmp/backup-agent", "", "", "Backblaze, Inc.", storage.TenancyVendor) {
-		t.Fatal("a pair vouched for every process reaching that owner")
+	if !covered("/opt/backup/backup-agent", "", "Backblaze, Inc.") {
+		t.Fatal("the rule the operator named was not honoured")
 	}
-	if tuning.IsVouchedPair("/opt/backup/backup-agent", "", "AS13335", "Cloudflare, Inc.", storage.TenancyVendor) {
-		t.Fatal("a pair vouched for its process reaching any owner")
+	if covered("/usr/bin/python3", "", "Backblaze, Inc.") || covered("/tmp/backup-agent", "", "Backblaze, Inc.") {
+		t.Fatal("a rule covered every process reaching that owner")
+	}
+	if covered("/opt/backup/backup-agent", "AS13335", "Cloudflare, Inc.") {
+		t.Fatal("a rule covered its process reaching any owner")
 	}
 }
 
-func TestAMalformedPairIsDiscardedRatherThanWidened(t *testing.T) {
-	tuning := storage.DefaultDetectionTuning()
-	tuning.QuietPairs = []string{"chrome", "@google", "curl@", "  ", "/usr/bin/curl@as36459"}
-	tuning = mustSaveTuning(t, tuning)
-
-	if len(tuning.QuietPairs) != 1 || tuning.QuietPairs[0] != "/usr/bin/curl@as36459" {
-		t.Fatalf("expected only the complete pair to survive, got %q", tuning.QuietPairs)
+func TestAMalformedRuleIsRefusedRatherThanWidened(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "tuning.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	for name, r := range map[string]storage.ExpectedRule{
+		"no reason":           {ID: "a", Programs: []storage.ExpectedProgram{{Path: "/usr/bin/curl"}}, Networks: []string{"as36459"}},
+		"no match at all":     {ID: "b", Reason: "r"},
+		"a bare program name": {ID: "c", Reason: "r", Programs: []storage.ExpectedProgram{{Path: "chrome"}}},
+	} {
+		tuning := store.GetDetectionTuning()
+		tuning.ExpectedRules = append(tuning.ExpectedRules, r)
+		if _, err := store.SaveDetectionTuning(tuning, "test"); err == nil {
+			t.Errorf("%s: saved a rule that matches too much or says nothing", name)
+		}
 	}
 }
 
@@ -743,13 +758,14 @@ func TestAnInterpreterReachingRentedComputeIsTheLouderFinding(t *testing.T) {
 	}
 }
 
-// The operator's own answer still applies here: a pair they have vouched for is
-// not reported, and a quiet process is not reported at all.
-func TestAVouchedInterpreterPairIsNotReported(t *testing.T) {
+// The operator's own answer still applies here: a rule they have written for a
+// program and a network is not reported.
+func TestARuleForAnInterpreterAndNetworkIsNotReported(t *testing.T) {
 	engine, store := noiseEngine(t)
 
 	tuning := storage.DefaultDetectionTuning()
-	tuning.QuietPairs = []string{"/usr/bin/python3.13@as20940"}
+	tuning.ExpectedRules = append(tuning.ExpectedRules, storage.ExpectedRule{ID: "py-akamai", Reason: "fixture",
+		Programs: []storage.ExpectedProgram{{Path: "/usr/bin/python3.13"}}, Networks: []string{"as20940"}})
 	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
 		t.Fatalf("saving tuning: %v", err)
 	}
@@ -763,7 +779,7 @@ func TestAVouchedInterpreterPairIsNotReported(t *testing.T) {
 	})
 
 	if got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS"); len(got) != 0 {
-		t.Fatalf("a vouched pair raised %d findings: %q", len(got), got[0].Title)
+		t.Fatalf("a covered pair raised %d findings: %q", len(got), got[0].Title)
 	}
 }
 
@@ -992,19 +1008,14 @@ func TestAPathTheAgentCouldNotMatchToItsFileVouchesForNothing(t *testing.T) {
 	}
 }
 
-// A process exclusion names its program by path too, so it no more applies to
-// a process whose path the agent could not match to its file than a quiet
-// entry does.
-func TestAProcessExclusionDoesNotSilenceAPathMismatch(t *testing.T) {
+// A rule names its program by path, so it does not apply to a process whose
+// path the agent could not match to its file.
+func TestAProgramRuleDoesNotSilenceAPathMismatch(t *testing.T) {
 	start := time.Now().UTC().Add(-2 * time.Hour)
 	run := func(status string) int {
 		engine, store := noiseEngine(t)
-		now := time.Now().UTC()
-		if err := store.CreateExclusion(storage.Exclusion{ID: "ex-sync", TenantID: "default", Scope: "global", Name: "sync tool",
-			ProcessPath: "/usr/local/bin/synctool", DstIPRange: "104.16.0.0/16", Reason: "fixture", Active: true,
-			CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour)}); err != nil {
-			t.Fatal(err)
-		}
+		addExpectedRule(t, engine, store, storage.ExpectedRule{ID: "sync", Name: "sync tool", Reason: "fixture",
+			Programs: []storage.ExpectedProgram{{Path: "/usr/local/bin/synctool"}}, Prefixes: []string{"104.16.0.0/16"}})
 		for i := 0; i < 40; i++ {
 			engine.Evaluate(storage.Event{
 				TenantID: "default", EndpointID: "linux-sync", Timestamp: start.Add(time.Duration(i) * time.Minute),
@@ -1016,15 +1027,15 @@ func TestAProcessExclusionDoesNotSilenceAPathMismatch(t *testing.T) {
 		return len(anomaliesOfType(t, store, "C2_BEACONING"))
 	}
 	if n := run("authoritative"); n != 0 {
-		t.Fatalf("the excluded tool raised %d beacon finding(s)", n)
+		t.Fatalf("the covered tool raised %d beacon finding(s)", n)
 	}
 	if n := run("path_mismatch"); n == 0 {
-		t.Fatal("a program shown at the excluded path but running another file was excluded")
+		t.Fatal("a program shown at the covered path but running another file was covered")
 	}
 }
 
-// A known workload for an installed program names it by path too, and an
-// AnyOwner entry for a path reaches every destination, rented compute
+// A workload rule for an installed program names it by path too, and an
+// any-network rule for a path reaches every destination, rented compute
 // included. So a program bind-mounted over the listed path, which the agent
 // reports as path_mismatch, is not known by it: its first connection to a
 // hosting network is still a first-seen finding, while the real program's is
@@ -1032,11 +1043,7 @@ func TestAProcessExclusionDoesNotSilenceAPathMismatch(t *testing.T) {
 func TestAKnownPathWorkloadDoesNotVouchForAPathMismatch(t *testing.T) {
 	run := func(status string) int {
 		engine, store := noiseEngine(t)
-		tuning := store.GetDetectionTuning()
-		tuning.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool", ExpiresAt: testExpiry}}
-		if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
-			t.Fatalf("saving tuning: %v", err)
-		}
+		addExpectedRule(t, engine, store, workloadRule("/usr/local/bin/synctool", storage.AnyNetwork, false))
 		engine.Evaluate(storage.Event{
 			TenantID: "default", EndpointID: "linux-sync", Timestamp: time.Now().UTC(),
 			Action: "PERMIT", Direction: "OUTBOUND",

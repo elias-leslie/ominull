@@ -167,7 +167,7 @@ func (e *Engine) SeedAgentBaselines() {
 }
 
 // checkResolverBypass raises an agent runtime, or a tool it runs, connecting
-// to a public DNS service. It is a floor rule: it runs before the exclusions,
+// to a public DNS service. It is a floor rule: it runs before the expected rules,
 // and agent_egress_enabled does not switch it off.
 func (e *Engine) checkResolverBypass(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
 	procName string, isInterpreter bool, now time.Time) {
@@ -197,7 +197,7 @@ func (e *Engine) checkResolverBypass(ev storage.Event, geo threatintel.GeoRecord
 }
 
 func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
-	procName string, isInterpreter, warming bool, now time.Time) {
+	procName string, isInterpreter, warming bool, expect func(kind string) bool, now time.Time) {
 	if ev.Direction != "OUTBOUND" {
 		return
 	}
@@ -205,9 +205,14 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 	if !cfg.AgentEgressOn || runtime == "" || isPrivateIP(ev.DstIP) {
 		return
 	}
+	// A flow an expected rule covers for both kinds is not learned or judged.
+	newDestExpected, uploadExpected := expect(storage.KindAgentNewDest), expect(storage.KindAgentUpload)
+	if newDestExpected && uploadExpected {
+		return
+	}
 
 	dest := agentDestination(ev.Domain, ev.SNI, ev.DstIP, geo)
-	if dest != "" {
+	if dest != "" && !newDestExpected {
 		e.checkAgentDestination(ev, geo, endpoint, cfg, runtime, dest, warming, now)
 	}
 
@@ -226,7 +231,7 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 	threshold := max(int64(cfg.AgentUploadFloorMB)<<20, int64(cfg.AgentUploadFactor)*p95)
 	// Raised once per runtime and hour, whichever event first finds the hour
 	// over the line - also when a tuning change lowers the line mid-hour.
-	if total < threshold || warming {
+	if total < threshold || warming || uploadExpected {
 		return
 	}
 	first, err := e.store.MarkAgentUploadAlerted(ev.TenantID, ev.EndpointID, runtime, now)
@@ -308,35 +313,6 @@ func minutesPhrase(d time.Duration) string {
 	return "a minute"
 }
 
-// runtimeToOwnVendor reports a flow from an agent runtime's own executable to
-// its maker's service: Claude Code sending a conversation to api.anthropic.com.
-// Those uploads are megabytes whenever a large context is sent, so a
-// per-connection volume baseline reads every long session as exfiltration;
-// the runtime's volume is judged per hour against its own history
-// (AGENT_UPLOAD_VOLUME) instead. Not when the agent could not match the
-// reported path to the file that runs (path_mismatch), and only when the
-// address is inside the maker's published ranges, or attributed from the
-// maker's published feed to its own network as its service (not its rented
-// compute): the SNI is
-// whatever the client chose to send and the domain is whatever any client
-// last resolved there, so a name alone would let any program called claude
-// upload to its own server under api.anthropic.com. The makers, their
-// domains, the hosts under them that serve anyone's files, and their ranges
-// and networks are policy: the tuning's agent_runtime_vendors.
-func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event, geo threatintel.GeoRecord) bool {
-	if !cfg.AgentEgressOn || ev.AttributionStatus == pathMismatch {
-		return false
-	}
-	runtime := cfg.AgentRuntimeOf(ev.ProcessPath)
-	if runtime == "" || cfg.RuntimeVendor(runtime, firstNonEmpty(ev.SNI, ev.Domain)) == "" {
-		return false
-	}
-	if addr, err := netip.ParseAddr(strings.TrimSpace(ev.DstIP)); err == nil && cfg.InRuntimeVendorRange(runtime, addr) {
-		return true
-	}
-	return cfg.InRuntimeVendorNetwork(runtime, geo.ASN, geo.Tenancy, geo.Source)
-}
-
 func firstNonEmpty(v ...string) string {
 	for _, s := range v {
 		if strings.TrimSpace(s) != "" {
@@ -365,9 +341,9 @@ func uploadEvidence(dest string, sent int64, first time.Time) string {
 // agent_egress_destinations (storage.DeviceDestinations), seeded once from
 // the communication profiles. Runtime flows feed the memory but are judged
 // by AGENT_NEW_DESTINATION; the sensor's own traffic is left out. It runs
-// before the exclusions: an exclusion is an answer about a destination the
-// operator knows, and this rule is about one nobody has seen. Only an
-// explicit program@network pair or a runtime's own maker counts as seen.
+// before the expected rules: a rule is an answer about a destination the
+// operator knows, and this rule is about one nobody has seen. Only a rule that
+// names this kind (an empty list never covers it) counts the place as seen.
 func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
 	quietPath string, now time.Time) {
 	if ev.Direction != "OUTBOUND" || isPrivateIP(ev.DstIP) || isSensorProcess(quietPath) {
@@ -391,11 +367,12 @@ func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endp
 	// and under a private public suffix (x.googleapis.com) every API host is a
 	// registrable domain of its own, so the name alone keeps reading the same
 	// conversation as a new place. Neither covers rented compute.
-	if runtimeToOwnVendor(cfg, ev, geo) || cfg.IsExpectedPair(quietPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy) {
+	vouched := vouchedWorkload(ev.ProcessPath, ev.CommandLine, ev.AttributionStatus)
+	if expectedFor(cfg, expectCtx(ev, geo, endpoint, e.classContext().RoleOf(endpoint), quietPath, vouched))(storage.KindNewPlaceUpload) {
 		return
 	}
 	// Agent runtimes are judged here too: their own first-contact upload
-	// (AGENT_NEW_DESTINATION) runs after the exclusions and only while
+	// (AGENT_NEW_DESTINATION) runs after the expected rules and only while
 	// agent_egress_enabled is on, and this rule is a floor. Both firing on
 	// one upload is one incident (same family and destination).
 	warming, _ := warmingUp(endpoint, cfg, now)

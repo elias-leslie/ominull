@@ -153,23 +153,6 @@ type CommProfile struct {
 	IsBaseline    bool      `json:"is_baseline"`
 }
 
-type Exclusion struct {
-	ID          string    `json:"id"`
-	TenantID    string    `json:"tenant_id"`
-	Scope       string    `json:"scope"`       // "global", "client", "location", "endpoint"
-	ScopeValue  string    `json:"scope_value"` // tenant_id, location_id, or endpoint_id
-	Name        string    `json:"name"`
-	ProcessPath string    `json:"process_path"`
-	DstIPRange  string    `json:"dst_ip_range"`
-	Port        uint16    `json:"port"`
-	Protocol    string    `json:"protocol"`
-	Reason      string    `json:"reason"`
-	Active      bool      `json:"active"`
-	CreatedAt   time.Time `json:"created_at"`
-	// ExpiresAt is required: an exclusion lapses on its own (see Problem).
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
 type AnomalyAlert struct {
 	ID          string `json:"id"`
 	TenantID    string `json:"tenant_id"`
@@ -555,21 +538,6 @@ func (s *Store) initSchema() error {
 		is_baseline INTEGER NOT NULL DEFAULT 1
 	);
 
-	CREATE TABLE IF NOT EXISTS exclusions (
-		id TEXT PRIMARY KEY,
-		tenant_id TEXT NOT NULL DEFAULT "default",
-		scope TEXT NOT NULL DEFAULT "global",
-		scope_value TEXT NOT NULL DEFAULT "",
-		name TEXT NOT NULL,
-		process_path TEXT NOT NULL DEFAULT "*",
-		dst_ip_range TEXT NOT NULL DEFAULT "*",
-		port INTEGER NOT NULL DEFAULT 0,
-		protocol TEXT NOT NULL DEFAULT "any",
-		reason TEXT NOT NULL DEFAULT "",
-		active INTEGER NOT NULL DEFAULT 1,
-		created_at DATETIME NOT NULL
-	);
-
 	CREATE TABLE IF NOT EXISTS anomaly_alerts (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL,
@@ -633,7 +601,6 @@ func (s *Store) initSchema() error {
 	-- reading every communication profile belonging to the tenant.
 	CREATE INDEX IF NOT EXISTS idx_comm_tenant_destination ON comm_profiles(tenant_id, dst_ip);
 	CREATE INDEX IF NOT EXISTS idx_comm_loc ON comm_profiles(location_id);
-	CREATE INDEX IF NOT EXISTS idx_exclusions_tenant ON exclusions(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_anomaly_time ON anomaly_alerts(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_iocs_val ON iocs(value);
 	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp DESC);
@@ -681,17 +648,11 @@ func (s *Store) initSchema() error {
 		"ALTER TABLE anomaly_alerts ADD COLUMN technique TEXT DEFAULT ''",
 		"ALTER TABLE anomaly_alerts ADD COLUMN held_reason TEXT DEFAULT ''",
 		"ALTER TABLE comm_profiles ADD COLUMN domain TEXT DEFAULT ''",
-		"ALTER TABLE exclusions ADD COLUMN expires_at DATETIME",
 	}
 	for _, m := range migrations {
 		if err := runAdditiveMigration(s.db, m); err != nil {
 			return err
 		}
-	}
-	// Exclusions written before expiry was required get one 90-day term from
-	// the first start that knows about it; new rows always carry their own.
-	if _, err := s.db.Exec("UPDATE exclusions SET expires_at = ? WHERE expires_at IS NULL", time.Now().UTC().Add(ExclusionMaxLifetime)); err != nil {
-		return fmt.Errorf("exclusion expiry migration failed: %w", err)
 	}
 	// Presence "lab" was renamed parked (presence.go); idempotent.
 	if _, err := s.db.Exec("UPDATE endpoints SET presence = 'parked' WHERE presence = 'lab'"); err != nil {
@@ -1849,8 +1810,6 @@ func (s *Store) ListCommProfiles(level string, id string, limit int) ([]CommProf
 	}
 	return list, nil
 }
-
-/* CUSTOM EXCLUSIONS (ALLOWLISTS & PINHOLES): see exclusions.go */
 
 /* ANOMALY ALERTS */
 

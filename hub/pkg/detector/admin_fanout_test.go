@@ -42,8 +42,8 @@ func adminEngine(t *testing.T, edit func(*storage.DetectionTuning)) (*Engine, *s
 		}
 	}
 	tuning := store.GetDetectionTuning()
-	tuning.AdminFanoutSources = []string{"ws-admin", "lab-guest"}
-	tuning.AdminFanoutTargets = []string{"10.0.0.1"}
+	tuning.ExpectedRules = append(tuning.ExpectedRules, adminRule("ws-admin", "lab-guest"))
+	tuning.InfraCIDRs = append(tuning.InfraCIDRs, "10.0.0.1/32")
 	if edit != nil {
 		edit(&tuning)
 	}
@@ -52,6 +52,34 @@ func adminEngine(t *testing.T, edit func(*storage.DetectionTuning)) (*Engine, *s
 	}
 	engine.InvalidateTuning()
 	return engine, store
+}
+
+// adminRule is the expected rule for routine ssh administration from the
+// named hosts.
+func adminRule(hosts ...string) storage.ExpectedRule {
+	return storage.ExpectedRule{ID: "admin-ssh", Name: "Admin ssh", Reason: "routine administration: ssh from the admin workstation",
+		Findings: []string{storage.KindLateralSweep}, Hosts: hosts, Port: 22,
+		Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}}}
+}
+
+// withoutAdminRule removes the fixture's admin rule.
+func withoutAdminRule(c *storage.DetectionTuning) {
+	var kept []storage.ExpectedRule
+	for _, r := range c.ExpectedRules {
+		if r.ID != "admin-ssh" {
+			kept = append(kept, r)
+		}
+	}
+	c.ExpectedRules = kept
+}
+
+// adminLimit sets how many hosts the fixture's admin rule admits.
+func adminLimit(c *storage.DetectionTuning, n int) {
+	for i := range c.ExpectedRules {
+		if c.ExpectedRules[i].ID == "admin-ssh" {
+			c.ExpectedRules[i].MaxHosts = n
+		}
+	}
 }
 
 type hop struct {
@@ -88,7 +116,7 @@ func TestAdminFanoutToInventoriedHostsDoesNotPage(t *testing.T) {
 	// Repeat visits do not add hosts; reach six distinct ones with two more
 	// targets listed as managed.
 	engine, store := adminEngine(t, func(c *storage.DetectionTuning) {
-		c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31")
+		c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31")
 	})
 	fanOut(engine, "ws-admin", "/usr/bin/ssh", hops(22, append(managed6, "10.0.0.50", "10.0.0.51")...))
 	if got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP"); len(got) != 0 {
@@ -100,7 +128,7 @@ func TestAdminFanoutToInventoriedHostsDoesNotPage(t *testing.T) {
 // networks name it.
 func TestAdminFanoutToTheLabNetworkDoesNotPage(t *testing.T) {
 	engine, store := adminEngine(t, func(c *storage.DetectionTuning) {
-		c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31")
+		c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31")
 		c.LabCIDRs = []string{"10.20.0.0/24"}
 	})
 	fanOut(engine, "ws-admin", "/usr/bin/ssh", hops(22, "10.0.0.1", "10.0.0.39", "10.0.0.234", "10.20.0.140", "10.0.0.50", "10.0.0.51"))
@@ -120,27 +148,27 @@ func TestSweepsThatAreNotRoutineAdministrationStillPage(t *testing.T) {
 		why  string
 	}{
 		{"one uninventoried host", "ws-admin", "/usr/bin/ssh", hops(22, "10.0.0.1", "10.0.0.39", "10.0.0.234", "10.20.0.102", "10.0.0.50", "10.0.0.9"),
-			func(c *storage.DetectionTuning) { c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50") }, "10.0.0.9 is not an inventoried host"},
+			func(c *storage.DetectionTuning) { c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/32") }, "10.0.0.9 is not an inventoried host"},
 		{"a retired endpoint's address", "ws-admin", "/usr/bin/ssh", hops(22, "10.0.0.1", "10.0.0.39", "10.0.0.234", "10.20.0.102", "10.0.0.50", "10.0.0.77"),
-			func(c *storage.DetectionTuning) { c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50") }, "10.0.0.77 is not an inventoried host"},
+			func(c *storage.DetectionTuning) { c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/32") }, "10.0.0.77 is not an inventoried host"},
 		{"another port", "ws-admin", "/usr/bin/ssh", append(hops(22, six[:5]...), hop{"10.0.0.51", 2222}),
-			func(c *storage.DetectionTuning) { c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31") }, "port 2222"},
+			func(c *storage.DetectionTuning) { c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31") }, "to port 2222"},
 		{"too many hosts", "ws-admin", "/usr/bin/ssh", hops(22, six...),
 			func(c *storage.DetectionTuning) {
-				c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31")
-				c.AdminFanoutMax = 5
-			}, "over the admin limit of 5"},
+				c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31")
+				adminLimit(c, 5)
+			}, "to port 22 with 6 hosts"},
 		{"a source nobody named", "hv-01", "/usr/bin/ssh", hops(22, six...),
-			func(c *storage.DetectionTuning) { c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31") }, "not an admin workstation"},
+			func(c *storage.DetectionTuning) { c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31") }, "no expected rule covers this program from this host to port 22"},
 		{"a parked test guest", "lab-guest", "/usr/bin/ssh", hops(22, "10.0.0.1", "10.0.0.39", "10.0.0.234", "10.0.0.128", "10.0.0.50", "10.0.0.51"),
-			func(c *storage.DetectionTuning) { c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31") }, "parked test guest"},
+			func(c *storage.DetectionTuning) { c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31") }, "parked test guest"},
 		{"another program", "ws-admin", "/usr/bin/python3", hops(22, six...),
-			func(c *storage.DetectionTuning) { c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31") }, "not the ssh client"},
+			func(c *storage.DetectionTuning) { c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31") }, "no expected rule covers this program from this host to port 22"},
 		{"the rule switched off", "ws-admin", "/usr/bin/ssh", hops(22, six...),
 			func(c *storage.DetectionTuning) {
-				c.AdminFanoutTargets = append(c.AdminFanoutTargets, "10.0.0.50/31")
-				c.AdminFanoutSources = nil
-			}, "not an admin workstation"},
+				c.InfraCIDRs = append(c.InfraCIDRs, "10.0.0.50/31")
+				withoutAdminRule(c)
+			}, "no expected rule covers this program from this host to port 22"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,7 +214,7 @@ func TestBrokerSweepPages(t *testing.T) {
 // threshold, where they used to page as off-hours by the UTC clock.
 func TestSweepOffHoursUsesTheTuning(t *testing.T) {
 	engine, store := adminEngine(t, func(c *storage.DetectionTuning) {
-		c.AdminFanoutSources = nil
+		withoutAdminRule(c)
 		c.OffHoursOn = false
 	})
 	at := time.Date(2026, 10, 14, 23, 16, 0, 0, time.UTC)
@@ -199,7 +227,7 @@ func TestSweepOffHoursUsesTheTuning(t *testing.T) {
 	}
 
 	engine, store = adminEngine(t, func(c *storage.DetectionTuning) {
-		c.AdminFanoutSources = nil
+		withoutAdminRule(c)
 		c.OffHoursOn, c.OffHoursStart, c.OffHoursEnd, c.OffHoursZone = true, 22, 5, "America/New_York"
 	})
 	at = time.Date(2026, 10, 15, 3, 30, 0, 0, time.UTC) // 23:30 in New York
@@ -209,21 +237,6 @@ func TestSweepOffHoursUsesTheTuning(t *testing.T) {
 	}
 	if got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP"); len(got) != 1 {
 		t.Fatalf("23:30 local is off-hours in the configured zone: want 1 alert, got %d", len(got))
-	}
-}
-
-func TestAdminFanoutTargetsMustBePrivate(t *testing.T) {
-	_, store := noiseEngine(t)
-	tuning := store.GetDetectionTuning()
-	tuning.AdminFanoutTargets = []string{"8.8.8.8"}
-	if _, err := store.SaveDetectionTuning(tuning, "test"); err == nil {
-		t.Fatal("a public admin target was accepted")
-	}
-	tuning.AdminFanoutTargets = []string{"10.0.0.1", "192.168.1.0/24"}
-	saved, err := store.SaveDetectionTuning(tuning, "test")
-	// The two-address target list became infra_cidrs: the entries move there.
-	if err != nil || len(saved.AdminFanoutTargets) != 0 || len(saved.InfraCIDRs) != 2 || saved.InfraCIDRs[0] != "10.0.0.1/32" {
-		t.Fatalf("private targets: %v %v %v", saved.AdminFanoutTargets, saved.InfraCIDRs, err)
 	}
 }
 

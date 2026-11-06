@@ -410,7 +410,7 @@
     anomaliesCapped: false,
     updateStatus: null,
     meshPeers: [],
-    exclusions: [],
+    expected: [],
     iocs: [],
     baselinePolicies: [],
     tuning: null,
@@ -895,10 +895,16 @@
       "/api/v1/mesh/quarantined": [
         { id: "mq-01", target_ip: "10.0.4.99", target_mac: "B8:27:EB:12:34:56", subnet: "10.0.4.0/24", reason: "Metasploit listener on 4444", active: true, created_at: mins(22) }
       ],
-      "/api/v1/exclusions": [
-        { id: "ex-01", tenant_id: "corp-default", scope: "global", scope_value: "", name: "Directory service authentication", process_path: "", dst_ip_range: "10.0.4.10/32", port: 88, protocol: "tcp", reason: "Kerberos to the site directory server", active: true, created_at: "2026-08-20T10:00:00Z", expires_at: mins(-60 * 24 * 30) },
-        { id: "ex-02", tenant_id: "corp-default", scope: "location", scope_value: "loc-cloud", name: "Database replication", process_path: "/usr/lib/postgresql/16/bin/postgres", dst_ip_range: "172.16.10.0/24", port: 5432, protocol: "tcp", reason: "Intra-VPC replication", active: true, created_at: "2026-08-21T10:00:00Z", expires_at: mins(60) }
-      ],
+      "/api/v1/detection/expected": {
+        now: new Date().toISOString(),
+        findings: [], explicit: [],
+        rules: [
+          { id: "marked-backup-agent-1a2b3c", name: "backup-agent to as64500", reason: "marked expected from finding f-demo (C2_BEACONING on ep-1)", findings: ["C2_BEACONING"],
+            hosts: ["ep-1"], programs: [{ path: "/opt/acme/backup-agent" }], networks: ["as64500"], expires_at: new Date(Date.now() + 29 * 86400000).toISOString() },
+          { id: "vendor-claude", name: "Anthropic service for claude", reason: "Anthropic's own service", runtime: "claude", vendor: "Anthropic",
+            domains: ["anthropic.com", "claude.ai"], prefixes: ["160.79.104.0/23"], tenancy: "vendor" }
+        ]
+      },
       "/api/v1/threatintel/iocs": [
         { id: "ioc-01", value: "185.220.101.5", type: "ipv4", source: "feodo", threat_type: "c2", confidence: 90, active: true, created_at: mins(180), last_seen_at: mins(12) },
         { id: "ioc-02", value: "194.26.29.114", type: "ipv4", source: "emerging_threats", threat_type: "c2", confidence: 85, active: true, created_at: mins(240), last_seen_at: mins(40) },
@@ -1306,8 +1312,7 @@
       first_seen_enabled: true, first_seen_cooldown_minutes: 30,
       bandwidth_enabled: true, bandwidth_cooldown_minutes: 5,
       warmup_hours: 24,
-      quiet_processes: ["c:/windows/system32/svchost.exe", "/usr/lib/systemd/systemd-timesyncd user:systemd-timesync", "/opt/ominull/bin/ominulld"],
-      quiet_orgs: ["as13335", "as8075"]
+      expected_rules: arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/detection/expected"] && DEMO_CACHE["/api/v1/detection/expected"].rules)
     };
     var t = {};
     Object.keys(defaults).forEach(function (k) { t[k] = defaults[k]; });
@@ -1546,13 +1551,18 @@
     if (base === "/api/v1/endpoints/unisolate") { setIso(body && body.endpoint_id, false); return { status: "released" }; }
     if (base === "/api/v1/endpoints/isolate-bulk") { arrayOf(body && (body.ids || body.endpoint_ids)).forEach(function (id) { setIso(id, true); }); return { status: "isolated" }; }
     if (base === "/api/v1/endpoints/unisolate-bulk") { arrayOf(body && (body.ids || body.endpoint_ids)).forEach(function (id) { setIso(id, false); }); return { status: "released" }; }
-    if (base === "/api/v1/detection/tuning/suppress") {
-      var silenced = (DEMO_CACHE["/api/v1/anomalies"] || []).filter(function (a) { return a.id === (body && body.id); })[0];
+    if (base === "/api/v1/detection/expected/mark") {
+      var marked = (DEMO_CACHE["/api/v1/anomalies"] || []).filter(function (a) { return a.id === (body && body.id); })[0];
       DEMO_CACHE["/api/v1/anomalies"] = DEMO_CACHE["/api/v1/anomalies"].filter(function (a) { return a.id !== (body && body.id); });
-      var demoProc = silenced && silenced.process_path
-        ? silenced.process_path.split("\\").pop().split("/").pop().toLowerCase()
+      var demoProc = marked && marked.process_path
+        ? marked.process_path.split("\\").pop().split("/").pop().toLowerCase()
         : "process";
-      return { pair: demoProc + "@example", added: true, acknowledged: body && body.id };
+      return { rule: { id: "marked-" + demoProc, name: demoProc + " to a named network" }, added: true, acknowledged: body && body.id };
+    }
+    if (base === "/api/v1/detection/expected" && method === "DELETE") {
+      var wanted = new URLSearchParams(path.split("?")[1] || "").get("id");
+      DEMO_CACHE["/api/v1/detection/expected"].rules = DEMO_CACHE["/api/v1/detection/expected"].rules.filter(function (r) { return r.id !== wanted; });
+      return { status: "ok" };
     }
     if (base === "/api/v1/anomalies/resolve") {
       DEMO_CACHE["/api/v1/anomalies"].forEach(function (a) {
@@ -2066,7 +2076,7 @@
       return [
         { label: "Baseline policies", value: String(state.baselinePolicies.length) },
         { label: "Baseline services", value: String(state.baselineServices.length) },
-        { label: "Exclusions", value: String(state.exclusions.length) },
+        { label: "Expected rules", value: String(state.expected.length) },
         /* The hub returns at most IOC_PAGE indicators; the tile said 200 whether
            the feeds held 200 or 200,000. */
         { label: "Indicators", value: capped(state.iocs.length, IOC_PAGE) },
@@ -4294,16 +4304,16 @@
           }),
           h("button", {
             cls: "btn mini", type: "button", text: "Expected",
-            title: "Mark this program talking to this counterparty as normal here",
+            title: "Mark this program talking to this counterparty as expected here",
             on: {
               click: function (e) {
                 e.stopPropagation();
-                request("/api/v1/detection/tuning/suppress", "POST", { id: a.id })
+                request("/api/v1/detection/expected/mark", "POST", { id: a.id })
                   .then(function (res) {
-                    var pair = (res && res.pair) || "this conversation";
+                    var what = (res && res.rule && (res.rule.name || res.rule.id)) || "this conversation";
                     toast(res && res.added
-                      ? "Silenced " + pair + " - see Detection tuning"
-                      : pair + " was already expected", "ok");
+                      ? "Marked " + what + " expected - see Expected rules"
+                      : what + " was already expected", "ok");
                     refresh();
                   })
                   .catch(function (err) { toast(err.message, "crit"); });
@@ -6357,10 +6367,6 @@
 
     var warmup = numberField(t.warmup_hours, 0, 720, 1);
     var containers = listField(t.container_cidrs, "172.17.0.0/16, fd12:3456::/64");
-    var procs = listField(t.quiet_processes, "c:/windows/system32/svchost.exe, /usr/lib/systemd/systemd-timesyncd user:systemd-timesync");
-    var orgs = listField(t.quiet_orgs, "AS714, AS8075, AS13335");
-    var clients = listField(t.quiet_clients, "/opt/google/chrome/chrome, /usr/lib/firefox/firefox");
-    var pairs = listField(t.quiet_pairs, "/opt/backup/backup-agent@AS64500, /usr/bin/curl@AS36459");
 
     var body = h("div", { cls: "stack" },
       h("p", { cls: "why", text: "These are the numbers the detectors run on. Every alert names the ones that produced it, so a finding you disagree with can be answered here rather than ignored. Every change applies at once and the hub records it in the audit." }),
@@ -6395,12 +6401,8 @@
       h("div", { cls: "tune-list" },
         tuningRow("New-host warm-up", "Hours. A host installed this morning has no baseline to be unusual against, and every ordinary thing it does is a first-seen destination. Behavioural findings are held and logged during this window. Set to 0 to judge a host from its first packet.", warmup)),
 
-      h("h4", { cls: "tune-head", text: "Known-quiet" }),
-      h("div", { cls: "tune-list" },
-        tuningRow("Processes", "The operating system's own components, whose job is to talk to their vendor on a timer. Each is the full path it is installed at, and counts only while it runs as root, SYSTEM or the account given with user:name. Any account can make another program appear at that path, but not run it as those accounts. * stands for one folder, such as a version number; add sha256:<hash> to match only that build.", procs),
-        tuningRow("Networks", "AS numbers, such as AS15169 for Google. A listed network counts as ordinary, except the machines rented inside it. It does not silence everything that reaches it.", orgs),
-        tuningRow("Expected clients", "Programs, by installed path, whose regular traffic to those networks is expected - browsers, updaters, this agent. Beaconing and volume findings are silenced only for a listed program talking to a listed network, because a CDN is exactly where an implant would rather hide. A program in a folder any account can write to, such as /home or /tmp, needs sha256:<hash>.", clients),
-        tuningRow("Expected pairs", "One-off exceptions written path@network, the network as an AS number or its exact name. The Expected button on an alert writes these. Rented cloud ranges are never silenced by either list.", pairs)));
+      h("h4", { cls: "tune-head", text: "Expected" }),
+      h("p", { cls: "why", text: "What counts as expected (a program talking to its vendor, a backup to a known network) is kept as expected rules, one list for every detector. See the Expected rules card on this page. The Expected button on a finding adds a narrow rule there; removing a rule applies at once." }));
 
     var save = function () {
       var payload = {
@@ -6422,10 +6424,6 @@
         bandwidth_min_samples: parseInt(bwSamples.value, 10) || 0,
         silence_after_minutes: parseInt(silenceAfter.value, 10) || 0,
         warmup_hours: parseInt(warmup.value, 10) || 0,
-        quiet_processes: parseList(procs.value),
-        quiet_orgs: parseList(orgs.value),
-        quiet_clients: parseList(clients.value),
-        quiet_pairs: parseList(pairs.value),
         container_cidrs: parseList(containers.value)
       };
       request("/api/v1/detection/tuning", "POST", payload).then(function (res) {
@@ -6439,7 +6437,7 @@
     var restore = function () {
       confirmSheet({
         title: "Restore shipped detection thresholds",
-        consequence: "Every tuning value on this sheet is discarded and replaced with the defaults Ominull ships. Quiet-process and quiet-org lists built up over time are deleted, and the console has no record of what they were.",
+        consequence: "Every tuning value on this sheet is discarded and replaced with the defaults Ominull ships. Expected rules you added or marked are deleted and the shipped ones come back; the console has no record of what they were.",
         confirmLabel: "Restore shipped values",
         stack: true,
         onConfirm: sendRestoreTuning
@@ -6481,7 +6479,7 @@
     if (t.beacon_enabled !== false) details.push("Beaconing: " + (t.beacon_min_samples || "\u2014") + " check-ins over " + (t.beacon_min_span_minutes || "\u2014") + " min, confidence " + (t.beacon_score_threshold || "\u2014"));
     if (t.off_hours_enabled !== false && wrap.window) details.push("Off-hours: " + wrap.window + (wrap.now ? " (hub time " + wrap.now + ")" : ""));
     details.push(t.warmup_hours ? "New hosts judged after " + t.warmup_hours + "h" : "New hosts judged from their first packet");
-    details.push("Known-quiet: " + arrayOf(t.quiet_processes).length + " processes, " + arrayOf(t.quiet_orgs).length + " networks, " + (arrayOf(t.quiet_clients).length + arrayOf(t.quiet_pairs).length) + " clients or pairs");
+    details.push("Expected rules: " + arrayOf(t.expected_rules).length);
 
     var body = h("div", { cls: "card-body stack" },
       h("div", { cls: "uf uf-wrap uf-g2" },
@@ -6507,31 +6505,27 @@
     var view = $("view");
     clear(view);
 
-    /* An exclusion is a hole in the enforcement policy and the console listed
-       them read-only, beside a Baseline card that can be edited freely - so
-       the one table where "turn this off" is a security action was the one
-       table with no way to do it. The hub has served the toggle all along. */
-    var excl = simpleTable(["Name", "Scope", "Process", "Destination", "Port", "State", ""],
-      state.exclusions.map(function (x) {
+    /* An expected rule silences findings, so it is the one table where
+       "take this away" is a security action: removing tightens and applies at
+       once, and the hub refuses to loosen without the response authority. */
+    var excl = simpleTable(["Rule", "Program", "Destination", "Covers", "State", ""],
+      state.expected.map(function (r) {
+        var gone = ruleExpired(r);
         return [
-          h("span", { text: x.name || x.id }),
-          h("span", { cls: "dim-3", text: x.scope + (x.scope_value ? " \u00b7 " + x.scope_value : "") }),
-          h("span", { cls: "dim path-wrap", text: x.process_path || "any" }),
-          h("span", { cls: "ip", text: x.dst_ip_range || "any" }),
-          h("span", { cls: "ip", text: (x.port ? String(x.port) : "any") + "/" + (x.protocol || "any") }),
-          h("span", { cls: "st", "data-state": x.active && !exclusionExpired(x) ? "ok" : "idle" },
-            icon(x.active && !exclusionExpired(x) ? "g-online" : "g-offline", true),
-            h("span", { text: exclusionState(x) })),
-          /* An expired exclusion matches nothing and the hub refuses to turn
-             it back on; it is renewed by saving it with a new expiry. */
-          exclusionExpired(x) ? h("span") : h("div", { cls: "row-actions" }, h("button", {
-            cls: "btn mini" + (x.active ? "" : " btn-primary"), type: "button",
-            text: x.active ? "Disable" : "Enable",
-            on: { click: function () { confirmToggleExclusion(x); } }
-          }))
+          h("span", { text: r.name || r.id, title: r.reason || "" }),
+          h("span", { cls: "dim path-wrap", text: ruleProgram(r) }),
+          h("span", { cls: "ip", text: ruleDestination(r) }),
+          h("span", { cls: "dim-3", text: ruleCovers(r), title: arrayOf(r.findings).join(", ") }),
+          h("span", { cls: "st", "data-state": gone ? "idle" : "ok" },
+            icon(gone ? "g-offline" : "g-online", true),
+            h("span", { text: ruleState(r) })),
+          IS_ADMIN ? h("div", { cls: "row-actions" }, h("button", {
+            cls: "btn mini", type: "button", text: "Remove",
+            on: { click: function () { removeExpectedRule(r); } }
+          })) : h("span")
         ];
       }),
-      { key: "policy-exclusions", empty: "No exclusion has been carved out of the policy." });
+      { key: "policy-expected", empty: "Nothing is marked expected." });
     stackOnPhone(excl);
 
     var iocRows = foldRows("policy-iocs", state.iocs, 10, "indicators");
@@ -6577,8 +6571,8 @@
       convergenceCard(),
       baselineCard(),
       tuningCard(),
-      card("Exclusions \u00b7 " + state.exclusions.length, excl, null, false,
-        "Traffic that matches an exclusion is not reported by the behavioural detectors. Threat-list matches, sensitive ports, sweeps and resolver bypass still raise. Disable one to close it; an expired one matches nothing and is renewed by saving it with a new expiry."),
+      card("Expected rules \u00b7 " + state.expected.length, excl, null, false,
+        "Traffic that matches a rule is not reported by the behavioural detectors it names. Threat-list matches, sensitive ports, sweeps and resolver bypass still raise. Remove one to close it; an expired rule matches nothing and is renewed by saving it with a new expiry."),
       card("Threat indicators \u00b7 " + capped(state.iocs.length, IOC_PAGE), iocs, [
         h("button", {
           cls: "btn", type: "button", text: "Sync feeds",
@@ -6987,41 +6981,45 @@
      and a fresh key, which is a real interruption mid-incident, so the two
      deliberate "Lock Response Authority" buttons ask first. Expiry and idle
      timeout call lockResponseSession() directly and must not prompt. */
-  /* Every exclusion expires (at most 90 days ahead); a missing expiry reads
-     as expired, which is how the hub treats it. */
-  function exclusionExpired(x) {
-    var at = Date.parse(x.expires_at || "");
-    return !(at > Date.now());
+  /* A rule may carry an expiry; one without it stands until it is removed. */
+  function ruleExpired(r) {
+    if (!r.expires_at) return false;
+    return !(Date.parse(r.expires_at) > Date.now());
   }
 
-  function exclusionState(x) {
-    if (exclusionExpired(x)) return "Expired";
-    var until = new Date(x.expires_at).toLocaleDateString();
-    return (x.active ? "Active until " : "Off, expires ") + until;
+  function ruleState(r) {
+    if (ruleExpired(r)) return "Expired";
+    var where = arrayOf(r.hosts).length ? " \u00b7 " + arrayOf(r.hosts).length + " host" + (arrayOf(r.hosts).length === 1 ? "" : "s") : "";
+    return (r.expires_at ? "Until " + new Date(r.expires_at).toLocaleDateString() : "No expiry") + where;
   }
 
-  /* Disabling an exclusion tightens the policy and enabling one loosens it, so
-     only the loosening direction is stopped for a sentence. */
-  function confirmToggleExclusion(x) {
-    var name = x.name || x.id;
-    var apply = function () {
-      request("/api/v1/exclusions/toggle", "POST", { id: x.id, active: !x.active })
-        .then(function () {
-          toast((x.active ? "Disabled" : "Enabled") + " exclusion " + name, "ok");
-          refresh();
-        })
-        .catch(function (e) { toast("Could not change the exclusion: " + e.message, "crit"); });
-    };
-    if (x.active) { apply(); return; }
-    confirmSheet({
-      title: "Enable exclusion " + name,
-      consequence: "Traffic matching this exclusion stops being inspected and stops being enforced against, on every endpoint in scope, until it expires on " +
-        new Date(x.expires_at).toLocaleDateString() + " or somebody turns it off. Threat-list matches and sensitive ports are still reported.",
-      detail: (x.process_path || "any process") + " \u2192 " + (x.dst_ip_range || "any destination") +
-        " on " + (x.port ? String(x.port) : "any port") + "/" + (x.protocol || "any"),
-      confirmLabel: "Enable exclusion",
-      onConfirm: apply
-    });
+  function ruleProgram(r) {
+    var paths = arrayOf(r.programs).map(function (p) { return p.path + (p.run_as ? " (" + p.run_as + ")" : ""); });
+    if (paths.length) return paths.slice(0, 2).join(", ") + (paths.length > 2 ? " +" + (paths.length - 2) : "");
+    if (r.workload) return r.workload;
+    if (r.runtime) return "runtime " + r.runtime;
+    return "any";
+  }
+
+  function ruleDestination(r) {
+    var dest = arrayOf(r.domains).concat(arrayOf(r.prefixes), arrayOf(r.networks));
+    var text = dest.length ? dest.slice(0, 2).join(", ") + (dest.length > 2 ? " +" + (dest.length - 2) : "") : "any";
+    return text + (r.port ? " :" + r.port : "");
+  }
+
+  function ruleCovers(r) {
+    var kinds = arrayOf(r.findings);
+    return kinds.length ? kinds.length + (kinds.length === 1 ? " kind" : " kinds") : "all quiet kinds";
+  }
+
+  /* Removing a rule tightens the policy, so nothing stops it for a sentence. */
+  function removeExpectedRule(r) {
+    request("/api/v1/detection/expected?id=" + encodeURIComponent(r.id), "DELETE", null)
+      .then(function () {
+        toast("Removed " + (r.name || r.id), "ok");
+        refresh();
+      })
+      .catch(function (e) { toast("Could not remove the rule: " + e.message, "crit"); });
   }
 
   /* The job lifecycle, named exactly as the hub names it (response.JobState:
@@ -11768,7 +11766,7 @@
         state.baselineServices = arrayOf(d && d.services);
       }));
       jobs.push(request("/api/v1/detection/tuning").then(function (d) { state.tuning = d || null; }));
-      jobs.push(request("/api/v1/exclusions").then(function (d) { state.exclusions = arrayOf(d); }));
+      jobs.push(request("/api/v1/detection/expected").then(function (d) { state.expected = arrayOf(d && d.rules); }));
       jobs.push(request("/api/v1/threatintel/iocs").then(function (d) { state.iocs = arrayOf(d); }));
     }
     /* The section id is "access" (SECTIONS, above). This read "operators"

@@ -8,13 +8,14 @@ import (
 	"time"
 )
 
-// Exclusions and known workloads lapse on their own (at most 90 days ahead).
+// An expected rule with an expiry lapses on its own (a workload rule at most
+// 90 days ahead).
 // That is on purpose, but one nobody meant to drop brings its false alarms
 // back the day it lapses. The feed says so beforehand, so an agent renews it
 // in the daily pass instead of someone remembering a date.
 const (
 	// policyExpiryWarnDaysSetting is the hub setting holding how many days
-	// before an exclusion or known workload lapses the feed starts warning.
+	// before an expected rule lapses the feed starts warning.
 	policyExpiryWarnDaysSetting = "policy_expiry_warn_days"
 	policyExpiryWarnDaysDefault = 30
 	policyExpiryWarnDaysMin     = 1
@@ -35,17 +36,12 @@ func (s *Server) policyExpiryWarn() time.Duration {
 	return time.Duration(days) * 24 * time.Hour
 }
 
-// policyExpiryFinding tells Nightshift which active exclusions and known
-// workloads lapse within policy_expiry_warn_days (or lapsed in the last week),
+// policyExpiryFinding tells Nightshift which expected rules lapse within policy_expiry_warn_days (or lapsed in the last week),
 // with how to renew each. Renewing loosens, so the hub authorizes and audits
-// it as for any new exclusion; deciding whether a row is still wanted is the
+// it as for any new rule; deciding whether a row is still wanted is the
 // agent's job, so the finding is medium (a daily item), never a page.
 func (s *Server) policyExpiryFinding(now time.Time) (feedFinding, error) {
-	const uid, title = "ominull.detection.expiring", "Exclusions and known workloads expiring"
-	exclusions, err := s.store.ListExclusions("")
-	if err != nil {
-		return feedFinding{}, err
-	}
+	const uid, title = "ominull.detection.expiring", "Expected rules expiring"
 	warn := s.policyExpiryWarn()
 	type item struct {
 		kind, name string
@@ -64,18 +60,13 @@ func (s *Server) policyExpiryFinding(now time.Time) (feedFinding, error) {
 			due = append(due, it)
 		}
 	}
-	for _, ex := range exclusions {
-		if ex.Active {
-			consider(item{"exclusion", ex.ID, ex.ExpiresAt})
-		}
-	}
-	for _, k := range s.store.GetDetectionTuning().KnownWorkloads {
-		consider(item{"known_workload", k.Workload + "@" + k.Owner, k.ExpiresAt})
+	for _, r := range s.store.GetDetectionTuning().ExpectedRules {
+		consider(item{"expected_rule", r.ID, r.ExpiresAt})
 	}
 	warnDays := int(warn.Hours() / 24)
 	unmapped := map[string]any{"warn_days": warnDays}
 	if len(due) == 0 {
-		msg := "No exclusion or known workload expires within " + plural(warnDays, "day", "days")
+		msg := "No expected rule expires within " + plural(warnDays, "day", "days")
 		if !next.expires.IsZero() {
 			msg += fmt.Sprintf("; the next, %s %s, expires in %s", strings.ReplaceAll(next.kind, "_", " "), next.name, plural(daysLeft(next.expires, now), "day", "days"))
 		}
@@ -83,13 +74,8 @@ func (s *Server) policyExpiryFinding(now time.Time) (feedFinding, error) {
 	}
 	sort.Slice(due, func(i, j int) bool { return due[i].expires.Before(due[j].expires) })
 	rows := make([]map[string]any, 0, len(due))
-	nEx, nKw, lapsed := 0, 0, 0
+	lapsed := 0
 	for _, d := range due {
-		if d.kind == "exclusion" {
-			nEx++
-		} else {
-			nKw++
-		}
 		if !d.expires.After(now) {
 			lapsed++
 		}
@@ -102,15 +88,8 @@ func (s *Server) policyExpiryFinding(now time.Time) (feedFinding, error) {
 	if len(due) > len(rows) {
 		unmapped["expiring_omitted"] = len(due) - len(rows)
 	}
-	var what, how []string
-	if nEx > 0 {
-		what = append(what, plural(nEx, "exclusion", "exclusions"))
-		how = append(how, "re-POST an exclusion to /api/v1/exclusions, same id and fields, later expires_at")
-	}
-	if nKw > 0 {
-		what = append(what, plural(nKw, "known workload", "known workloads"))
-		how = append(how, "re-save the detection tuning with a later expires_at on a known workload")
-	}
+	what := plural(len(due), "expected rule", "expected rules")
+	how := "re-POST the rule to /api/v1/detection/expected, same id and fields, later expires_at"
 	verb := " expire"
 	if len(due) == 1 {
 		verb = " expires"
@@ -120,6 +99,6 @@ func (s *Server) policyExpiryFinding(now time.Time) (feedFinding, error) {
 	if lapsed > 0 {
 		when = fmt.Sprintf("%d already lapsed, %s %s ago", lapsed, soon.name, plural(-daysLeft(soon.expires, now), "day", "days"))
 	}
-	msg := fmt.Sprintf("%s within %d days (%s). Renew if still wanted: %s", strings.Join(what, " and ")+verb, warnDays, when, strings.Join(how, "; "))
+	msg := fmt.Sprintf("%s within %d days (%s). Renew if still wanted: %s", what+verb, warnDays, when, how)
 	return s.feedFinding(now, uid, title, ocsfSevMedium, ocsfStatusNew, msg, nil, unmapped), nil
 }

@@ -19,7 +19,7 @@ import (
 // ever moves into the tuning, the bandwidth, sweep and lateral numbers move
 // together.
 
-// floorPorts are SMB, RDP, telnet and RPC: how a worm moves. No exclusion,
+// floorPorts are SMB, RDP, telnet and RPC: how a worm moves. No expected rule,
 // actor or admin rule explains a flow on one.
 var floorPorts = [...]int{23, 135, 445, 3389}
 
@@ -71,7 +71,7 @@ const (
 	lateralShellHosts         = 6
 	lateralShellHostsOffHours = 3
 	// floorAdminFanoutMax is the most inventoried hosts one admin ssh fan-out
-	// may reach before the sweep pages anyway (admin_fanout_max_hosts).
+	// may reach before the sweep pages anyway (an expected rule's max_hosts).
 	floorAdminFanoutMax = storage.AdminFanoutMaxDefault
 )
 
@@ -106,7 +106,13 @@ func ClampToFloor(t storage.DetectionTuning) (storage.DetectionTuning, []string)
 	ceiling("bandwidth_min_samples", &t.BandwidthMinSamples, floorBandwidthMinSamples)
 	ceiling("bandwidth_cooldown_minutes", &t.BandwidthCooldown, floorBandwidthCooldown)
 	ceiling("warmup_hours", &t.WarmupHours, floorWarmupHours)
-	ceiling("admin_fanout_max_hosts", &t.AdminFanoutMax, floorAdminFanoutMax)
+	// An admin fan-out rule may admit at most floorAdminFanoutMax hosts.
+	rules := make([]storage.ExpectedRule, len(t.ExpectedRules))
+	for i, r := range t.ExpectedRules {
+		ceiling("expected rule "+r.ID+" max_hosts", &r.MaxHosts, floorAdminFanoutMax)
+		rules[i] = r
+	}
+	t.ExpectedRules = rules
 	// The must-page rules (class.go) have floors too: a tuning may make them
 	// page sooner, never later.
 	ceiling("intel_page_confidence", &t.IntelPageConfidence, floorIntelPageConfidence)

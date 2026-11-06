@@ -53,14 +53,15 @@ func TestTheFloorClampsAWeakerTuningAndKeepsAStricterOne(t *testing.T) {
 	weak.SilenceAfterMinutes = 600
 	weak.BandwidthMinSamples = 500
 	weak.WarmupHours = 720
-	weak.AdminFanoutMax = 20
+	weak.ExpectedRules = append(weak.ExpectedRules, storage.ExpectedRule{ID: "admin-ssh", Reason: "fixture", Findings: []string{storage.KindLateralSweep},
+		Hosts: []string{"ws"}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}}, Port: 22, MaxHosts: 20})
 	weak.BandwidthCooldown = 1440
 	got, notes := ClampToFloor(weak)
-	if !got.SilenceOn || got.SilenceAfterMinutes != 15 || got.BandwidthMinSamples != 20 || got.WarmupHours != 24 || got.AdminFanoutMax != 8 || got.BandwidthCooldown != 5 {
+	if !got.SilenceOn || got.SilenceAfterMinutes != 15 || got.BandwidthMinSamples != 20 || got.WarmupHours != 24 || adminSSH(got).MaxHosts != 8 || got.BandwidthCooldown != 5 {
 		t.Fatalf("weaker tuning not clamped: %+v", got)
 	}
 	joined := strings.Join(notes, "\n")
-	for _, field := range []string{"silence_enabled", "silence_after_minutes 600", "bandwidth_min_samples 500", "warmup_hours 720", "admin_fanout_max_hosts 20", "bandwidth_cooldown_minutes 1440"} {
+	for _, field := range []string{"silence_enabled", "silence_after_minutes 600", "bandwidth_min_samples 500", "warmup_hours 720", "admin-ssh max_hosts 20", "bandwidth_cooldown_minutes 1440"} {
 		if !strings.Contains(joined, field) {
 			t.Errorf("no note for %s: %v", field, notes)
 		}
@@ -70,7 +71,8 @@ func TestTheFloorClampsAWeakerTuningAndKeepsAStricterOne(t *testing.T) {
 	strict.SilenceAfterMinutes = 5
 	strict.BandwidthMinSamples = 8
 	strict.WarmupHours = 0
-	strict.AdminFanoutMax = 3
+	strict.ExpectedRules = append(strict.ExpectedRules, storage.ExpectedRule{ID: "admin-ssh", Reason: "fixture", Findings: []string{storage.KindLateralSweep},
+		Hosts: []string{"ws"}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}}, Port: 22, MaxHosts: 3})
 	got, notes = ClampToFloor(strict)
 	if len(notes) != 0 || !reflect.DeepEqual(got, strict) {
 		t.Fatalf("a stricter tuning was changed: %v", notes)
@@ -100,4 +102,10 @@ func TestTheEngineRunsTheFloorAndTheBurstSurvivesBandwidthOff(t *testing.T) {
 	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 1 {
 		t.Fatalf("a ten-megabyte burst with bandwidth off and a long warmup raised %d findings", len(got))
 	}
+}
+
+// adminSSH is the fixture's admin fan-out rule.
+func adminSSH(t storage.DetectionTuning) storage.ExpectedRule {
+	r, _ := t.RuleByID("admin-ssh")
+	return r
 }

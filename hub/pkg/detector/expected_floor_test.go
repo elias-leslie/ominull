@@ -1,0 +1,171 @@
+package detector
+
+import (
+	"fmt"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"ominull/hub/pkg/storage"
+)
+
+// addExpectedRule saves one more expected rule on top of the store's tuning
+// and drops the engine's cached copy.
+func addExpectedRule(t *testing.T, engine *Engine, store *storage.Store, rule storage.ExpectedRule) {
+	t.Helper()
+	cfg := store.GetDetectionTuning()
+	cfg.ExpectedRules = append(cfg.ExpectedRules, rule)
+	if _, err := store.SaveDetectionTuning(cfg, "test"); err != nil {
+		t.Fatalf("saving the rule %s: %v", rule.ID, err)
+	}
+	engine.InvalidateTuning()
+}
+
+// An expected rule silences the behavioural detectors for the traffic it
+// names, and nothing else: a threat-list match (with its auto-isolation) and a
+// sensitive-port egress still raise.
+func TestExpectedRulesNeverHideTheFloorDetectors(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "floor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	tuning := storage.DefaultDetectionTuning()
+	tuning.WarmupHours = 0
+	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+		t.Fatal(err)
+	}
+	var isolated int32
+	engine := New(store, make(chan storage.Event, 8), func(string, string) error {
+		atomic.AddInt32(&isolated, 1)
+		return nil
+	})
+	now := time.Now().UTC()
+	tool := "/usr/bin/python3.13"
+	addExpectedRule(t, engine, store, storage.ExpectedRule{ID: "tool", Reason: "fixture", Programs: []storage.ExpectedProgram{{Path: tool}}})
+	flow := func(endpoint, dst string, port uint16, path string, ioc *storage.IOC) storage.Event {
+		return storage.Event{TenantID: "default", EndpointID: endpoint, Timestamp: now, Action: "PERMIT",
+			Direction: "OUTBOUND", DstIP: dst, DstPort: port, BytesOut: 800, ProcessPath: path, ThreatMatch: ioc}
+	}
+
+	// The expected tool's ordinary egress is silenced.
+	engine.Evaluate(flow("linux-1", "159.65.0.9", 8443, tool, nil))
+	if got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS"); len(got) != 0 {
+		t.Fatalf("expected traffic raised %d interpreter findings", len(got))
+	}
+
+	// The same tool reaching a threat-listed address still raises and isolates.
+	engine.Evaluate(flow("linux-1", "185.220.101.5", 443, tool,
+		&storage.IOC{Value: "185.220.101.5", Source: "test-feed", ThreatType: "c2", Confidence: 100, Active: true}))
+	if got := anomaliesOfType(t, store, "THREAT_INTEL_MATCH"); len(got) != 1 {
+		t.Fatalf("a rule hid a threat-list match: %d findings", len(got))
+	}
+	if atomic.LoadInt32(&isolated) != 1 {
+		t.Fatalf("a rule hid the auto-isolation")
+	}
+
+	// ...and on a sensitive port still raises.
+	engine.Evaluate(flow("linux-1", "159.65.0.10", 445, tool, nil))
+	if got := anomaliesOfType(t, store, "SENSITIVE_PORT_EGRESS"); len(got) != 1 {
+		t.Fatalf("a rule hid a sensitive-port egress: %d findings", len(got))
+	}
+
+	// The batch path applies the same rules.
+	engine.EvaluateBatch([]storage.Event{flow("linux-2", "159.65.0.11", 3389, tool, nil)},
+		BatchSnapshot{Endpoint: storage.Endpoint{ID: "linux-2", RoleTag: "workstation"}})
+	if got := anomaliesOfType(t, store, "SENSITIVE_PORT_EGRESS"); len(got) != 2 {
+		t.Fatalf("batch path: a rule hid a sensitive-port egress: %d findings", len(got))
+	}
+}
+
+// The sweeps and the resolver bypass are floor rules as well: neither an
+// rule for the program nor a system component's rule silences them. The 10 MB
+// burst still yields to a system component (Windows Update uploads that much).
+func TestSweepsAndResolverBypassIgnoreExpectedRules(t *testing.T) {
+	store, err := storage.New(filepath.Join(t.TempDir(), "floor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	tuning := storage.DefaultDetectionTuning()
+	tuning.WarmupHours = 0
+	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+		t.Fatal(err)
+	}
+	engine := New(store, make(chan storage.Event, 8), nil)
+	now := time.Now().UTC()
+	tool := "/usr/bin/python3.13"
+	addExpectedRule(t, engine, store, storage.ExpectedRule{ID: "tool", Reason: "fixture", Programs: []storage.ExpectedProgram{{Path: tool}}})
+	flow := func(endpoint, path, user, dst string, port uint16, bytes int64, at time.Duration) storage.Event {
+		return storage.Event{TenantID: "default", EndpointID: endpoint, Timestamp: now.Add(at), Action: "PERMIT",
+			Direction: "OUTBOUND", Protocol: 6, DstIP: dst, DstPort: port, BytesOut: bytes, ProcessPath: path, UserIdentity: user}
+	}
+
+	// The expected interpreter: a port sweep, a lateral sweep and a lookup
+	// through a public resolver all raise.
+	for i := 0; i < portSweepShellPorts; i++ {
+		engine.Evaluate(flow("linux-1", tool, "alice", "198.51.100.7", uint16(3000+i), 60, time.Duration(i)*100*time.Millisecond))
+	}
+	for i := 0; i < lateralShellHosts; i++ {
+		engine.Evaluate(flow("linux-1", tool, "alice", fmt.Sprintf("192.168.250.%d", 10+i), 8080, 60, time.Duration(i)*time.Second))
+	}
+	engine.Evaluate(flow("linux-1", tool, "alice", "8.8.8.8", 53, 300, 0))
+	for _, want := range []string{"PORT_SCAN_RECON", "LATERAL_PORT_SWEEP", "AGENT_DNS_BYPASS"} {
+		if got := anomaliesOfType(t, store, want); len(got) != 1 {
+			t.Fatalf("a rule hid %s: %d findings", want, len(got))
+		}
+	}
+
+	// A system component running as the system: both sweeps raise, a 12 MB
+	// upload does not.
+	svchost := "C:\\Windows\\System32\\svchost.exe"
+	for i := 0; i < portSweepPorts; i++ {
+		engine.Evaluate(flow("windows-1", svchost, "NT AUTHORITY\\SYSTEM", "198.51.100.8", uint16(4000+i), 60, time.Duration(i)*100*time.Millisecond))
+	}
+	for i := 0; i < lateralHosts; i++ {
+		engine.Evaluate(flow("windows-1", svchost, "NT AUTHORITY\\SYSTEM", fmt.Sprintf("192.168.250.%d", 100+i), 8080, 60, time.Duration(i)*time.Second))
+	}
+	engine.Evaluate(flow("windows-1", svchost, "NT AUTHORITY\\SYSTEM", "198.51.100.9", 443, 12<<20, 0))
+	if got := anomaliesOfType(t, store, "PORT_SCAN_RECON"); len(got) != 2 {
+		t.Fatalf("a system component hid a port sweep: %d findings", len(got))
+	}
+	if got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP"); len(got) != 2 {
+		t.Fatalf("a system component hid a lateral sweep: %d findings", len(got))
+	}
+	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
+		t.Fatalf("a system component's upload raised %d bandwidth findings", len(got))
+	}
+}
+
+// A backup job's upload is what a rule for a program and its storage
+// service is for: the 10 MB burst yields to one scoped to the endpoint, the
+// program's exact path and the service's range on 443 (task-341f8c5bafad4cdc,
+// rclone serving restic to Google Drive). Everything the rule does not
+// name still raises: another program to the same range, the same program to
+// another destination, and the same program on another endpoint.
+func TestABackupRuleSilencesOnlyItsOwnUploadBurst(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	rclone := "/usr/local/bin/rclone"
+	addExpectedRule(t, engine, store, storage.ExpectedRule{ID: "backup", Name: "offsite backup", Reason: "fixture: restic backup through rclone",
+		Hosts: []string{"linux-backup"}, Programs: []storage.ExpectedProgram{{Path: rclone}}, Prefixes: []string{"198.51.100.0/24"}, Port: 443, Protocol: "tcp"})
+	upload := func(endpoint, path, dst string) int {
+		engine.Evaluate(storage.Event{TenantID: "default", EndpointID: endpoint, Timestamp: now, Action: "PERMIT",
+			Direction: "OUTBOUND", Protocol: 6, DstIP: dst, DstPort: 443, BytesOut: 64 << 20, ProcessPath: path, UserIdentity: "root"})
+		return len(anomaliesOfType(t, store, "BANDWIDTH_SPIKE"))
+	}
+	if n := upload("linux-backup", rclone, "198.51.100.4"); n != 0 {
+		t.Fatalf("the expected backup upload raised %d bandwidth findings", n)
+	}
+	for i, c := range []struct{ endpoint, path, dst, what string }{
+		{"linux-backup", "/usr/bin/curl", "198.51.100.4", "another program to the storage range"},
+		{"linux-backup", "/usr/local/bin/rclone.new", "198.51.100.4", "another path to the storage range"},
+		{"linux-backup", rclone, "203.0.113.9", "the backup program to another destination"},
+		{"linux-other", rclone, "198.51.100.4", "the backup program on another endpoint"},
+	} {
+		if n := upload(c.endpoint, c.path, c.dst); n != i+1 {
+			t.Fatalf("%s: %d bandwidth findings, want %d", c.what, n, i+1)
+		}
+	}
+}

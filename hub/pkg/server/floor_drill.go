@@ -39,7 +39,7 @@ type floorDrillRecord struct {
 	Missed []string  `json:"missed,omitempty"`
 }
 
-// runFloorDrill runs the drill against the live tuning and exclusions, judges
+// runFloorDrill runs the drill against the live tuning, judges
 // each case, and records the outcome.
 func (s *Server) runFloorDrill(now time.Time) floorDrillRecord {
 	floorDrillMu.Lock()
@@ -135,7 +135,7 @@ func (s *Server) floorDrillFinding(now time.Time) feedFinding {
 			"The weekly detection floor drill has never run on this hub, so nothing shows that the floor detectors still raise", nil, nil)
 	case len(rec.Missed) > 0:
 		return s.feedFinding(now, uid, title, ocsfSevCritical, ocsfStatusNew,
-			fmt.Sprintf("The detection floor drill missed %d of %d floor cases, so a real one would go unreported: %s. A tuning or exclusion change is the likely cause; check the day's detection policy changes",
+			fmt.Sprintf("The detection floor drill missed %d of %d floor cases, so a real one would go unreported: %s. A tuning or expected-rule change is the likely cause; check the day's detection policy changes",
 				len(rec.Missed), rec.Cases, strings.Join(rec.Missed, "; ")),
 			nil, map[string]any{"ran_at": rec.RanAt.Format(time.RFC3339), "missed": rec.Missed})
 	case now.Sub(rec.RanAt) > floorDrillOverdue:

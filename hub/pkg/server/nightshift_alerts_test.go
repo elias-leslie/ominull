@@ -53,7 +53,7 @@ func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
 		"floor_ports":   []int{},
 	})
 	tuning := store.GetDetectionTuning()
-	tuning.AdminFanoutSources = []string{"ws-01"}
+	tuning.ExpectedRules = append(tuning.ExpectedRules, adminSSHRule("ws-01"))
 	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestNightshiftFeedOwnAutomationDoesNotPage(t *testing.T) {
 	defer store.Close()
 	now := time.Now().UTC()
 	tuning := store.GetDetectionTuning()
-	tuning.AdminFanoutSources = []string{"ws-01"}
+	tuning.ExpectedRules = append(tuning.ExpectedRules, adminSSHRule("ws-01"))
 	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -218,9 +218,9 @@ func TestDescribeAgentEgressNamesFactsAndExplainsOurs(t *testing.T) {
 	codex := describeAlert(storage.AnomalyAlert{ID: "c", AnomalyType: "AGENT_NEW_DESTINATION", Severity: "MEDIUM", Hostname: "workstation-1",
 		Title:       "codex reached a destination it never has: sdmntprpolandcentral.oaiusercontent.com@cloudflare, inc.",
 		ProcessPath: "/home/u/.local/lib/node_modules/@openai/codex/vendor/bin/codex", DstIP: "198.51.100.52", DstPort: 443,
-		Evidence: `{"destination_owner":"Cloudflare, Inc."}`}, storage.DefaultDetectionTuning()) // the makers are the tuning's agent_runtime_vendors
+		Evidence: `{"destination_owner":"Cloudflare, Inc."}`}, storage.DefaultDetectionTuning()) // OpenAI sits behind a shared CDN: no maker rule names it, so no cause
 	if codex.What != "codex on workstation-1 reached sdmntprpolandcentral.oaiusercontent.com (198.51.100.52:443, Cloudflare, Inc.) for the first time" ||
-		codex.Expected != "" || !strings.Contains(codex.Cause, "OpenAI") {
+		codex.Expected != "" || codex.Cause != "" {
 		t.Fatalf("codex = %+v", codex)
 	}
 	// An upload page names the amount the new destination received.
@@ -323,7 +323,7 @@ func TestDescribeAlertActor(t *testing.T) {
 	for _, raw := range []string{`{"sweep_actor":"agent:claude:fb39ca7b","sweep_targets":[{"ip":"192.168.50.10","ports":[22]}]}`,
 		`{"sweep_actor":"agent:claude:fb39ca7b","floor_ports":"none"}`, `not json`, ``} {
 		got := describeAlert(storage.AnomalyAlert{ID: "u", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "HIGH", Hostname: "ws",
-			ProcessPath: "/usr/bin/ssh", DstIP: "192.168.50.10", DstPort: 22, Evidence: raw}, storage.DetectionTuning{AdminFanoutSources: []string{"ws"}})
+			ProcessPath: "/usr/bin/ssh", DstIP: "192.168.50.10", DstPort: 22, Evidence: raw}, storage.DetectionTuning{ExpectedRules: []storage.ExpectedRule{adminSSHRule("ws")}})
 		if got.Expected != "" {
 			t.Errorf("evidence %q without floor ports explained: %+v", raw, got)
 		}
@@ -754,4 +754,11 @@ func TestRelayAlertVerdictFollowsTheClass(t *testing.T) {
 	if _, _, _, ok := store.AnomalyResolution("medpage"); !ok {
 		t.Fatal("the classed medium page was not confirmed")
 	}
+}
+
+// adminSSHRule is the expected rule for routine ssh administration from the
+// named hosts.
+func adminSSHRule(hosts ...string) storage.ExpectedRule {
+	return storage.ExpectedRule{ID: "admin-ssh", Reason: "routine administration", Findings: []string{storage.KindLateralSweep},
+		Hosts: hosts, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}}, Port: 22}
 }

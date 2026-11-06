@@ -2,14 +2,44 @@ package detector
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"ominull/hub/pkg/storage"
 )
 
-// testExpiry is a known workload expiry a month out.
+// testExpiry is a workload rule's expiry a month out.
 var testExpiry = time.Now().Add(30 * 24 * time.Hour)
+
+// workloadRule is the expected rule a known workload for owner becomes: quiet
+// for first-seen programs and destinations, and for an any-network rule also
+// for off-hours work.
+func workloadRule(workload, owner string, rented bool) storage.ExpectedRule {
+	r := storage.ExpectedRule{ID: "w-" + fmt.Sprint(len(workload), owner), Name: workload, Reason: "fixture", Workload: workload, ExpiresAt: testExpiry,
+		Findings: []string{storage.KindNovelDestination, storage.KindNovelProcess}}
+	if owner == storage.AnyNetwork {
+		r.Findings = append(r.Findings, storage.KindOffHours)
+		if strings.HasPrefix(workload, "/") {
+			r.Tenancy = storage.ExpectedTenancyAny
+		} else {
+			r.Networks = []string{storage.AnyNetwork}
+			if rented {
+				r.Tenancy = storage.ExpectedTenancyAny
+			}
+		}
+	} else {
+		r.Networks = []string{owner}
+	}
+	return r
+}
+
+// known says whether the tuning's rules expect a first-seen destination for
+// the workload at that network.
+func known(tu storage.DetectionTuning, kind, workload, asn, org, tenancy string) bool {
+	_, ok := tu.Expected(storage.ExpectCtx{Kind: kind, Workload: workload, ASN: asn, Org: org, Tenancy: tenancy, Direction: "OUTBOUND"})
+	return ok
+}
 
 func TestWorkloadNamesWhatAnInterpreterRuns(t *testing.T) {
 	cases := []struct{ path, cmd, want string }{
@@ -76,9 +106,7 @@ func saveKnown(t *testing.T, engine *Engine, store *storage.Store, mutate func(*
 func TestAKnownWorkloadIsQuietWithoutVouchingForItsInterpreter(t *testing.T) {
 	engine, store := noiseEngine(t)
 	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
-		tu.KnownWorkloads = []storage.KnownWorkload{{
-			Workload: "python3.13 /srv/releases/*/.venv/bin/python -m app.worker", Owner: storage.AnyOwner, Reason: "market-data worker", ExpiresAt: testExpiry,
-		}}
+		tu.ExpectedRules = append(tu.ExpectedRules, workloadRule("python3.13 /srv/releases/*/.venv/bin/python -m app.worker", storage.AnyNetwork, false))
 	})
 	now := time.Now().UTC()
 	sendTo := func(endpoint, ip, cmd string) {
@@ -108,97 +136,103 @@ func TestAKnownWorkloadIsQuietWithoutVouchingForItsInterpreter(t *testing.T) {
 // rented compute is not, because anyone can rent a machine in that range.
 func TestANamedOwnerNeverCoversRentedCompute(t *testing.T) {
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry}}
+	tu.ExpectedRules = append(tu.ExpectedRules, workloadRule("node /opt/node/lib/npm-cli.js", "as13335", false))
 	tu, err := storage.PrepareDetectionTuning(tu)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "AS13335", "Cloudflare, Inc.", storage.TenancySharedCDN); !ok {
+	const npm = "node /opt/node/lib/npm-cli.js"
+	if !known(tu, storage.KindNovelDestination, npm, "AS13335", "Cloudflare, Inc.", storage.TenancySharedCDN) {
 		t.Fatal("npm to Cloudflare should be known")
 	}
-	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "AS13335", "Cloudflare, Inc.", storage.TenancyHosting); ok {
+	if known(tu, storage.KindNovelDestination, npm, "AS13335", "Cloudflare, Inc.", storage.TenancyHosting) {
 		t.Fatal("a named owner must not cover rented compute")
 	}
-	if _, ok := tu.KnownWorkloadFor("node /opt/node/lib/npm-cli.js", "", "", ""); ok {
+	if known(tu, storage.KindNovelDestination, npm, "", "", "") {
 		t.Fatal("a named owner must not cover an unnamed address")
 	}
-	if tu.IsVouchedPair("/usr/bin/node", "", "AS13335", "Cloudflare, Inc.", storage.TenancySharedCDN) {
-		t.Fatal("a known workload must not vouch for the beacon and volume detectors")
+	if known(tu, storage.KindBeacon, npm, "AS13335", "Cloudflare, Inc.", storage.TenancySharedCDN) ||
+		known(tu, storage.KindBandwidthSpike, npm, "AS13335", "Cloudflare, Inc.", storage.TenancySharedCDN) {
+		t.Fatal("a workload rule must not cover the beacon and volume detectors")
 	}
 }
 
-// AnyOwner covers rented compute for an installed program known by its path,
-// but not for an interpreter, whose workload any process can imitate.
-func TestAnyOwnerForAnInterpreterStopsAtRentedCompute(t *testing.T) {
-	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{
-		{Workload: "python3.13 /srv/app/.venv/bin/python -m app.worker", Owner: storage.AnyOwner, Reason: "worker", ExpiresAt: testExpiry},
-		{Workload: "/opt/google/chrome/chrome", Owner: storage.AnyOwner, Reason: "browser", ExpiresAt: testExpiry},
+// Any network covers rented compute for an installed program known by its
+// path, but not for an interpreter, whose workload any process can imitate.
+func TestAnyNetworkForAnInterpreterStopsAtRentedCompute(t *testing.T) {
+	const w = "python3.13 /srv/app/.venv/bin/python -m app.worker"
+	build := func(rented bool) storage.DetectionTuning {
+		tu := storage.DefaultDetectionTuning()
+		a, b := workloadRule(w, storage.AnyNetwork, rented), workloadRule("/opt/google/chrome/chrome", storage.AnyNetwork, false)
+		a.ID, b.ID = "worker", "browser"
+		tu.ExpectedRules = append(tu.ExpectedRules, a, b)
+		tu, err := storage.PrepareDetectionTuning(tu)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tu
 	}
-	tu, err := storage.PrepareDetectionTuning(tu)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := "python3.13 /srv/app/.venv/bin/python -m app.worker"
-	if _, ok := tu.KnownWorkloadFor(w, "", "Example Bank", storage.TenancySharedCDN); !ok {
+	tu := build(false)
+	if !known(tu, storage.KindNovelDestination, w, "", "Example Bank", storage.TenancySharedCDN) {
 		t.Fatal("the worker to a named network should be known")
 	}
-	if _, ok := tu.KnownWorkloadFor(w, "", "DigitalOcean, LLC", storage.TenancyHosting); ok {
-		t.Fatal("an interpreter's AnyOwner must not cover rented compute")
+	if known(tu, storage.KindNovelDestination, w, "", "DigitalOcean, LLC", storage.TenancyHosting) {
+		t.Fatal("an interpreter's any-network rule must not cover rented compute")
 	}
-	if _, ok := tu.KnownWorkloadFor(w, "", "", ""); ok {
-		t.Fatal("an interpreter's AnyOwner must not cover an unnamed address")
+	if known(tu, storage.KindNovelDestination, w, "", "", "") {
+		t.Fatal("an interpreter's any-network rule must not cover an unnamed address")
 	}
-	if _, ok := tu.KnownWorkloadFor("/opt/google/chrome/chrome", "", "", ""); !ok {
-		t.Fatal("an installed program's AnyOwner covers every destination")
+	if !known(tu, storage.KindNovelDestination, "/opt/google/chrome/chrome", "", "", "") {
+		t.Fatal("an installed program's any-network rule covers every destination")
 	}
-	tu.KnownWorkloads[1].IncludeRented = true // sorted: the python entry is second
-	if _, ok := tu.KnownWorkloadFor(w, "", "DigitalOcean, LLC", storage.TenancyHosting); !ok {
-		t.Fatal("include_rented should widen an interpreter's AnyOwner to rented compute")
+	if !known(build(true), storage.KindNovelDestination, w, "", "DigitalOcean, LLC", storage.TenancyHosting) {
+		t.Fatal("tenancy any should widen an interpreter's rule to rented compute")
 	}
 	// "*" never crosses a space, so it cannot swallow the next argument.
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /srv/tool/bin/*", Owner: storage.AnyOwner, Reason: "tools", ExpiresAt: testExpiry}}
+	tu = storage.DefaultDetectionTuning()
+	tu.ExpectedRules = append(tu.ExpectedRules, workloadRule("node /srv/tool/bin/*", storage.AnyNetwork, false))
 	tu, _ = storage.PrepareDetectionTuning(tu)
-	if _, ok := tu.KnownWorkloadFor("node /srv/tool/bin/a b", "", "Example", ""); ok {
+	if known(tu, storage.KindNovelDestination, "node /srv/tool/bin/a b", "", "Example", "") {
 		t.Fatal("a wildcard crossed an argument boundary")
 	}
 }
 
 func TestAKnownServiceIsJudgedWithTheSameReach(t *testing.T) {
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "python3.13 -m app.worker", Owner: storage.AnyOwner, Reason: "worker", ExpiresAt: testExpiry}}
+	tu.ExpectedRules = append(tu.ExpectedRules, workloadRule("python3.13 -m app.worker", storage.AnyNetwork, false))
 	tu, _ = storage.PrepareDetectionTuning(tu)
-	if _, ok := tu.KnownService("python3.13 -m app.worker", "Example Bank", ""); !ok {
+	if !known(tu, storage.KindOffHours, "python3.13 -m app.worker", "", "Example Bank", "") {
 		t.Fatal("a service to a named network should be known")
 	}
-	if _, ok := tu.KnownService("python3.13 -m app.worker", "DigitalOcean, LLC", storage.TenancyHosting); ok {
+	if known(tu, storage.KindOffHours, "python3.13 -m app.worker", "", "DigitalOcean, LLC", storage.TenancyHosting) {
 		t.Fatal("an interpreter service on rented compute is still off-hours news")
 	}
 }
 
-func TestKnownWorkloadsNeedAReasonAndNeverCoverInlineCode(t *testing.T) {
+func TestWorkloadRulesNeedAReasonAndNeverCoverInlineCode(t *testing.T) {
 	_, store := noiseEngine(t)
-	for _, k := range []storage.KnownWorkload{
-		{Workload: "python3 -m app", Owner: "*"},
-		{Workload: "*", Owner: "*", Reason: "everything", ExpiresAt: testExpiry},
-		{Workload: "python3 /venv/bin/python -c", Owner: "*", Reason: "inline", ExpiresAt: testExpiry},
-		{Workload: "python3 -m app", Owner: "", Reason: "no owner", ExpiresAt: testExpiry},
-		{Workload: "*/curl", Owner: "*", Reason: "leading wildcard", ExpiresAt: testExpiry},
-		{Workload: "python3.13", Owner: "*", Reason: "a bare interpreter", ExpiresAt: testExpiry},
-		{Workload: "python3.13 *", Owner: "*", Reason: "an interpreter running anything", ExpiresAt: testExpiry},
-		{Workload: "python3 -m app", Owner: "cloudflare", Reason: "rented", ExpiresAt: testExpiry, IncludeRented: true},
-		{Workload: "python3.13 -m *", Owner: "*", Reason: "every module", ExpiresAt: testExpiry},
-		{Workload: "java -jar *.jar", Owner: "*", Reason: "every jar", ExpiresAt: testExpiry},
-		{Workload: "node npm ci", Owner: "cloudflare", Reason: "named only by argv[0]", ExpiresAt: testExpiry},
-		{Workload: "python3 script.py", Owner: "*", Reason: "a relative script", ExpiresAt: testExpiry},
-		{Workload: "python3 /srv/app/*", Owner: "*", Reason: "any script in a directory", ExpiresAt: testExpiry},
-		{Workload: "python3.13 /*/*/*.py", Owner: "*", Reason: "any script three deep", ExpiresAt: testExpiry},
-		{Workload: "python3 -m a*", Owner: "*", Reason: "a module prefix", ExpiresAt: testExpiry},
+	for _, k := range []storage.ExpectedRule{
+		{Workload: "python3 -m app", Networks: []string{"*"}},
+		{Workload: "*", Networks: []string{"*"}, Reason: "everything", ExpiresAt: testExpiry},
+		{Workload: "python3 /venv/bin/python -c", Networks: []string{"*"}, Reason: "inline", ExpiresAt: testExpiry},
+		{Workload: "python3 -m app", Reason: "no network", ExpiresAt: testExpiry},
+		{Workload: "*/curl", Networks: []string{"*"}, Reason: "leading wildcard", ExpiresAt: testExpiry},
+		{Workload: "python3.13", Networks: []string{"*"}, Reason: "a bare interpreter", ExpiresAt: testExpiry},
+		{Workload: "python3.13 *", Networks: []string{"*"}, Reason: "an interpreter running anything", ExpiresAt: testExpiry},
+		{Workload: "python3.13 -m *", Networks: []string{"*"}, Reason: "every module", ExpiresAt: testExpiry},
+		{Workload: "java -jar *.jar", Networks: []string{"*"}, Reason: "every jar", ExpiresAt: testExpiry},
+		{Workload: "node npm ci", Networks: []string{"cloudflare"}, Reason: "named only by argv[0]", ExpiresAt: testExpiry},
+		{Workload: "python3 script.py", Networks: []string{"*"}, Reason: "a relative script", ExpiresAt: testExpiry},
+		{Workload: "python3 /srv/app/*", Networks: []string{"*"}, Reason: "any script in a directory", ExpiresAt: testExpiry},
+		{Workload: "python3.13 /*/*/*.py", Networks: []string{"*"}, Reason: "any script three deep", ExpiresAt: testExpiry},
+		{Workload: "python3 -m a*", Networks: []string{"*"}, Reason: "a module prefix", ExpiresAt: testExpiry},
+		{Workload: "python3 -m app", Networks: []string{"cloudflare"}, Reason: "no expiry"},
 	} {
+		k.ID = "bad"
 		tu := store.GetDetectionTuning()
-		tu.KnownWorkloads = []storage.KnownWorkload{k}
+		tu.ExpectedRules = append(tu.ExpectedRules, k)
 		if _, err := store.SaveDetectionTuning(tu, "test"); err == nil {
-			t.Errorf("saved an invalid known workload %+v", k)
+			t.Errorf("saved an invalid workload rule %+v", k)
 		}
 	}
 }
@@ -231,10 +265,9 @@ func TestOffHoursActivityIsOneFindingPerCounterparty(t *testing.T) {
 func TestAKnownServiceIsNotOffHours(t *testing.T) {
 	engine, store, night := offHoursEngine(t)
 	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
-		tu.KnownWorkloads = []storage.KnownWorkload{
-			{Workload: "node /usr/local/bin/corepack", Owner: storage.AnyOwner, Reason: "registry service", ExpiresAt: testExpiry},
-			{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry},
-		}
+		a, b := workloadRule("node /usr/local/bin/corepack", storage.AnyNetwork, false), workloadRule("node /opt/node/lib/npm-cli.js", "as13335", false)
+		a.ID, b.ID = "corepack", "npm"
+		tu.ExpectedRules = append(tu.ExpectedRules, a, b)
 	})
 	// A tool known only for one owner is not a service: a build at night is news.
 	engine.Evaluate(storage.Event{
@@ -276,7 +309,7 @@ func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 		{ID: "g", AnomalyType: "NOVEL_PROCESS_EGRESS", EndpointID: "e", ProcessPath: "/usr/bin/curl", Evidence: ev("curl z", "GitHub, Inc."), Timestamp: at.Add(2 * time.Hour)},
 	}
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "node /opt/node/lib/npm-cli.js", Owner: "as13335", Reason: "npm registry", ExpiresAt: testExpiry}}
+	tu.ExpectedRules = append(tu.ExpectedRules, workloadRule("node /opt/node/lib/npm-cli.js", "as13335", false))
 	tu, _ = storage.PrepareDetectionTuning(tu)
 	res := Replay(alerts, tu)
 	kept := map[string]bool{}
@@ -310,7 +343,7 @@ func TestAPathMismatchHasNoPathWorkload(t *testing.T) {
 	}
 
 	tu := storage.DefaultDetectionTuning()
-	tu.KnownWorkloads = []storage.KnownWorkload{{Workload: "/usr/local/bin/synctool", Owner: storage.AnyOwner, Reason: "sync tool", ExpiresAt: testExpiry}}
+	tu.ExpectedRules = append(tu.ExpectedRules, workloadRule("/usr/local/bin/synctool", storage.AnyNetwork, false))
 	tu, err := storage.PrepareDetectionTuning(tu)
 	if err != nil {
 		t.Fatal(err)

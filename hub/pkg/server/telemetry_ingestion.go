@@ -265,11 +265,6 @@ func normalizeTelemetryEvents(input []storage.Event, tenantID, endpointID string
 }
 
 func (s *Server) telemetrySnapshot(tenantID string, endpoint storage.Endpoint, events []storage.Event) (detector.BatchSnapshot, error) {
-	exclusions, err := s.store.ListExclusions(tenantID)
-	if err != nil {
-		return detector.BatchSnapshot{}, fmt.Errorf("load exclusion snapshot: %w", err)
-	}
-
 	geo := make(map[string]threatintel.GeoRecord)
 	firstSeen := make(map[string]bool)
 	dstIPs := make([]string, 0, len(events))
@@ -310,7 +305,6 @@ func (s *Server) telemetrySnapshot(tenantID string, endpoint storage.Endpoint, e
 	return detector.BatchSnapshot{
 		Endpoint:   endpoint,
 		Geo:        geo,
-		Exclusions: exclusions,
 		FirstSeen:  firstSeen,
 		LocationID: endpoint.LocationID,
 	}, nil

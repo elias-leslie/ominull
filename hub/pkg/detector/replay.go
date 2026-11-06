@@ -14,10 +14,10 @@ import (
 // would still raise.
 //
 // Tuning that cannot be checked against what actually happened is tuning by
-// guesswork: an exclusion is written, the alert count drops, and nobody knows
+// guesswork: an expected rule is written, the alert count drops, and nobody knows
 // whether the finding that mattered dropped with it. Replay answers that from
 // the findings already in the database. It applies the parts of the tuning
-// that a stored finding carries enough to judge - the known workloads, and the
+// that a stored finding carries enough to judge - the expected rules, and the
 // off-hours cooldown keyed on the counterparty - and leaves every other finding
 // as it was, so the result is a conservative estimate: the detectors themselves
 // can only silence more, never less.
@@ -120,12 +120,12 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 	for _, a := range sorted {
 		ev := replayEvidence(a.Evidence)
 		workload := WorkloadOf(a.ProcessPath, ev.CommandLine)
-		vouched := vouchedWorkload(a.ProcessPath, ev.CommandLine, ev.Attribution)
 		d := ReplayDecision{ID: a.ID, Kept: true}
+		rule, expected := expectedRuleFor(t, a, cx.RoleOf(endpointOf(endpoints, a.EndpointID)))
 		switch a.AnomalyType {
 		case "OFF_HOURS_ACTIVITY":
-			if k, ok := t.KnownService(vouched, ev.Owner, ev.Tenancy); ok {
-				d = ReplayDecision{ID: a.ID, Reason: "known service, runs around the clock: " + k.Reason}
+			if expected {
+				d = ReplayDecision{ID: a.ID, Reason: "expected: " + rule.Reason}
 				break
 			}
 			owner := ev.Owner
@@ -150,8 +150,8 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 			} else if owner == "" {
 				key = "firstseen|" + a.TenantID + "|unattributed|" + a.EndpointID
 			}
-			if k, ok := t.KnownWorkloadFor(vouched, ev.ASN, ev.Owner, ev.Tenancy); ok {
-				d = ReplayDecision{ID: a.ID, Reason: "known workload: " + k.Reason}
+			if expected {
+				d = ReplayDecision{ID: a.ID, Reason: "expected: " + rule.Reason}
 				armed := false
 				for _, m := range []map[string]time.Time{lastNovel, lastSilenced} {
 					if last, ok := m[key]; ok && a.Timestamp.Sub(last) < cooldown {
@@ -169,6 +169,10 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 				break
 			}
 			lastNovel[key] = a.Timestamp
+		default:
+			if expected {
+				d = ReplayDecision{ID: a.ID, Reason: "expected: " + rule.Reason}
+			}
 		}
 		res.Decisions = append(res.Decisions, d)
 
@@ -279,4 +283,33 @@ func replayEvidence(raw string) replayFields {
 // processBase is the program's name without its path, lower-cased.
 func processBase(path string) string {
 	return strings.ToLower(strings.TrimSpace(baseName(path)))
+}
+
+// endpointOf finds an endpoint by id; an unknown one is a zero endpoint (the
+// default role).
+func endpointOf(endpoints []storage.Endpoint, id string) storage.Endpoint {
+	for _, e := range endpoints {
+		if e.ID == id {
+			return e
+		}
+	}
+	return storage.Endpoint{ID: id}
+}
+
+// expectedRuleFor says whether the tuning's expected rules make a stored
+// finding expected. A lateral sweep is left as it was: its host count is not
+// stored whole.
+func expectedRuleFor(t storage.DetectionTuning, a storage.AnomalyAlert, role string) (storage.ExpectedRule, bool) {
+	kinds := FindingKinds(a)
+	if a.AnomalyType == storage.KindLateralSweep {
+		return storage.ExpectedRule{}, false
+	}
+	c := FindingExpectCtx(a, role)
+	for _, kind := range kinds {
+		c.Kind = kind
+		if r, ok := t.Expected(c); ok {
+			return r, true
+		}
+	}
+	return storage.ExpectedRule{}, false
 }

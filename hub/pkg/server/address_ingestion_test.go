@@ -59,14 +59,14 @@ func TestOperatorWritesPreserveIPv6AuditPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ path, body, action string }{
-		{"/api/v1/exclusions", `{"name":"test exclusion","process_path":"/test/tool","reason":"test","expires_at":"` + time.Now().UTC().Add(time.Hour).Format(time.RFC3339) + `"}`, "CREATE_EXCLUSION"},
+		{"/api/v1/detection/expected", `{"id":"test-tool","name":"test rule","programs":[{"path":"/test/tool"}],"networks":["as64500"],"reason":"test","expires_at":"` + time.Now().UTC().Add(time.Hour).Format(time.RFC3339) + `"}`, "EXPECTED_RULE_SAVED"},
 		{"/api/v1/assets/correct", `{"ip":"10.0.4.2","field":"hostname","value":"test-host","reason":"test"}`, "CORRECT_ASSET"},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			r.RemoteAddr = "[2001:db8::2]:45678"
 			r.Header.Set("X-API-Key", "mock_admin_token")
-			// An exclusion waits for the owner; the test owner approves it.
+			// A rule waits for the owner; the test owner approves it.
 			w := serveAuthorized(t, srv.Handler(), r)
 			if w.Code < 200 || w.Code >= 300 {
 				t.Fatalf("write: %d %s", w.Code, w.Body.String())

@@ -25,15 +25,15 @@ func TestDescribeStagedAgentUpdate(t *testing.T) {
 // before and after the digest covers, never from the hub's own words.
 func TestDescribeDetectionPolicy(t *testing.T) {
 	tuning := []string{"detection:tuning"}
-	payload := []byte(`{"after":{"beacon_enabled":false,"quiet_orgs":["as1","as3"],"warmup_hours":24},"before":{"beacon_enabled":true,"quiet_orgs":["as1","as2"],"warmup_hours":24},"op":"save","policy":"detection_tuning"}`)
+	payload := []byte(`{"after":{"beacon_enabled":false,"lab_cidrs":["as1","as3"],"warmup_hours":24},"before":{"beacon_enabled":true,"lab_cidrs":["as1","as2"],"warmup_hours":24},"op":"save","policy":"detection_tuning"}`)
 	action, summary, err := describeApproval(ActionKindDetection, payload, tuning, "admin (api-key)")
-	if err != nil || action != "Loosen detection tuning" || summary != "beacon_enabled true -> false; quiet_orgs +as3 -as2" {
+	if err != nil || action != "Loosen detection tuning" || summary != "beacon_enabled true -> false; lab_cidrs +as3 -as2" {
 		t.Fatalf("action %q summary %q err %v", action, summary, err)
 	}
 
 	// Changes that do not all fit the summary are cut to an ellipsis (the
 	// digest covers the whole change, and the hub's own audit row has it all).
-	before, after := map[string]interface{}{"quiet_processes": []string{"/usr/sbin/chronyd"}}, map[string]interface{}{"quiet_processes": []string{"/usr/sbin/chronyd", "/usr/bin/curl"}}
+	before, after := map[string]interface{}{"beacon_browsers": []string{"/usr/sbin/chronyd"}}, map[string]interface{}{"beacon_browsers": []string{"/usr/sbin/chronyd", "/usr/bin/curl"}}
 	for _, k := range []string{"admin_fanout_max_hosts", "agent_baseline_days", "agent_upload_factor", "agent_upload_floor_mb", "bandwidth_cooldown_minutes",
 		"bandwidth_min_samples", "beacon_cooldown_minutes", "beacon_min_interval_seconds", "beacon_min_samples", "beacon_min_span_minutes", "first_seen_cooldown_minutes",
 		"warmup_hours", "silence_after_minutes", "beacon_score_threshold"} {
@@ -46,33 +46,20 @@ func TestDescribeDetectionPolicy(t *testing.T) {
 	}
 	// Short enough, every change shows in full.
 	raw, _ = json.Marshal(map[string]interface{}{"policy": "detection_tuning", "op": "save",
-		"before": map[string]interface{}{"warmup_hours": 24, "quiet_processes": []string{}}, "after": map[string]interface{}{"warmup_hours": 12, "quiet_processes": []string{"/usr/bin/curl"}}})
-	if _, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin"); err != nil || summary != "quiet_processes +/usr/bin/curl; warmup_hours 24 -> 12" {
+		"before": map[string]interface{}{"warmup_hours": 24, "beacon_browsers": []string{}}, "after": map[string]interface{}{"warmup_hours": 12, "beacon_browsers": []string{"/usr/bin/curl"}}})
+	if _, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin"); err != nil || summary != "beacon_browsers +/usr/bin/curl; warmup_hours 24 -> 12" {
 		t.Fatalf("summary %q err %v", summary, err)
 	}
-	// A list entry shows what it matches before its reason.
+	// A rule shows what it matches before its reason.
 	raw, _ = json.Marshal(map[string]interface{}{"policy": "detection_tuning", "op": "save",
-		"before": map[string]interface{}{"known_workloads": []interface{}{}},
-		"after":  map[string]interface{}{"known_workloads": []interface{}{map[string]interface{}{"workload": "/usr/bin/gh", "owner": "*", "reason": "cli"}}}})
-	if _, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin"); err != nil || summary != "known_workloads +{owner=* workload=/usr/bin/gh reason=cli}" {
-		t.Fatalf("workload summary %q err %v", summary, err)
+		"before": map[string]interface{}{"expected_rules": []interface{}{}},
+		"after":  map[string]interface{}{"expected_rules": []interface{}{map[string]interface{}{"workload": "/usr/bin/gh", "networks": []string{"as36459"}, "reason": "cli"}}}})
+	if _, summary, err = describeApproval(ActionKindDetection, raw, tuning, "admin"); err != nil || summary != "expected_rules +{networks=[as36459] workload=/usr/bin/gh reason=cli}" {
+		t.Fatalf("rule summary %q err %v", summary, err)
 	}
-
-	exclusion := []byte(`{"after":{"active":true,"dst_ip_range":"172.18.0.0/16","expires_at":"2026-11-01T00:00:00Z","id":"","name":"bridge","port":7070,"process_path":"/usr/bin/docker-proxy","reason":"bridge","scope":"global","scope_value":"","tenant_id":"default"},"before":null,"op":"create","policy":"exclusion"}`)
-	action, summary, err = describeApproval(ActionKindDetection, exclusion, []string{"exclusion:new"}, "admin")
-	if err != nil || action != "Add a detection exclusion" ||
-		summary != "process_path /usr/bin/docker-proxy; dst_ip_range 172.18.0.0/16; port 7070; scope global; expires_at 2026-11-01T00:00:00Z; name bridge; reason bridge" {
-		t.Fatalf("exclusion action %q summary %q err %v", action, summary, err)
-	}
-	// A long name cannot push what the exclusion matches out of sight: the
-	// match shows in full and the name and reason are shortened instead.
-	long, _ := json.Marshal(map[string]interface{}{"policy": "exclusion", "op": "create", "before": nil, "after": map[string]interface{}{
-		"name": strings.Repeat("n", 130), "process_path": "/usr/lib/" + strings.Repeat("p", 60), "dst_ip_range": "0.0.0.0/0",
-		"scope": "global", "expires_at": "2026-11-01T00:00:00Z", "reason": strings.Repeat("r", 200)}})
-	_, summary, err = describeApproval(ActionKindDetection, long, []string{"exclusion:new"}, "admin")
-	if err != nil || len([]rune(summary)) > approvalMaxSummary || !strings.Contains(summary, "dst_ip_range 0.0.0.0/0") ||
-		!strings.Contains(summary, "scope global") || !strings.Contains(summary, "…") || strings.Contains(summary, " more") {
-		t.Fatalf("long exclusion (%d runes) %q err %v", len([]rune(summary)), summary, err)
+	// A retired exclusion policy is no longer a detection policy change.
+	if _, _, err = describeApproval(ActionKindDetection, []byte(`{"after":{"name":"x"},"before":null,"op":"create","policy":"exclusion"}`), []string{"exclusion:new"}, "admin"); err == nil {
+		t.Fatal("the retired exclusion policy was described")
 	}
 	// Host watch changes name the host and what changes about it.
 	watch := []byte(`{"after":{"endpoint_id":"ep-1","hostname":"web","isolated":false,"presence":"parked","reason":"lab","status":"active"},"before":{"endpoint_id":"ep-1","hostname":"web","isolated":false,"presence":"always_on","status":"active"},"op":"presence","policy":"endpoint_watch"}`)
@@ -94,8 +81,7 @@ func TestDescribeDetectionPolicy(t *testing.T) {
 		"no change":           {`{"after":{"a":1},"before":{"a":1},"op":"save","policy":"detection_tuning"}`, tuning},
 		"tuning wrong target": {`{"after":{"a":1},"before":{"a":2},"op":"save","policy":"detection_tuning"}`, []string{"ep-1"}},
 		"tuning no before":    {`{"after":{"a":1},"before":null,"op":"save","policy":"detection_tuning"}`, tuning},
-		"exclusion target":    {`{"after":{"name":"x"},"before":null,"op":"create","policy":"exclusion"}`, tuning},
-		"enable no before":    {`{"after":{"name":"x"},"before":null,"op":"enable","policy":"exclusion"}`, []string{"exclusion:ex-1"}},
+		"exclusion retired":   {`{"after":{"name":"x"},"before":null,"op":"create","policy":"exclusion"}`, tuning},
 		"two targets":         {`{"after":{"a":1},"before":{"a":2},"op":"save","policy":"detection_tuning"}`, []string{"detection:tuning", "exclusion:x"}},
 	} {
 		if _, _, err := describeApproval(ActionKindDetection, []byte(c.payload), c.targets, "admin"); err == nil {
@@ -110,12 +96,12 @@ func TestDescribeDetectionPolicy(t *testing.T) {
 func TestDescribeDetectionPolicyShowsTheDrill(t *testing.T) {
 	tuning := []string{"detection:tuning"}
 	for _, c := range []struct{ drill, want string }{
-		{`[]`, "floor drill: blinds no floor case (the 10 MB burst yields to exclusions and quiet processes); quiet_orgs +as3"},
-		{`["bandwidth burst"]`, "BLINDS 1 FLOOR CASE: bandwidth burst; quiet_orgs +as3"},
-		{`["lateral sweep","port sweep","port sweep as /usr/sbin/chronyd (chrony)"]`, "BLINDS 3 FLOOR CASES: lateral sweep, port sweep and 1 more; quiet_orgs +as3"},
-		{`["the drill could not run"]`, "floor drill could not run: what this blinds is unknown; quiet_orgs +as3"},
+		{`[]`, "floor drill: blinds no floor case (the 10 MB burst yields to expected rules); lab_cidrs +as3"},
+		{`["bandwidth burst"]`, "BLINDS 1 FLOOR CASE: bandwidth burst; lab_cidrs +as3"},
+		{`["lateral sweep","port sweep","port sweep as /usr/sbin/chronyd (chrony)"]`, "BLINDS 3 FLOOR CASES: lateral sweep, port sweep and 1 more; lab_cidrs +as3"},
+		{`["the drill could not run"]`, "floor drill could not run: what this blinds is unknown; lab_cidrs +as3"},
 	} {
-		payload := []byte(`{"after":{"quiet_orgs":["as1","as3"]},"before":{"quiet_orgs":["as1"]},"drill":` + c.drill + `,"op":"save","policy":"detection_tuning"}`)
+		payload := []byte(`{"after":{"lab_cidrs":["as1","as3"]},"before":{"lab_cidrs":["as1"]},"drill":` + c.drill + `,"op":"save","policy":"detection_tuning"}`)
 		if _, summary, err := describeApproval(ActionKindDetection, payload, tuning, "admin"); err != nil || summary != c.want {
 			t.Fatalf("drill %s: summary %q err %v", c.drill, summary, err)
 		}
@@ -123,11 +109,11 @@ func TestDescribeDetectionPolicyShowsTheDrill(t *testing.T) {
 	// A change that fits on its own is never refused for the drill: the
 	// verdict shrinks to its count instead.
 	long := `"/usr/lib/` + strings.Repeat("p", 220) + `"`
-	payload := []byte(`{"after":{"quiet_processes":[` + long + `]},"before":{"quiet_processes":[]},"drill":["lateral sweep","port sweep","x"],"op":"save","policy":"detection_tuning"}`)
-	if _, summary, err := describeApproval(ActionKindDetection, payload, tuning, "admin"); err != nil || !strings.HasPrefix(summary, "BLINDS 3 FLOOR CASES; quiet_processes +/usr/lib/ppp") {
+	payload := []byte(`{"after":{"beacon_browsers":[` + long + `]},"before":{"beacon_browsers":[]},"drill":["lateral sweep","port sweep","x"],"op":"save","policy":"detection_tuning"}`)
+	if _, summary, err := describeApproval(ActionKindDetection, payload, tuning, "admin"); err != nil || !strings.HasPrefix(summary, "BLINDS 3 FLOOR CASES; beacon_browsers +/usr/lib/ppp") {
 		t.Fatalf("long change with drill: summary %q err %v", summary, err)
 	}
-	if _, _, err := describeApproval(ActionKindDetection, []byte(`{"after":{"quiet_orgs":["as1","as3"]},"before":{"quiet_orgs":["as1"]},"drill":"none","op":"save","policy":"detection_tuning"}`), tuning, "admin"); err == nil {
+	if _, _, err := describeApproval(ActionKindDetection, []byte(`{"after":{"lab_cidrs":["as1","as3"]},"before":{"lab_cidrs":["as1"]},"drill":"none","op":"save","policy":"detection_tuning"}`), tuning, "admin"); err == nil {
 		t.Fatal("a drill that is not a list was described")
 	}
 }

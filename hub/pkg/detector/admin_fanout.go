@@ -3,7 +3,6 @@ package detector
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"ominull/hub/pkg/storage"
@@ -14,16 +13,18 @@ import (
 // An operator's workstation reaches its managed hosts over ssh all day: a
 // status check on the hypervisor, a command on a browser VM, the gateway's
 // health poll. Three of those inside a minute is the exact shape the sweep
-// detector looks for, and it paged at CRITICAL on every one. The rule here
-// lets that pass, and only that:
+// detector looks for, and it paged at CRITICAL on every one. An expected rule
+// that makes LATERAL_PORT_SWEEP expected lets that pass, and only that:
 //
-//   - the source endpoint is one the operator named (admin_fanout_sources)
-//     and is not a parked test guest;
-//   - the process is the ssh client;
-//   - every connection in the window went to port 22;
-//   - every host is inventoried: an enrolled endpoint's address, or inside
-//     admin_fanout_targets (managed hosts without an agent, like the gateway);
-//   - there are at most admin_fanout_max_hosts of them.
+//   - the source endpoint is one the rule names (hosts) and is not a parked
+//     test guest;
+//   - the process is a program the rule names by its installed path (the ssh
+//     client), not any process called ssh;
+//   - every connection in the window went to the rule's port;
+//   - every host is inventoried: an enrolled endpoint's address, a lab or
+//     infrastructure address (managed hosts without an agent, like the
+//     gateway);
+//   - there are at most the rule's max_hosts of them.
 //
 // One unknown host, one other port, one host too many, another program or
 // another source, and the window is judged exactly as before. The reason the
@@ -59,41 +60,51 @@ func sweepActor(window map[string]*sweepTarget) string {
 // inventoryTTL bounds how stale the enrolled-address set may be.
 const inventoryTTL = time.Minute
 
-// adminFanoutClients are the programs whose fan-out the rule considers.
-var adminFanoutClients = map[string]bool{"ssh": true}
-
-const adminPort = 22
-
 // adminFanout says whether a sweep window is routine administration, and why
-// or why not.
-func adminFanout(cfg storage.DetectionTuning, src storage.Endpoint, procKey string, targets map[string]*sweepTarget, inventoried func(ip string) bool) (bool, string) {
-	switch {
-	case !cfg.IsAdminFanoutSource(src.ID):
-		return false, "source is not an admin workstation"
-	case storage.NormalizePresence(src.Presence) == storage.PresenceParked:
+// or why not. base describes the event that closed the window; each port the
+// window reached is asked of the expected rules with the window's host count.
+func adminFanout(cfg storage.DetectionTuning, src storage.Endpoint, base storage.ExpectCtx, targets map[string]*sweepTarget, inventoried func(ip string) bool) (bool, string) {
+	if storage.NormalizePresence(src.Presence) == storage.PresenceParked {
 		return false, "source is a parked test guest"
-	case !adminFanoutClients[strings.TrimSuffix(procKey, ".exe")]:
-		return false, "process is not the ssh client"
-	case len(targets) > cfg.AdminFanoutMax:
-		return false, fmt.Sprintf("%d hosts is over the admin limit of %d", len(targets), cfg.AdminFanoutMax)
 	}
+	base.Kind = storage.KindLateralSweep
+	base.Targets = len(targets)
+	ports := map[int]bool{}
 	ips := make([]string, 0, len(targets))
-	for ip := range targets {
+	for ip, t := range targets {
 		ips = append(ips, ip)
+		for p := range t.ports {
+			ports[int(p)] = true
+		}
 	}
 	sort.Strings(ips)
-	for _, ip := range ips {
-		for p := range targets[ip].ports {
-			if p != adminPort {
-				return false, fmt.Sprintf("%s was reached on port %d", ip, p)
-			}
+	rule := ""
+	for _, p := range sortedPorts(ports) {
+		c := base
+		c.Port = p
+		r, ok := cfg.Expected(c)
+		if !ok {
+			return false, fmt.Sprintf("no expected rule covers this program from this host to port %d with %d hosts", p, len(targets))
 		}
-		// The lab networks are the operator's own guests, enrolled or not.
-		if !inventoried(ip) && !cfg.IsAdminFanoutTarget(ip) && !cfg.IsLabAddress(ip) {
+		rule = r.ID
+	}
+	for _, ip := range ips {
+		// The lab and infrastructure networks are the operator's own guests
+		// and managed hosts, enrolled or not.
+		if !inventoried(ip) && !cfg.IsInfraAddress(ip) && !cfg.IsLabAddress(ip) {
 			return false, fmt.Sprintf("%s is not an inventoried host", ip)
 		}
 	}
-	return true, fmt.Sprintf("ssh to %d inventoried hosts on port 22", len(ips))
+	return true, fmt.Sprintf("expected rule %s: %d inventoried hosts", rule, len(ips))
+}
+
+func sortedPorts(set map[int]bool) []int {
+	out := make([]int, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // inventoried reports whether an address belongs to an enrolled, not retired

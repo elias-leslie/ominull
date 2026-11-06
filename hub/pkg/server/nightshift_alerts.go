@@ -232,7 +232,7 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		// The evidence lists ten hosts; the title counts them all.
 		n := max(len(ev.Targets), countFromTitle(a.Title))
 		out.What = fmt.Sprintf("%s on %s connected to %s on the local network within a minute%s", who, host, plural(n, "host", "hosts"), portPhrase(ports))
-		if proc == "ssh" && ev.AdminRule != "" && tuning.IsAdminFanoutSource(a.EndpointID) {
+		if proc == "ssh" && ev.AdminRule != "" && tuning.HasAdminFanoutRule(a.EndpointID) {
 			out.Cause = "Probably your own ssh use from this workstation. It still alerted because " + ev.AdminRule
 			if ownSSH(ev) {
 				out.Expected = "own automation"
@@ -258,7 +258,7 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		if sent := titleUpload(a.Title); sent != "" {
 			out.What += fmt.Sprintf(" and sent %s there within the hour", sent)
 		}
-		if vendor := tuning.RuntimeVendor(proc, name); vendor != "" {
+		if vendor := tuning.RuleNamingMaker(proc, name); vendor != "" {
 			// A cause, not an explanation: on a shared CDN address the name
 			// can be any other site's.
 			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", proc, name, vendor)

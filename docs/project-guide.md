@@ -231,7 +231,7 @@ Every agent holds the one admin key, so an admin-key call is recorded as
 ASCII characters, no `"` or `\`, no leading or trailing space; an unusable one
 reads `admin`, and is a 400 on routes the authority signs). The hub records it, as a claim, as
 `agent "<name>" (admin key)` wherever it records who acted: the audit,
-`anomaly_resolutions.resolved_by`, tuning saves, exclusions, isolations, the
+`anomaly_resolutions.resolved_by`, tuning saves, expected rules, isolations, the
 audit trail's "by". `X-Username` stays the hub's own: it is cleared on the
 way in and never taken from the caller. `scripts/hub-request.sh` (`hub_post`,
 `hub_curl_config`) and `ominullctl` send `$OMINULL_AGENT`, else the agent
@@ -263,7 +263,8 @@ belong to that name, so reattach with the same one.
 | `/api/v1/agents/rollback` | POST | admin (or Nightshift's relay key at `/api/v1/integrations/nightshift/agents/rollback`): `{version, reason}` retires an agent release: halts its staged rollouts, drops its queued updates and refuses to roll it again; machines already on it stay until a newer release; no authorization needed |
 | `/api/v1/trust/routine-keys` | GET/POST | admin (or the relay key at `/api/v1/integrations/nightshift/routine-keys`): the routine release keys the pinned release key listed, `{epoch, keys:[{id, public_key}], signature}` over `OMINULL-ROUTINE-KEYS-V1` (`/statement` returns the exact bytes; a higher epoch replaces, an empty list revokes). Agents get it in the heartbeat and accept a routine key only for agent packages and their release statements; a release signed with one rolls out canaries first |
 | `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens is authorized by the response authority on the same request (no second step) and recorded in the audit with a Nightshift note; a loosening the authority cannot read (invalid or over 16 KiB) is refused with the reason; the authority's audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
-| `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
+| `/api/v1/detection/expected` | GET/POST/PUT/DELETE | the expected rules (below): GET returns `{rules, findings, explicit, now}`; POST or PUT upserts one rule by `id` (admin); DELETE `?id=` removes one (admin, tightens, applies at once); a write that loosens is authorized by the response authority on the same request and audited as `EXPECTED_RULE_SAVED` / `EXPECTED_RULE_DELETED` |
+| `/api/v1/detection/expected/mark` | POST | admin: `{id, reason?, all_hosts?, days?}` turns a finding into a narrow expected rule (this program, this network, this host, this kind) and acknowledges the finding; audited as `EXPECTED_RULE_MARKED`; no release needed |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
 | `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason; what it closes is recorded as `FINDINGS_ACKNOWLEDGED` and counted on the health findings' detection-policy note, like an acknowledgement |
 | `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; moving a host toward parked is authorized by the response authority on the same request (kind `detection_policy`, target `endpoint:<id>`), back toward always on applies at once; audited |
@@ -279,58 +280,97 @@ belong to that name, so reattach with the same one.
 | `/oidc/start` | GET | begin native OIDC authorization-code sign-in |
 | `/oidc/callback` | GET | validate OIDC state, PKCE, nonce, issuer, and operator identity |
 
-Known workloads (`known_workloads` in the tuning) name a program whose outbound
-conversations are its job, as `{workload, owner, reason, expires_at}`. A workload is the
-lower-cased executable path for most programs (`/opt/google/chrome/chrome`)
-and, for an interpreter, the interpreter plus what it runs (`python3.13
-/srv/app/.venv/bin/python -m app.worker`). `*` in a pattern spans part of one
-path segment of one argument, never a `/` or a space; a pattern may not start
-with `*`, and an interpreter pattern must end with the program it runs, spelled
-out: an absolute script path, `-m module` or `-jar file` (a name from argv[0]
-alone, such as `node npm ci`, is refused). Code that is not a named program -
-inline (`-c`, `-e`, `--eval`), from stdin or a `/dev/fd` pipe, preloaded
-(`node -r`, `--import`, `perl -M`, `ruby -r`) - and any option the parser does
-not know make the workload `<interpreter> -c`, which is never known. The
-command line arrives as one string and is split on spaces, so an argument that
-itself contains a space can shift what is read as the program; like the
-command line being the process's own account of itself, that is an accepted
-limit of the identity, not proof. Owner is the network's AS number or exact name, which never
-covers rented compute or an unnamed address, or `*` for a program whose
-destinations are arbitrary by design. For an installed program `*` covers
-every destination; for an interpreter it stops at rented compute and unnamed
-addresses unless the entry sets `include_rented`, because an interpreter's
-workload is read from its own command line and a process can imitate one. A
-reason is required, and so is an `expires_at` in the future when an entry is
-added or changed: past it the entry vouches for nothing, the next save drops
-it, and the health findings' detection-policy note lists it. Moving an expiry
-later loosens (authorized and audited); moving it earlier tightens. Entries saved
-before expiries existed were given one 90 days out at upgrade. Exclusions and known workloads that lapse within
-`policy_expiry_warn_days` (hub setting, default 30, 1 to 89), or lapsed in the last week, make the health findings'
-`ominull.detection.expiring` medium (a daily agent item) with how to renew: re-POST the exclusion with the same id and
-fields and a later `expires_at`, or re-save the tuning with a later expiry on the workload. A known workload silences only the novelty findings (new
-destination, interpreter egress) and, for an owner-`*` entry, off-hours;
-beaconing, upload volume and threat-intelligence matches still judge it.
-Novelty and off-hours findings fold to one per program and counterparty per
-first-seen cooldown. Check a change with the replay route before saving it:
-`cut` is the best case, and `worst_cut` allows for findings that a silenced
-one kept folded live and that were therefore never recorded (`may_surface`).
+Expected rules (`expected_rules` in the tuning, one list). Everything the hub
+treats as "this is expected" is a rule here: a program talking to its maker, a
+browser to named networks, a backup to its storage, an interpreter running a
+named script, routine admin ssh, a container bridge. Every behavioural
+detector asks the same matcher (`hub/pkg/storage/expected_rules.go`) whether a
+finding of its kind is expected for this flow; a rule is live data, edited
+through `/api/v1/detection/expected` without a release, and the Go defaults are
+only the seed a hub starts with. A rule is
+`{id, name, reason, findings, programs, runtime, workload, hosts, vendor, domains,
+except_domains, prefixes, networks, tenancy, port, protocol, direction,
+max_hosts, expires_at}`. Every clause that is set must match; a list inside a
+clause matches on any entry.
+
+- Program: `programs` is `[{path, sha256, run_as}]` (lower-cased installed path,
+  `*` for one path segment such as a version number; `run_as` is `system` for
+  root and the system accounts, or one account name); `runtime` names an agent
+  runtime from `agent_runtimes`; `workload` is an interpreter plus the script it
+  runs (`python3.13 /srv/app/.venv/bin/python -m app.worker`) or an installed
+  path. A program in a folder any account can write (`/tmp`, `/var/tmp`,
+  `/dev/shm`) needs `sha256`; a program under `/home` does not, so a self-updating
+  program stays expected after it updates, bound by `run_as`. A workload needs an
+  absolute script, `-m module` or `-jar file`; inline (`-c`, `-e`), stdin and
+  preloaded code make it `<interpreter> -c`, which never matches. A workload rule
+  needs an `expires_at` at most 90 days out, and an interpreter workload must name
+  `networks` or `prefixes` (`*` means any named network).
+- Destination: `domains`, `prefixes` and `networks` (AS numbers, exact network
+  names, or `*` for any named network). A name is only what a client sent, so
+  `domains` must be anchored by `prefixes` or `networks`; a prefix match proves
+  the destination alone (vendor prefixes no wider than /16 or /32). `except_domains`
+  are names under the listed domains that are anyone's (Cloud Storage buckets) and
+  never match. `tenancy` is `vendor` (only a published maker range), the default
+  (any network that is not rented compute) or `any` (rented compute too, which
+  an implant can hide in). A rule with no prefix and no network matches any
+  destination.
+- Narrowing: `hosts` (endpoint ids or roles), `port`, `protocol`, `direction`, and
+  `max_hosts` for a lateral fan-out (at most 8).
+- Effect: `findings` lists the kinds it makes expected (`NOVEL_PROCESS_EGRESS`,
+  `OFF_HOURS_ACTIVITY`, `BANDWIDTH_SPIKE`, `BANDWIDTH_BURST`, `C2_BEACONING`,
+  `NOVEL_DESTINATION`, `NEW_PLACE_UPLOAD`, `AGENT_NEW_DESTINATION`,
+  `AGENT_UPLOAD_VOLUME`, `CLOUD_STORAGE_EGRESS`, `LATERAL_PORT_SWEEP`). Empty
+  means every kind except the four that page or hide a transfer on their own
+  account (`NEW_PLACE_UPLOAD`, `AGENT_UPLOAD_VOLUME`, `CLOUD_STORAGE_EGRESS`,
+  `LATERAL_PORT_SWEEP`), which a rule covers only when it names them.
+- Exclusions in a rule always win, and no rule reaches the floor (below).
+
+The response authority judges every write. A rule that covers more than it did
+loosens: a new rule, an added kind, program, host, domain, prefix or network, a
+lifted restriction (program account, port, protocol, direction, hosts, domains),
+a wider tenancy, a higher `max_hosts`, an exception removed, a later or no
+expiry. It is authorized on the same request and audited; removing a rule,
+narrowing one or ending it sooner tightens and applies at once. A changed name
+or reason matches nothing and tightens. Past `expires_at` a rule vouches for
+nothing and the next save drops it. Rules that lapse within
+`policy_expiry_warn_days` (hub setting, default 30, 1 to 89), or lapsed in the
+last week, make the health findings' `ominull.detection.expiring` medium (a
+daily agent item) with how to renew: re-POST the rule with the same id and a
+later `expires_at`. Novelty and off-hours findings fold to one per program and
+counterparty per first-seen cooldown. The tuning save is a patch over what is
+saved; sending `expected_rules` replaces the whole list, and the retired lists
+(`quiet_processes`, `quiet_orgs`, `quiet_clients`, `quiet_pairs`,
+`known_workloads`, `agent_runtime_vendors`, `admin_fanout_*`) are refused with a
+400 pointing here. At upgrade the hub carried every saved entry of those lists
+into rules with the reach it had and nothing wider. Check a change with the
+replay route before saving it: `cut` is the best case, and `worst_cut` allows for
+findings that a silenced one kept folded live and that were therefore never
+recorded (`may_surface`).
+
+Marking a finding expected (the console's Expected button, or
+`/api/v1/detection/expected/mark`) writes the narrowest rule that covers it: the
+finding's program (a `/home` version folder generalised to `*`, a root process
+bound to `system`), its named network, its host (`all_hosts` widens), its kind
+only, and an expiry only when `days` is given. It is refused for the floor, a program the
+agent could not attribute, an unnamed address, rented compute and Cloud Storage.
 
 Detection floor (`hub/pkg/detector/floor.go`). The sensitive ports
 (23/135/445/3389), the bandwidth outlier and 10 MB burst bounds, the port-sweep
 and lateral-sweep thresholds and the longest silence (15 min) are code. Where
 the tuning holds a weaker `silence_after_minutes`, `bandwidth_min_samples`,
-`bandwidth_cooldown_minutes`, `warmup_hours` or `admin_fanout_max_hosts`, the floor value runs instead and the
+`bandwidth_cooldown_minutes`, `warmup_hours` or a rule's `max_hosts`, the floor value runs instead and the
 feed's detection-policy note says so (`floor_clamped`); a stricter value runs
 as saved. Silence cannot be switched off, and the 10 MB burst is raised with
-`bandwidth_enabled` off. A known workload's
+`bandwidth_enabled` off. A workload rule's
 `expires_at` is at most 90 days out when added, changed or renewed. The
 threat-list match, sensitive-port egress, port sweep, lateral sweep and
-resolver bypass run before the exclusions and ignore the quiet-process list:
-no exclusion or quiet process silences them (the infrastructure paths in code,
-run as their own account, stay exempt from the sweeps). The 10 MB burst still
-yields to a quiet process and an exclusion, because Windows Update and
+resolver bypass run before the expected rules and ignore them: no rule
+silences them (the infrastructure paths in code, run as their own account,
+stay exempt from the sweeps), apart from the admin ssh rule that bounds a
+fan-out to inventoried hosts on port 22, never one that reaches a floor port.
+The 10 MB burst still yields to a rule that names it, because Windows Update and
 Delivery Optimization upload tens of megabytes as svchost.exe and a backup
-program's exclusion for its storage service exists for exactly that.
+program's rule for its storage service exists for exactly that.
 
 Floor drill (`hub/pkg/detector/drill.go`, `hub/pkg/server/floor_drill.go`). At
 start, weekly and after every applied detection policy change, inside the hub
@@ -338,30 +378,31 @@ process, synthetic events for each floor
 rule (threat-list match and its isolation, sensitive port, port sweep, lateral
 sweep, bandwidth burst, resolver bypass shaped as a connection test, an agent's
 ssh fan-out that reaches SMB, a host gone quiet) run through a throwaway engine
-on the live tuning and exclusions. It stores no finding and isolates nothing.
+on the live tuning, expected rules included. It stores no finding and isolates nothing.
 A rule that does not raise, isolate where it should, or that the feed would
 explain away (`Expected`) is a CRITICAL `ominull.detection.drill` on the
 health findings, as is a drill that has not run for more than eight days; a
 missed drill runs again every hour until it passes. The lateral cases use the
 private /24 holding the most enrolled endpoints and twice each threshold. Both
-sweeps run again as each quiet process (path with `*` filled in, its pinned
-hash, its account or root), except a resolver or container runtime the code
-already exempts. Each active exclusion scoped to one endpoint, location or
-program gets the floor cases its own traffic could make, from its endpoint, at
-its location, by its program, inside its range and on its port: threat-list
-match, sensitive port, port sweep, lateral sweep on SMB and, for an agent
-runtime or interpreter, resolver bypass. A case it cannot match is skipped (a
-port sweep under an exclusion for one port, a lateral sweep under a public or
-too small range or inside a container network, the sweeps for a program the
-code exempts), and so is the burst, which an exclusion may cover by design.
-A loosening tuning save or exclusion is drilled before it is applied: the
+sweeps run again as each program an expected rule names (path with `*` filled
+in, its pinned hash, its account or root), except a resolver or container
+runtime the code already exempts; a shell or interpreter trips the lateral
+sweep at a lower count, so its first sweep is recorded rather than paged and the
+case only has to raise. Each rule narrowed to a host, a destination range or a
+port gets the floor cases its own traffic could make, from its host, by its
+program, inside its range and on its port: threat-list match, sensitive port,
+port sweep, lateral sweep on SMB and, for an agent runtime or interpreter,
+resolver bypass. A case it cannot match is skipped (a port sweep under a rule
+for one port, a lateral sweep under a public or too small range or inside a
+container network, the sweeps for a program the code exempts), and so is the
+burst, which a rule may cover by design.
+A loosening tuning save or rule is drilled before it is applied: the
 floor cases the proposed policy would blind that the saved one does not (a case
 that raises today and that the proposed policy no longer builds, such as the
 resolver bypass of a removed agent runtime, counts). The authority's audit
 statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...",
 shortened to the count when the change leaves no room) or with "floor drill:
-blinds no floor case (the 10 MB burst yields to exclusions and quiet
-processes)". The drill does not block the save: the authority signs it and the
+blinds no floor case (the 10 MB burst yields to expected rules)". The drill does not block the save: the authority signs it and the
 audit and the Nightshift note show what it blinds. Presence and retirement
 reach no floor rule the drill runs, so their statements carry
 no drill.
@@ -410,9 +451,9 @@ destinations and is never pruned, so a runtime idle past retention does not
 learn silently again. Registrable domains follow the whole public suffix list,
 so each tenant of a shared host (`x.a.run.app`) is its own destination. Tools
 an agent spawns are judged as themselves: the hub sees a parent's instance id,
-not its executable. Each runtime's maker is policy too:
-`agent_runtime_vendors` holds `runtime`, `vendor`, `domains`,
-`exclude_domains`, `prefixes` and `networks`. Prefixes are the maker's
+not its executable. Each runtime's maker is an expected rule too
+(`vendor-claude`, `vendor-antigravity`): `runtime`, `vendor`, `domains`,
+`except_domains`, `prefixes`, `networks` and `tenancy: vendor`. Prefixes are the maker's
 published service ranges (no wider than /16 or /32, never on a shared CDN or
 rented compute). Networks are the maker's AS numbers for a maker whose
 published ranges are too many to copy: an address counts when the hub's
@@ -427,8 +468,9 @@ storage hosts, on AS15169. A runtime's flow to its maker's domain inside those
 ranges or networks skips the per-connection bandwidth baseline (its hourly
 upload volume still judges it) and the new-place upload rule, and the maker's
 domain is named as the probable cause of a new destination. Adding a domain,
-prefix or network, or taking an exclusion away, loosens (authorized and
-audited); the reverse tightens.
+prefix or network, or taking an exception away, loosens (authorized and
+audited); the reverse tightens. A maker behind a shared CDN (OpenAI, Cloudflare)
+has no rule, since an address any site can be fronted from proves nothing.
 
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses
@@ -448,7 +490,7 @@ which is the notice's sentence.
 Resolving findings through
 `POST /api/v1/anomalies/resolve` takes `verdict` (`benign`, `malicious`, or
 omitted), also on a finding already acknowledged; the tuning-covered path records `benign` by method `tuning`. A plain
-acknowledgement (single, batch, acknowledge-all, quiet pair) records no verdict.
+acknowledgement (single, batch, acknowledge-all, marking expected) records no verdict.
 
 See [Topology workspace](../docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins
 and the limits of observed domain/process evidence.

@@ -391,13 +391,12 @@ func (e *Engine) Evaluate(ev storage.Event) {
 type BatchSnapshot struct {
 	Endpoint   storage.Endpoint
 	Geo        map[string]threatintel.GeoRecord
-	Exclusions []storage.Exclusion
 	FirstSeen  map[string]bool
 	LocationID string
 }
 
 // EvaluateBatch runs the detector only after the caller has durably accepted
-// the batch. Shared endpoint, policy, exclusion and GeoIP state is read once.
+// the batch. Shared endpoint, policy and GeoIP state is read once.
 func (e *Engine) EvaluateBatch(events []storage.Event, snapshot BatchSnapshot) {
 	for _, ev := range events {
 		e.evaluate(ev, &snapshot)
@@ -501,7 +500,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	isOffHours := cfg.IsOffHours(now)
 	isInteractiveShell := isInterpreterOrShell(procName)
 
-	// Both quiet lists are the operator's, held in the database and shown in
+	// Expected rules are the operator's, held in the database and shown in
 	// the console, not a table compiled into this file.
 	//
 	// They name programs by path, so a process whose agent found that its
@@ -512,26 +511,14 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		quietPath = ""
 	}
 
-	// The sweeps and the resolver bypass are floor rules too: no exclusion or
-	// quiet process silences them.
+	// The sweeps and the resolver bypass are floor rules too: no expected
+	// rule silences them.
 	e.checkSweeps(ev, geo, endpoint, cfg, quietPath, isInteractiveShell, isOffHours, now)
 	e.checkLabEscape(ev, geo, endpoint, cfg, role, quietPath, now)
 	e.checkResolverBypass(ev, geo, endpoint, cfg, procName, isInteractiveShell, now)
 	// The floor drill (a sink) writes no device memory into the live store.
 	if e.sink == nil {
 		e.checkNewPlace(ev, geo, endpoint, cfg, quietPath, now)
-	}
-
-	// Custom exclusions (pinholes and allowlists) apply only from here on. The
-	// floor rules above stay out of their reach: an exclusion that silenced a
-	// threat-list match would also hide an auto-isolation, and one that
-	// silenced a sweep would hide the intruder mapping the network.
-	if snapshot != nil {
-		if storage.MatchesExclusion(ev, snapshot.LocationID, snapshot.Exclusions) {
-			return
-		}
-	} else if e.store.IsExclusionMatch(ev, "") {
-		return
 	}
 
 	// The behavioural detectors below are the ones an operator tunes.
@@ -546,28 +533,19 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	hr := now.In(cfg.Location()).Hour()
 	roleIsWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
 
-	isTrustedSys := cfg.IsQuietProcess(quietPath, ev.ExecutableSHA256, ev.UserIdentity)
-	isTrustedDst := cfg.IsQuietOrg(geo.ASN, geo.Tenancy)
-
-	// isVouched is the narrower question: this process, to this owner. A quiet
-	// org alone silenced every process on every port to networks that front a
-	// large part of the web - which is where beaconing hides, not where it is
-	// absent. The beacon and volume detectors below ask this instead.
-	isVouched := cfg.IsVouchedPair(quietPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy)
-
-	// A known workload is the finer answer for the novelty detectors: this
-	// program - an interpreter together with what it runs - talking to this
-	// owner is its job. It never reaches the beacon and volume detectors. A
-	// program known by a path its agent could not match to the file that runs
-	// has no known workload (vouchedWorkload); the workload still names it in
-	// alert keys and details.
+	// Every place an operator can say "this is normal here" is one question to
+	// one matcher: the tuning's expected rules (storage.ExpectCtx). A program is
+	// named by its installed path, so a process whose agent found that its
+	// reported path is not the file it runs matches no rule that names a
+	// program; a workload (an interpreter and what it runs) is vouched only
+	// when its path matched too (vouchedWorkload). The workload itself still
+	// names the process in alert keys and details.
 	workload := WorkloadOf(ev.ProcessPath, ev.CommandLine)
 	vouched := vouchedWorkload(ev.ProcessPath, ev.CommandLine, ev.AttributionStatus)
-	_, isKnownConversation := cfg.KnownWorkloadFor(vouched, geo.ASN, geo.Org, geo.Tenancy)
-	_, isKnownService := cfg.KnownService(vouched, geo.Org, geo.Tenancy)
+	expect := expectedFor(cfg, expectCtx(ev, geo, endpoint, role, quietPath, vouched))
 
-	// Agent runtimes are judged against their own baselines, not excluded.
-	e.checkAgentEgress(ev, geo, endpoint, cfg, procName, isInteractiveShell, warming, now)
+	// Agent runtimes are judged against their own baselines.
+	e.checkAgentEgress(ev, geo, endpoint, cfg, procName, isInteractiveShell, warming, expect, now)
 
 	// Off-hours activity triggers ONLY for interactive shells / script
 	// interpreters, NEVER for standard OS system daemons.
@@ -579,7 +557,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// Cut on agent and lab hosts: agents work around the clock and lab guests
 	// run when an experiment does, so the hour says nothing there.
 	offHoursMeaningful := role != storage.RoleAgent && role != storage.RoleLab
-	if offHoursMeaningful && roleIsWorkstation && isOffHours && isInteractiveShell && !isTrustedSys && !isKnownService && !warming &&
+	if offHoursMeaningful && roleIsWorkstation && isOffHours && isInteractiveShell && !expect(storage.KindOffHours) && !warming &&
 		ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
 		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, strings.ToLower(workload), counterpartyKey(geo))
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
@@ -649,8 +627,11 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	if maxRate := float64(cfg.MaxPlausibleRateMbps) * 125000; measuredRate && rateEligible && bwValue > maxRate {
 		rateEligible = false
 	}
-	if rateEligible && ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !isTrustedSys &&
-		!runtimeToOwnVendor(cfg, ev, geo) {
+	// Both bandwidth kinds expected is the old "quiet process" and "own
+	// maker" answer: the flow is not even sampled. One of them expected still
+	// samples it, and only the finding it does not cover can be raised.
+	spikeExpected, burstExpected := expect(storage.KindBandwidthSpike), expect(storage.KindBandwidthBurst)
+	if rateEligible && ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !(spikeExpected && burstExpected) {
 		bwKey := fmt.Sprintf("%q:%q:%d:%q", ev.EndpointID, cleanPath, ev.Protocol, ev.Observation.ByteBasis)
 		e.mu.Lock()
 		stats := e.bwTracker.get(bwKey, func() *bandwidthStats { return &bandwidthStats{} })
@@ -665,17 +646,17 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		// and nothing about that is exfiltration. An operator who has vouched
 		// for a network has already answered this question, and a megabyte is
 		// the smallest transfer worth waking someone for.
-		outlier := cfg.BandwidthOn && baselined && zScore > bandwidthOutlierZ && bwValue > bandwidthOutlierBytes && !isVouched
+		outlier := cfg.BandwidthOn && baselined && zScore > bandwidthOutlierZ && bwValue > bandwidthOutlierBytes && !spikeExpected
 		// A burst large enough to matter on its own account, reported even
 		// without a baseline - but as the weaker finding it is, because with no
 		// baseline there is nothing to say it is unusual for this process. It
 		// is part of the floor, so bandwidth_enabled does not switch it off.
-		// Unlike the sweeps, it still yields to a quiet process and an
-		// exclusion: svchost.exe reported exfiltration spikes before the quiet
-		// list gated this detector (Windows Update and Delivery Optimization
+		// Unlike the sweeps, it still yields to an expected rule that
+		// names it: svchost.exe reported exfiltration spikes before the rules
+		// gated this detector (Windows Update and Delivery Optimization
 		// upload to the internet in tens of megabytes), and a backup job is
-		// what an exclusion for a program and its storage service is for.
-		burst := bwValue > bandwidthBurstBytes
+		// what a rule for a program and its storage service is for.
+		burst := bwValue > bandwidthBurstBytes && !burstExpected
 		if outlier || burst {
 			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
 			// The severity follows the evidence rather than the detector's
@@ -739,7 +720,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// the quiet lists say, at a volume high enough that ordinary document work
 	// does not reach it.
 	if cfg.BandwidthOn && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		ev.BytesOut >= cloudStorageEgressBytes && isCloudStorageDestination(geo, ev) {
+		ev.BytesOut >= cloudStorageEgressBytes && isCloudStorageDestination(geo, ev) && !expect(storage.KindCloudStorage) {
 		alertKey := fmt.Sprintf("storageegress:%s:%s:%s", ev.EndpointID, procName, strings.ToLower(geo.Org))
 		if !warming && !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BandwidthCooldown)*time.Minute) {
 			title := fmt.Sprintf("Bulk upload to cloud storage (%s)", describeStorageService(geo, ev))
@@ -796,8 +777,6 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// Rented compute is the exception to the exception: a browser extension or
 	// an injected page calling home to a rented machine is the beacon this
 	// detector is for, and "the browser" was only ever a program name.
-	browserToKnownNetwork := cfg.IsQuietClient(quietPath, ev.ExecutableSHA256) && geo.Resolved() &&
-		geo.Tenancy != threatintel.TenancyHosting
 	// A collection cadence is not a packet cadence. Keep legacy behavior for
 	// older agents, but require one intact socket-I/O observation from new ones.
 	cadenceUsable := ev.Observation.Source == "" ||
@@ -816,7 +795,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	}
 
 	if cfg.BeaconOn && cadenceUsable && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedSys && !isVouched && !browserToKnownNetwork {
+		!expect(storage.KindBeacon) {
 		e.mu.Lock()
 		bWin := e.beaconTracker.get(beaconKey, func() *beaconWindow { return &beaconWindow{} })
 		bev, isBeacon := bWin.record(now, ev.BytesOut, ev.BytesIn+ev.BytesOut, cfg)
@@ -904,7 +883,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 		firstSeen = e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP)
 	}
 	if cfg.FirstSeenOn && !warming && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedDst && !isTrustedSys && !isKnownConversation && firstSeen {
+		!expect(storage.KindNovelDestination) && firstSeen {
 		// Keyed on the network owner, not the address. A destination is
 		// first-seen exactly once, so a per-address key could never repeat and
 		// the cooldown never suppressed anything - which is how this detector
@@ -974,7 +953,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// first-seen period, and takes its severity from what is actually known
 	// about the destination.
 	if isInteractiveShell && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!isTrustedSys && !isVouched && !isKnownConversation && !warming {
+		!expect(storage.KindNovelProcess) && !warming {
 		alertKey := fmt.Sprintf("shell:%s:%s:%s", ev.EndpointID, strings.ToLower(procName), counterpartyKey(geo))
 		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
 			// Rented compute and unnamed networks are where an interpreter
@@ -1024,7 +1003,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 }
 
 // checkSensitivePort raises the sensitive-port floor: SMB, RDP, telnet or RPC
-// leaving the network. It runs before exclusions, so none can hide it.
+// leaving the network. It runs before expected rules, so none can hide it.
 func (e *Engine) checkSensitivePort(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, now time.Time) {
 	if ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) && FloorPort(int(ev.DstPort)) {
 		alertKey := fmt.Sprintf("sensport:%s:%d", ev.EndpointID, ev.DstPort)
@@ -1410,7 +1389,7 @@ func (e *Engine) ObservationCoverage() map[string]any {
 }
 
 // checkSweeps runs the port-sweep and lateral-sweep floor rules. They run
-// before the exclusions and do not consult the quiet-process list: both are
+// before the expected rules and do not consult them: they are
 // operator data, and a sweep is how an intruder maps and moves, whatever the
 // program's path says. Only the installed infrastructure in code (a container
 // runtime, a local resolver, run as its own account) is exempt.
@@ -1537,7 +1516,7 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 
 		routine, why := false, ""
 		if distinctTargets >= threshold {
-			routine, why = adminFanout(cfg, endpoint, procKey, window, func(ip string) bool { return e.inventoried(ev.TenantID, ip) })
+			routine, why = adminFanout(cfg, endpoint, expectCtx(ev, geo, endpoint, e.classContext().RoleOf(endpoint), quietPath, ""), window, func(ip string) bool { return e.inventoried(ev.TenantID, ip) })
 			if routine {
 				e.alertf("[i] lateral sweep not raised on %s (%s): routine administration, %s", ev.EndpointID, procKey, why)
 			}

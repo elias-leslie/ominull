@@ -23,6 +23,11 @@ func auditCounts(t *testing.T, store *storage.Store) map[string]int {
 	return out
 }
 
+func auditCount(t *testing.T, store *storage.Store, action string) int {
+	t.Helper()
+	return auditCounts(t, store)[action]
+}
+
 // A former ask path: the isolation is signed by the authority and runs on the
 // first request. Nothing answers 202, nothing is left pending, and the audit
 // says authorized, not "approval requested".
