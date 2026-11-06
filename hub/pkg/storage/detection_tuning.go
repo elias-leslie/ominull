@@ -1310,15 +1310,23 @@ func (t DetectionTuning) IsVouchedPair(path, sha, asn, org, tenancy string) bool
 		return false
 	}
 
-	// An explicit pair is the operator naming this exact conversation.
+	return t.IsExpectedPair(path, sha, asn, org, tenancy) || (t.IsQuietOrg(asn, tenancy) && t.IsQuietClient(path, sha))
+}
+
+// IsExpectedPair is the narrowest vouching: an explicit pair, the operator
+// naming this exact program talking to this exact network as its job (rclone
+// to Google for the Drive backup). Rented compute is never covered.
+func (t DetectionTuning) IsExpectedPair(path, sha, asn, org, tenancy string) bool {
+	if strings.TrimSpace(tenancy) == TenancyHosting {
+		return false
+	}
 	for _, entry := range t.QuietPairs {
 		proc, owner, ok := splitPair(entry)
 		if ok && MatchesQuietPath(proc, path, sha) && OwnerMatches(owner, asn, org) {
 			return true
 		}
 	}
-
-	return t.IsQuietOrg(asn, tenancy) && t.IsQuietClient(path, sha)
+	return false
 }
 
 // KnownWorkload is one program whose outbound conversations are its job.

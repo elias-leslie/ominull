@@ -420,7 +420,7 @@ type AgentRuntimeVendor struct {
 // from, so codex has none.
 func defaultAgentRuntimeVendors() []AgentRuntimeVendor {
 	return []AgentRuntimeVendor{
-		{Runtime: "claude", Vendor: "Anthropic", Domains: []string{"anthropic.com", "claude.ai", "claude.com"},
+		{Runtime: "claude", Vendor: "Anthropic", Domains: []string{"anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com"},
 			Prefixes: []string{"160.79.104.0/23", "2607:6bc0::/48"}},
 		{Runtime: "codex", Vendor: "OpenAI", Domains: []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}},
 	}

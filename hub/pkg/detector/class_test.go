@@ -257,6 +257,36 @@ func TestABulkUploadToANewPlacePages(t *testing.T) {
 	}
 }
 
+// A known destination by role is not a new place whatever its borrowed name
+// reads: the offsite backup's rclone paired with Google, and Claude Code
+// sending to its maker's published range under another Anthropic domain. An
+// unpaired program to the same Google address still pages.
+func TestNewPlaceUploadSkipsKnownDestinationsByRole(t *testing.T) {
+	engine, store := noiseEngine(t)
+	cfg := store.GetDetectionTuning()
+	cfg.QuietPairs = []string{"/usr/local/bin/rclone@as15169"}
+	if _, err := store.SaveDetectionTuning(cfg, "test"); err != nil {
+		t.Fatal(err)
+	}
+	engine.tuningAt = time.Time{}
+	start := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	engine.Evaluate(agentEvent("lap", "/usr/bin/curl", "known.example", "203.0.113.10", 443, 2000, start))
+	now := time.Now().UTC().Add(-time.Hour)
+	rclone := "/usr/local/bin/rclone"
+	engine.Evaluate(agentEvent("lap", rclone, "firebaseremoteconfig.googleapis.com", "172.217.118.4", 443, 0, now))
+	engine.Evaluate(agentEvent("lap", rclone, "firebaseremoteconfig.googleapis.com", "172.217.118.4", 443, 32<<20, now.Add(time.Minute)))
+	engine.Evaluate(agentEvent("lap", claudePath, "claudeusercontent.com", "160.79.104.10", 443, 0, now))
+	engine.Evaluate(agentEvent("lap", claudePath, "claudeusercontent.com", "160.79.104.10", 443, 2<<20, now.Add(time.Minute)))
+	if got := anomaliesOfType(t, store, "NEW_PLACE_UPLOAD"); len(got) != 0 {
+		t.Fatalf("known destinations by role raised %d new-place uploads: %+v", len(got), got)
+	}
+	engine.Evaluate(agentEvent("lap", "/usr/bin/curl", "storage.googleapis.com", "172.217.118.5", 443, 0, now))
+	engine.Evaluate(agentEvent("lap", "/usr/bin/curl", "storage.googleapis.com", "172.217.118.5", 443, 2<<20, now.Add(time.Minute)))
+	if got := anomaliesOfType(t, store, "NEW_PLACE_UPLOAD"); len(got) != 1 {
+		t.Fatalf("an unpaired upload to a new Google host should page once, got %d", len(got))
+	}
+}
+
 // A port scan of the host's own loopback, or replies from a server's port to
 // many client ports, is not a scan.
 func TestPortScanSkipsLoopbackAndReplies(t *testing.T) {

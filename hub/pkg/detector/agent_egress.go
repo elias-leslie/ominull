@@ -361,7 +361,8 @@ func uploadEvidence(dest string, sent int64, first time.Time) string {
 // the communication profiles. Runtime flows feed the memory but are judged
 // by AGENT_NEW_DESTINATION; the sensor's own traffic is left out. It runs
 // before the exclusions: an exclusion is an answer about a destination the
-// operator knows, and this rule is about one nobody has seen.
+// operator knows, and this rule is about one nobody has seen. Only an
+// explicit program@network pair or a runtime's own maker counts as seen.
 func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
 	quietPath string, now time.Time) {
 	if ev.Direction != "OUTBOUND" || isPrivateIP(ev.DstIP) || isSensorProcess(quietPath) {
@@ -375,6 +376,17 @@ func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endp
 	seen, err := e.store.ObserveAgentDestination(ev.TenantID, ev.EndpointID, storage.DeviceDestinations, dest, sent, now)
 	if err != nil {
 		log.Printf("[-] device destination write failed for %s: %v", ev.EndpointID, err)
+		return
+	}
+	// A known destination by role is not a new place, however its name reads:
+	// an agent runtime talking to its maker's published range (judged by its
+	// hourly volume, AGENT_UPLOAD_VOLUME), or a program the operator paired
+	// with this network as its job (rclone to Google for the Drive backup). On
+	// a shared front end the name is whatever any client last resolved there,
+	// and under a private public suffix (x.googleapis.com) every API host is a
+	// registrable domain of its own, so the name alone keeps reading the same
+	// conversation as a new place. Neither covers rented compute.
+	if runtimeToOwnVendor(cfg, ev) || cfg.IsExpectedPair(quietPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy) {
 		return
 	}
 	// Agent runtimes are judged here too: their own first-contact upload
