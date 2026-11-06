@@ -206,3 +206,23 @@ func TestTheDrillCoversScopedRules(t *testing.T) {
 		t.Fatalf("drill with scoped rules missed %q", rec.Missed)
 	}
 }
+
+// A rule that lets a shell-like program (ssh) fan out to inventoried hosts on
+// port 22 is drilled like any other: the program trips the lateral sweep at its
+// lower host count, so the first sweep is recorded rather than paged, and the
+// case only has to raise. The migrated admin ssh rules missed the live drill
+// because the case demanded a page.
+func TestTheDrillAcceptsARecordedSweepFromAnInterpreterRule(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	tu := store.GetDetectionTuning()
+	tu.ExpectedRules = append(tu.ExpectedRules, storage.ExpectedRule{ID: "admin-ssh-ws", Reason: "test", Findings: []string{storage.KindLateralSweep},
+		Hosts: []string{"ws"}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}, {Path: "c:/windows/system32/openssh/ssh.exe"}}, Port: 22, MaxHosts: 8})
+	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if rec := srv.runFloorDrill(time.Now().UTC()); len(rec.Missed) != 0 {
+		t.Fatalf("drill with an admin ssh rule missed %q", rec.Missed)
+	}
+}

@@ -416,7 +416,13 @@ func drillPinhole(ph pinhole, ep storage.Endpoint, lan func(int) string, tuning 
 		for i, host := range to {
 			fanout = append(fanout, flow(path("fanout"), host, port, 60, time.Duration(i)*time.Second))
 		}
-		cases = add(cases, DrillCase{Rule: "lateral sweep", Want: "LATERAL_PORT_SWEEP"}, fanout)
+		lateral := DrillCase{Rule: "lateral sweep", Want: "LATERAL_PORT_SWEEP"}
+		// A sweep on a port outside the floor list (a rule for ssh on 22) is
+		// recorded, not paged; the case still has to raise.
+		if ph.port != 0 && !FloorPort(int(ph.port)) {
+			lateral.WantClass = storage.ClassRecord
+		}
+		cases = add(cases, lateral, fanout)
 	}
 	// The resolver bypass is judged for agent runtimes and interpreters only.
 	resolver := ph.path
