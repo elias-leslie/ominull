@@ -14,7 +14,8 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - M8: Tripwires: canary credentials, decoy addresses, bad-domain matching on stored DNS (plan: docs/audit-2026-11-06.md)
 - M9: Monthly live drill that proves a page reaches the phone (plan: docs/audit-2026-11-06.md)
 - M4, M7: Agent release with one key, Linux updates through Aico fleet; drop dead routes, page budget and extra keys (plan: docs/audit-2026-11-06.md)
-- M6, M10-M12: Response authority, remote-admin kept everywhere (owner: don't delete; tidy only), console trim, Go Linux agent: after the owner's decisions (plan: docs/audit-2026-11-06.md)
+- M6: Fold the response authority into the hub (owner approved 2026-11-06), after M1 (plan: docs/audit-2026-11-06.md)
+- M10-M12: Remote-admin kept everywhere (tidy only), console trim, Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
 - Console: overhaul the Traffic page once Topology is verified
 - Rust static library for hub-input parsing and signature verification (C ABI, both platforms) after the grant fix
 - Trust fabric: IP and CIDR rules enforced end to end, including older agents that refuse ranges (plan: docs/TRUST_FABRIC.md)
