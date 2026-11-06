@@ -259,8 +259,14 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 			for _, d := range v.Domains {
 				out = append(out, v.Runtime+":"+d)
 			}
+			for _, d := range v.ExcludeDomains {
+				out = append(out, v.Runtime+":not "+d)
+			}
 			for _, p := range v.Prefixes {
 				out = append(out, v.Runtime+":"+p)
+			}
+			for _, n := range v.Networks {
+				out = append(out, v.Runtime+":"+n)
 			}
 		}
 		return out

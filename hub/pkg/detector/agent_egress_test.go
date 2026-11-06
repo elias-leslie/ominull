@@ -337,20 +337,24 @@ func TestARuntimeVendorRangeComesFromThePolicy(t *testing.T) {
 	ev := storage.Event{TenantID: "default", EndpointID: "linux-ws", Action: "PERMIT", Direction: "OUTBOUND",
 		DstIP: "198.51.100.9", DstPort: 443, Domain: "api.anthropic.com", ProcessPath: claude}
 	cfg := storage.DefaultDetectionTuning()
-	if runtimeToOwnVendor(cfg, ev) {
+	if runtimeToOwnVendor(cfg, ev, threatintel.GeoRecord{}) {
 		t.Fatal("an address outside the shipped ranges counted as Anthropic's")
 	}
-	cfg.AgentRuntimeVendors[0].Prefixes = append(cfg.AgentRuntimeVendors[0].Prefixes, "198.51.100.0/24")
+	for i := range cfg.AgentRuntimeVendors {
+		if cfg.AgentRuntimeVendors[i].Runtime == "claude" {
+			cfg.AgentRuntimeVendors[i].Prefixes = append(cfg.AgentRuntimeVendors[i].Prefixes, "198.51.100.0/24")
+		}
+	}
 	cfg, err := storage.PrepareDetectionTuning(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !runtimeToOwnVendor(cfg, ev) {
+	if !runtimeToOwnVendor(cfg, ev, threatintel.GeoRecord{}) {
 		t.Fatal("a range added to the policy was not honoured")
 	}
 	cfg.AgentRuntimeVendors = nil
 	ev.DstIP = "160.79.104.10"
-	if runtimeToOwnVendor(cfg, ev) {
+	if runtimeToOwnVendor(cfg, ev, threatintel.GeoRecord{}) {
 		t.Fatal("a maker removed from the policy still exempted its flows")
 	}
 }

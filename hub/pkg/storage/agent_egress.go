@@ -402,27 +402,46 @@ func tidyAgentRuntimes(in []AgentRuntime) []AgentRuntime {
 
 // AgentRuntimeVendor names an agent runtime's maker and the maker's own
 // service: a runtime talking to its maker is the runtime working, not a new
-// sink. Domains are the maker's service domains (a name under one matches).
-// Prefixes are the addresses the maker publishes for that service, and only
-// there does the name prove anything: the SNI is whatever the client sent and
-// the domain whatever any client last resolved to the address. A maker whose
-// service sits behind a shared CDN gets no prefixes.
+// sink. Domains are the maker's service domains (a name under one matches);
+// ExcludeDomains are names under them that are not the maker's service but
+// anyone's (Google Cloud Storage serves every customer's buckets under
+// googleapis.com), and a name under one of those never matches. Prefixes are
+// the addresses the maker publishes for that service, and only there does the
+// name prove anything: the SNI is whatever the client sent and the domain
+// whatever any client last resolved to the address. Networks name the maker's
+// AS numbers for a maker whose published service ranges are too many and
+// change too often to copy (Google's goog.json less cloud.json): an address
+// counts when the hub's own network attribution, refreshed from those
+// published feeds, places it in that AS as the maker's own service, never as
+// its rented compute or a shared CDN. A maker whose service sits behind a
+// shared CDN gets neither.
 type AgentRuntimeVendor struct {
-	Runtime  string   `json:"runtime"`
-	Vendor   string   `json:"vendor"`
-	Domains  []string `json:"domains"`
-	Prefixes []string `json:"prefixes"`
+	Runtime        string   `json:"runtime"`
+	Vendor         string   `json:"vendor"`
+	Domains        []string `json:"domains"`
+	ExcludeDomains []string `json:"exclude_domains"`
+	Prefixes       []string `json:"prefixes"`
+	Networks       []string `json:"networks"`
 }
 
 // defaultAgentRuntimeVendors: Anthropic's prefixes are from
 // platform.claude.com/docs/en/api/ip-addresses (inbound, checked 2026-10-16).
 // OpenAI's API sits behind Cloudflare, an address any site can be fronted
-// from, so codex has none.
+// from, so codex has none. Antigravity (agy) talks to Google's API hosts
+// (oauth2, oauthaccountmanager, generativelanguage, play and other
+// *.googleapis.com names seen from it on the hub, 2026-10-20..11-06); its
+// network is AS15169 as attributed from goog.json less cloud.json. Cloud
+// Storage and Firebase Storage hosts are excluded: anyone's buckets live there.
 func defaultAgentRuntimeVendors() []AgentRuntimeVendor {
 	return []AgentRuntimeVendor{
 		{Runtime: "claude", Vendor: "Anthropic", Domains: []string{"anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com"},
 			Prefixes: []string{"160.79.104.0/23", "2607:6bc0::/48"}},
 		{Runtime: "codex", Vendor: "OpenAI", Domains: []string{"openai.com", "chatgpt.com", "oaiusercontent.com", "oaistatic.com"}},
+		{Runtime: "antigravity", Vendor: "Google", Domains: []string{"googleapis.com"},
+			ExcludeDomains: []string{"storage.googleapis.com", "storage-download.googleapis.com", "storage-upload.googleapis.com",
+				"content-storage-download.googleapis.com", "content-storage-upload.googleapis.com", "storage.mtls.googleapis.com",
+				"firebasestorage.googleapis.com"},
+			Networks: []string{"as15169"}},
 	}
 }
 
@@ -441,23 +460,70 @@ func tidyAgentRuntimeVendors(in []AgentRuntimeVendor) []AgentRuntimeVendor {
 		if v.Runtime == "" {
 			continue
 		}
-		domains := make([]string, 0, len(v.Domains))
-		for _, d := range v.Domains {
-			domains = append(domains, strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), "."))
-		}
-		v.Domains = tidyList(domains)
+		v.Domains = tidyDomains(v.Domains)
+		v.ExcludeDomains = tidyDomains(v.ExcludeDomains)
 		v.Prefixes = tidyList(v.Prefixes)
+		networks := make([]string, 0, len(v.Networks))
+		for _, n := range v.Networks {
+			networks = append(networks, strings.ToLower(strings.TrimSpace(n)))
+		}
+		v.Networks = tidyList(networks)
 		out = append(out, v)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Runtime < out[j].Runtime })
 	return out
 }
 
+func tidyDomains(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		out = append(out, strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), "."))
+	}
+	return tidyList(out)
+}
+
+// validVendorDomain refuses what is not a plain domain name, or is a public
+// suffix: every site under it shares it. A suffix in the private section of
+// the list (googleapis.com, github.io) passes only for an entry anchored to
+// the maker's own addresses (prefixes or networks), so the name counts only
+// where the maker serves it; the hosts under it that serve anyone's content
+// (Cloud Storage buckets) are then named in exclude_domains. An ICANN suffix
+// (com, co.uk) never passes.
+func validVendorDomain(d string, anchored bool) error {
+	if d == "" || strings.ContainsAny(d, " /*:@") || !strings.Contains(d, ".") {
+		return fmt.Errorf("%w: agent runtime vendor domain %q must be a plain domain name such as anthropic.com", ErrInvalidDetectionTuning, d)
+	}
+	suffix, icann := publicsuffix.PublicSuffix(d)
+	if d == suffix && (icann || !anchored) {
+		return fmt.Errorf("%w: agent runtime vendor domain %q is a public suffix, which every site under it shares", ErrInvalidDetectionTuning, d)
+	}
+	if reg, err := publicsuffix.EffectiveTLDPlusOne(d); err == nil && !(d == reg || strings.HasSuffix(d, "."+reg)) {
+		return fmt.Errorf("%w: agent runtime vendor domain %q is a public suffix, which every site under it shares", ErrInvalidDetectionTuning, d)
+	}
+	return nil
+}
+
+// VendorNames reports a name under one of the vendor's domains, whether or
+// not it is excluded.
+func VendorNames(v AgentRuntimeVendor, name string) bool {
+	for _, d := range v.Domains {
+		if underDomain(name, d) {
+			return true
+		}
+	}
+	return false
+}
+
+func underDomain(name, domain string) bool {
+	return name == domain || strings.HasSuffix(name, "."+domain)
+}
+
 // validAgentRuntimeVendors masks each vendor prefix and refuses a vendor
 // entry that would vouch for more than one maker's service: a runtime named
 // twice, a domain that is a public suffix (every tenant under it would
-// match), or a prefix that is malformed, private or wider than a /16 (IPv4)
-// or /32 (IPv6).
+// match; see validVendorDomain), an excluded domain outside the maker's
+// domains, a network that is not an AS number, or a prefix that is
+// malformed, private or wider than a /16 (IPv4) or /32 (IPv6).
 func validAgentRuntimeVendors(in []AgentRuntimeVendor) ([]AgentRuntimeVendor, error) {
 	seen := map[string]bool{}
 	for i, v := range in {
@@ -469,11 +535,21 @@ func validAgentRuntimeVendors(in []AgentRuntimeVendor) ([]AgentRuntimeVendor, er
 			return in, fmt.Errorf("%w: agent runtime vendor for %q needs the vendor's name", ErrInvalidDetectionTuning, v.Runtime)
 		}
 		for _, d := range v.Domains {
-			if d == "" || strings.ContainsAny(d, " /*:@") || !strings.Contains(d, ".") {
-				return in, fmt.Errorf("%w: agent runtime vendor domain %q must be a plain domain name such as anthropic.com", ErrInvalidDetectionTuning, d)
+			if err := validVendorDomain(d, len(v.Prefixes) > 0 || len(v.Networks) > 0); err != nil {
+				return in, err
 			}
-			if reg, err := publicsuffix.EffectiveTLDPlusOne(d); err != nil || !(d == reg || strings.HasSuffix(d, "."+reg)) {
-				return in, fmt.Errorf("%w: agent runtime vendor domain %q is a public suffix, which every site under it shares", ErrInvalidDetectionTuning, d)
+		}
+		for _, d := range v.ExcludeDomains {
+			if d == "" || strings.ContainsAny(d, " /*:@") || !strings.Contains(d, ".") {
+				return in, fmt.Errorf("%w: agent runtime vendor excluded domain %q must be a plain domain name such as storage.googleapis.com", ErrInvalidDetectionTuning, d)
+			}
+			if !VendorNames(v, d) {
+				return in, fmt.Errorf("%w: agent runtime vendor excluded domain %q is not under any of %s's domains", ErrInvalidDetectionTuning, d, v.Vendor)
+			}
+		}
+		for _, n := range v.Networks {
+			if !IsASN(n) {
+				return in, fmt.Errorf("%w: agent runtime vendor network %q must be an AS number such as as15169", ErrInvalidDetectionTuning, n)
 			}
 		}
 		prefixes := make([]string, 0, len(v.Prefixes))
@@ -520,12 +596,36 @@ func (t DetectionTuning) RuntimeVendor(runtime, name string) string {
 	if !ok || name == "" {
 		return ""
 	}
+	for _, d := range v.ExcludeDomains {
+		if underDomain(name, d) {
+			return ""
+		}
+	}
 	for _, d := range v.Domains {
-		if name == d || strings.HasSuffix(name, "."+d) {
+		if underDomain(name, d) {
 			return v.Vendor
 		}
 	}
 	return ""
+}
+
+// InRuntimeVendorNetwork reports an address the hub's network attribution
+// places in one of the runtime's maker's networks as the maker's own service
+// (tenancy vendor): not its rented compute, not a shared CDN. Only a
+// published feed's attribution counts (source): the hub's built-in fallback
+// table is coarse and lumps a maker's rented compute in with its service.
+func (t DetectionTuning) InRuntimeVendorNetwork(runtime, asn, tenancy, source string) bool {
+	v, ok := t.runtimeVendor(runtime)
+	source = strings.TrimSpace(source)
+	if !ok || strings.TrimSpace(tenancy) != TenancyVendor || source == "" || source == "built-in" {
+		return false
+	}
+	for _, n := range v.Networks {
+		if strings.EqualFold(n, strings.TrimSpace(asn)) {
+			return true
+		}
+	}
+	return false
 }
 
 // InRuntimeVendorRange reports an address inside the ranges the runtime's

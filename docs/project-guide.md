@@ -411,13 +411,24 @@ learn silently again. Registrable domains follow the whole public suffix list,
 so each tenant of a shared host (`x.a.run.app`) is its own destination. Tools
 an agent spawns are judged as themselves: the hub sees a parent's instance id,
 not its executable. Each runtime's maker is policy too:
-`agent_runtime_vendors` holds `runtime`, `vendor`, `domains` and `prefixes`
-(the maker's published service ranges, no wider than /16 or /32, never on a
-shared CDN or rented compute). A runtime's flow to its maker's domain inside
-those ranges skips the per-connection bandwidth baseline (its hourly upload
-volume still judges it), and the maker's domain is named as the probable cause
-of a new destination. Adding a domain or prefix loosens (authorized and audited);
-removing one tightens.
+`agent_runtime_vendors` holds `runtime`, `vendor`, `domains`,
+`exclude_domains`, `prefixes` and `networks`. Prefixes are the maker's
+published service ranges (no wider than /16 or /32, never on a shared CDN or
+rented compute). Networks are the maker's AS numbers for a maker whose
+published ranges are too many to copy: an address counts when the hub's
+attribution, from the maker's own published feed (not the built-in table),
+places it in that AS as the maker's service, so Google's counts as goog.json
+less cloud.json. Excluded domains are hosts under the maker's domains that
+serve anyone's content (Cloud Storage and Firebase Storage under
+`googleapis.com`) and never count as the maker. A domain that is a private
+public suffix (`googleapis.com`) is accepted only on an entry with prefixes or
+networks. Antigravity (`agy`) ships with Google: `googleapis.com` less the
+storage hosts, on AS15169. A runtime's flow to its maker's domain inside those
+ranges or networks skips the per-connection bandwidth baseline (its hourly
+upload volume still judges it) and the new-place upload rule, and the maker's
+domain is named as the probable cause of a new destination. Adding a domain,
+prefix or network, or taking an exclusion away, loosens (authorized and
+audited); the reverse tightens.
 
 Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses

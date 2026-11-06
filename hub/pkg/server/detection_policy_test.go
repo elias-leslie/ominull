@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -123,22 +124,36 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		{"agent runtime removed", func(t *storage.DetectionTuning) { t.AgentRuntimes = t.AgentRuntimes[1:] }, []string{"agent_runtimes"}},
 		{"agent-heavy by observation", func(t *storage.DetectionTuning) { t.AgentHeavyObserved = !t.AgentHeavyObserved }, nil},
 		{"vendor prefix added", func(t *storage.DetectionTuning) {
-			t.AgentRuntimeVendors[0].Prefixes = append(t.AgentRuntimeVendors[0].Prefixes, "198.51.100.0/24")
+			t.AgentRuntimeVendors[1].Prefixes = append(t.AgentRuntimeVendors[1].Prefixes, "198.51.100.0/24")
 		}, []string{"agent_runtime_vendors"}},
 		{"vendor domain added", func(t *storage.DetectionTuning) {
-			t.AgentRuntimeVendors[1].Domains = append(t.AgentRuntimeVendors[1].Domains, "example.com")
+			t.AgentRuntimeVendors[2].Domains = append(t.AgentRuntimeVendors[2].Domains, "example.com")
 		}, []string{"agent_runtime_vendors"}},
 		{"vendor for a new runtime", func(t *storage.DetectionTuning) {
 			t.AgentRuntimeVendors = append(t.AgentRuntimeVendors, storage.AgentRuntimeVendor{Runtime: "ollama", Vendor: "Ollama", Domains: []string{"ollama.com"}})
 		}, []string{"agent_runtime_vendors"}},
-		{"vendor renamed", func(t *storage.DetectionTuning) { t.AgentRuntimeVendors[0].Vendor = "Someone" }, []string{"agent_runtime_vendors"}},
+		{"vendor renamed", func(t *storage.DetectionTuning) { t.AgentRuntimeVendors[1].Vendor = "Someone" }, []string{"agent_runtime_vendors"}},
 		{"vendor prefix removed", func(t *storage.DetectionTuning) {
-			t.AgentRuntimeVendors[0].Prefixes = t.AgentRuntimeVendors[0].Prefixes[1:]
+			t.AgentRuntimeVendors[1].Prefixes = t.AgentRuntimeVendors[1].Prefixes[1:]
 		}, nil},
 		{"vendor domain removed", func(t *storage.DetectionTuning) {
-			t.AgentRuntimeVendors[1].Domains = t.AgentRuntimeVendors[1].Domains[1:]
+			t.AgentRuntimeVendors[2].Domains = t.AgentRuntimeVendors[2].Domains[1:]
 		}, nil},
 		{"vendor removed", func(t *storage.DetectionTuning) { t.AgentRuntimeVendors = t.AgentRuntimeVendors[1:] }, nil},
+		// [0] is antigravity (Google): a network vouches like a prefix, and
+		// an excluded host taken away vouches for it again.
+		{"vendor network added", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[0].Networks = append(t.AgentRuntimeVendors[0].Networks, "as396982")
+		}, []string{"agent_runtime_vendors"}},
+		{"vendor network removed with its domain", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[0].Networks, t.AgentRuntimeVendors[0].Domains, t.AgentRuntimeVendors[0].ExcludeDomains = nil, nil, nil
+		}, nil},
+		{"vendor exclusion removed", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[0].ExcludeDomains = t.AgentRuntimeVendors[0].ExcludeDomains[1:]
+		}, []string{"agent_runtime_vendors"}},
+		{"vendor exclusion added", func(t *storage.DetectionTuning) {
+			t.AgentRuntimeVendors[0].ExcludeDomains = append(t.AgentRuntimeVendors[0].ExcludeDomains, "www.googleapis.com")
+		}, nil},
 		{"wider window", func(t *storage.DetectionTuning) { t.OffHoursStart = 21 }, nil},
 		{"shorter window", func(t *storage.DetectionTuning) { t.OffHoursStart = 23 }, []string{"off_hours_window"}},
 		{"moved window", func(t *storage.DetectionTuning) { t.OffHoursStart, t.OffHoursEnd = 23, 6 }, []string{"off_hours_window"}},
@@ -156,6 +171,8 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		for _, v := range base.AgentRuntimeVendors {
 			v.Domains = append([]string(nil), v.Domains...)
 			v.Prefixes = append([]string(nil), v.Prefixes...)
+			v.ExcludeDomains = append([]string(nil), v.ExcludeDomains...)
+			v.Networks = append([]string(nil), v.Networks...)
 			after.AgentRuntimeVendors = append(after.AgentRuntimeVendors, v)
 		}
 		c.change(&after)
@@ -762,9 +779,10 @@ func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
 		return policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), "")
 	}
 	shipped := storage.DefaultDetectionTuning().AgentRuntimeVendors
+	claude := slices.IndexFunc(shipped, func(v storage.AgentRuntimeVendor) bool { return v.Runtime == "claude" })
 	for name, prefix := range map[string]string{"cloudflare": "104.16.0.0/16", "malformed": "160.79.104/23", "over-broad": "160.0.0.0/8"} {
 		v := append([]storage.AgentRuntimeVendor(nil), shipped...)
-		v[0].Prefixes = []string{prefix}
+		v[claude].Prefixes = []string{prefix}
 		if w := post(v); w.Code != http.StatusBadRequest {
 			t.Fatalf("%s prefix %s = %d %s, want 400", name, prefix, w.Code, w.Body.String())
 		}
@@ -773,7 +791,7 @@ func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
 		t.Fatalf("a refused range reached the authority: %d rows", n)
 	}
 	v := append([]storage.AgentRuntimeVendor(nil), shipped...)
-	v[0].Prefixes = []string{"160.79.104.0/23", "198.51.100.0/24"}
+	v[claude].Prefixes = []string{"160.79.104.0/23", "198.51.100.0/24"}
 	a := mustSign(t, store, post(v), http.StatusOK)
 	if strings.Join(a.Loosens, ",") != "agent_runtime_vendors" {
 		t.Fatalf("loosens %v", a.Loosens)

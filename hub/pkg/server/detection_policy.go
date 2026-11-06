@@ -442,15 +442,16 @@ func setOf(list []string) map[string]bool {
 }
 
 // vendorsLoosen reports agent runtime vendors that vouch for more than
-// before: a runtime's maker renamed, or a service domain or published prefix
-// it did not have. Each one exempts flows to it from the per-connection
-// bandwidth baseline, so only removing entries tightens.
+// before: a runtime's maker renamed, or a service domain, published prefix or
+// network it did not have, or an excluded domain taken away. Each one exempts
+// flows to it from the per-connection bandwidth baseline and the new-place
+// upload rule, so only removing vouching entries (or excluding more) tightens.
 func vendorsLoosen(before, after any) bool {
 	was := vendorByRuntime(vendorList(before))
 	for _, v := range vendorList(after) {
 		old, ok := was[v.Runtime]
 		if !ok {
-			if len(v.Domains) > 0 || len(v.Prefixes) > 0 {
+			if len(v.Domains) > 0 || len(v.Prefixes) > 0 || len(v.Networks) > 0 {
 				return true
 			}
 			continue
@@ -458,14 +459,19 @@ func vendorsLoosen(before, after any) bool {
 		if v.Vendor != old.Vendor && len(v.Domains) > 0 {
 			return true
 		}
-		domains, prefixes := setOf(old.Domains), setOf(old.Prefixes)
-		for _, d := range v.Domains {
-			if !domains[d] {
-				return true
+		for _, pair := range [][2][]string{{old.Domains, v.Domains}, {old.Prefixes, v.Prefixes}, {old.Networks, v.Networks}} {
+			had := setOf(pair[0])
+			for _, x := range pair[1] {
+				if !had[x] {
+					return true
+				}
 			}
 		}
-		for _, p := range v.Prefixes {
-			if !prefixes[p] {
+		// An excluded host taken away vouches for it again, unless the
+		// domain it sat under went with it.
+		still := setOf(v.ExcludeDomains)
+		for _, x := range old.ExcludeDomains {
+			if !still[x] && storage.VendorNames(v, x) {
 				return true
 			}
 		}
@@ -473,8 +479,9 @@ func vendorsLoosen(before, after any) bool {
 	return false
 }
 
-// keptVendors is the vendors before, holding only the domains and prefixes
-// after keeps: the tightening half of a vendor change.
+// keptVendors is the vendors before, holding only the domains, prefixes and
+// networks after keeps and excluding what either excludes: the tightening
+// half of a vendor change.
 func keptVendors(before, after any) any {
 	next := vendorByRuntime(vendorList(after))
 	kept := []storage.AgentRuntimeVendor{}
@@ -483,19 +490,19 @@ func keptVendors(before, after any) any {
 		if !ok {
 			continue
 		}
-		domains, prefixes := setOf(n.Domains), setOf(n.Prefixes)
-		k := storage.AgentRuntimeVendor{Runtime: v.Runtime, Vendor: v.Vendor, Domains: []string{}, Prefixes: []string{}}
-		for _, d := range v.Domains {
-			if domains[d] {
-				k.Domains = append(k.Domains, d)
+		both := func(was, now []string) []string {
+			keep, out := setOf(now), []string{}
+			for _, x := range was {
+				if keep[x] {
+					out = append(out, x)
+				}
 			}
+			return out
 		}
-		for _, p := range v.Prefixes {
-			if prefixes[p] {
-				k.Prefixes = append(k.Prefixes, p)
-			}
-		}
-		kept = append(kept, k)
+		excluded := append(append([]string{}, v.ExcludeDomains...), n.ExcludeDomains...)
+		kept = append(kept, storage.AgentRuntimeVendor{Runtime: v.Runtime, Vendor: v.Vendor,
+			Domains: both(v.Domains, n.Domains), ExcludeDomains: excluded,
+			Prefixes: both(v.Prefixes, n.Prefixes), Networks: both(v.Networks, n.Networks)})
 	}
 	return kept
 }
@@ -566,7 +573,7 @@ const (
 	addLoosens                           // a list entry that was not there loosens
 	anyLoosens                           // any change loosens
 	windowField                          // the off-hours window, judged as a whole
-	vendorField                          // agent runtime vendors: a domain or prefix that was not there loosens
+	vendorField                          // agent runtime vendors: a domain, prefix or network that was not there, or an exclusion taken away, loosens
 	workloadField                        // known workloads: a new entry or a later expiry loosens
 	removeLoosens                        // a list entry taken away loosens
 )

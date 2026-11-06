@@ -315,12 +315,15 @@ func minutesPhrase(d time.Duration) string {
 // the runtime's volume is judged per hour against its own history
 // (AGENT_UPLOAD_VOLUME) instead. Not when the agent could not match the
 // reported path to the file that runs (path_mismatch), and only when the
-// address is inside the maker's published ranges: the SNI is whatever the
-// client chose to send and the domain is whatever any client last resolved
-// there, so a name alone would let any program called claude upload to its
-// own server under api.anthropic.com. The makers, their domains and their
-// ranges are policy: the tuning's agent_runtime_vendors.
-func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event) bool {
+// address is inside the maker's published ranges, or attributed from the
+// maker's published feed to its own network as its service (not its rented
+// compute): the SNI is
+// whatever the client chose to send and the domain is whatever any client
+// last resolved there, so a name alone would let any program called claude
+// upload to its own server under api.anthropic.com. The makers, their
+// domains, the hosts under them that serve anyone's files, and their ranges
+// and networks are policy: the tuning's agent_runtime_vendors.
+func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event, geo threatintel.GeoRecord) bool {
 	if !cfg.AgentEgressOn || ev.AttributionStatus == pathMismatch {
 		return false
 	}
@@ -328,8 +331,10 @@ func runtimeToOwnVendor(cfg storage.DetectionTuning, ev storage.Event) bool {
 	if runtime == "" || cfg.RuntimeVendor(runtime, firstNonEmpty(ev.SNI, ev.Domain)) == "" {
 		return false
 	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(ev.DstIP))
-	return err == nil && cfg.InRuntimeVendorRange(runtime, addr)
+	if addr, err := netip.ParseAddr(strings.TrimSpace(ev.DstIP)); err == nil && cfg.InRuntimeVendorRange(runtime, addr) {
+		return true
+	}
+	return cfg.InRuntimeVendorNetwork(runtime, geo.ASN, geo.Tenancy, geo.Source)
 }
 
 func firstNonEmpty(v ...string) string {
@@ -386,7 +391,7 @@ func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endp
 	// and under a private public suffix (x.googleapis.com) every API host is a
 	// registrable domain of its own, so the name alone keeps reading the same
 	// conversation as a new place. Neither covers rented compute.
-	if runtimeToOwnVendor(cfg, ev) || cfg.IsExpectedPair(quietPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy) {
+	if runtimeToOwnVendor(cfg, ev, geo) || cfg.IsExpectedPair(quietPath, ev.ExecutableSHA256, geo.ASN, geo.Org, geo.Tenancy) {
 		return
 	}
 	// Agent runtimes are judged here too: their own first-contact upload

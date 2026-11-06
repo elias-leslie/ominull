@@ -287,6 +287,55 @@ func TestNewPlaceUploadSkipsKnownDestinationsByRole(t *testing.T) {
 	}
 }
 
+// Antigravity (agy) uploading to a Google API host on Google's own network,
+// as the published feeds attribute it, is the runtime working. To a Cloud
+// Storage host it still pages (anyone's bucket lives there), and so does any
+// other program to a Google API host, and agy to one of those names on
+// Google's rented compute.
+func TestAgyToGoogleAPIsIsItsMakerButCloudStorageStillPages(t *testing.T) {
+	google := threatintel.NetworkPrefix{Country: "US", CountryName: "United States", ASN: "AS15169", Org: "Google LLC",
+		Tenancy: threatintel.TenancyVendor, Source: "google"}
+	cloud := threatintel.NetworkPrefix{Country: "US", CountryName: "United States", ASN: "AS396982", Org: "Google Cloud (customer range)",
+		Tenancy: threatintel.TenancyHosting, Source: "google-cloud"}
+	entries := threatintel.BuiltinAttribution()
+	for _, p := range []string{"172.217.118.0/24", "2607:f8b0:4002::/48"} {
+		g := google
+		g.Prefix = p
+		entries = append(entries, g)
+	}
+	cloud.Prefix = "34.54.84.0/24"
+	entries = append(entries, cloud)
+	if _, err := threatintel.LoadAttribution(entries, "test feeds"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = threatintel.LoadAttribution(threatintel.BuiltinAttribution(), "built-in") })
+
+	engine, store := noiseEngine(t)
+	start := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	engine.Evaluate(agentEvent("lap", "/usr/bin/curl", "known.example", "203.0.113.10", 443, 2000, start))
+	now := time.Now().UTC().Add(-time.Hour)
+	const agy = "/home/u/.local/bin/agy"
+	upload := func(path, name, ip string) {
+		engine.Evaluate(agentEvent("lap", path, name, ip, 443, 0, now))
+		engine.Evaluate(agentEvent("lap", path, name, ip, 443, 2<<20, now.Add(time.Minute)))
+	}
+	upload(agy, "generativelanguage.googleapis.com", "172.217.118.4")
+	upload(agy, "oauthaccountmanager.googleapis.com", "2607:f8b0:4002::5f")
+	if got := anomaliesOfType(t, store, "NEW_PLACE_UPLOAD"); len(got) != 0 {
+		t.Fatalf("agy to Google's API hosts raised %d new-place uploads: %+v", len(got), got)
+	}
+	for i, c := range []struct{ path, name, ip string }{
+		{agy, "storage.googleapis.com", "172.217.118.5"},
+		{"/usr/bin/curl", "people-pa.googleapis.com", "172.217.118.6"},
+		{agy, "play.googleapis.com", "34.54.84.110"},
+	} {
+		upload(c.path, c.name, c.ip)
+		if got := anomaliesOfType(t, store, "NEW_PLACE_UPLOAD"); len(got) != i+1 {
+			t.Fatalf("%s to %s on %s: %d new-place uploads, want %d", c.path, c.name, c.ip, len(got), i+1)
+		}
+	}
+}
+
 // A port scan of the host's own loopback, or replies from a server's port to
 // many client ports, is not a scan.
 func TestPortScanSkipsLoopbackAndReplies(t *testing.T) {

@@ -447,20 +447,67 @@ func TestAVendorEntryMayNotVouchForMoreThanOneService(t *testing.T) {
 		t.Fatalf("the added vendor is not honoured: %+v", ok.AgentRuntimeVendors)
 	}
 	for name, v := range map[string]AgentRuntimeVendor{
-		"malformed prefix":    {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"198.51.100/24"}},
-		"bare address":        {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"198.51.100.7"}},
-		"wide IPv4":           {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"104.0.0.0/8"}},
-		"wide IPv6":           {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"2600::/16"}},
-		"private":             {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"10.1.0.0/16"}},
-		"public suffix":       {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"github.io"}},
-		"bare TLD":            {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"com"}},
-		"wildcard":            {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"*.ollama.com"}},
-		"no vendor name":      {Runtime: "ollama", Domains: []string{"ollama.com"}},
-		"runtime named twice": {Runtime: "claude", Vendor: "Someone", Domains: []string{"example.com"}},
+		"malformed prefix":           {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"198.51.100/24"}},
+		"bare address":               {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"198.51.100.7"}},
+		"wide IPv4":                  {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"104.0.0.0/8"}},
+		"wide IPv6":                  {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"2600::/16"}},
+		"private":                    {Runtime: "ollama", Vendor: "Ollama", Prefixes: []string{"10.1.0.0/16"}},
+		"public suffix":              {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"github.io"}},
+		"bare TLD":                   {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"com"}},
+		"wildcard":                   {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"*.ollama.com"}},
+		"no vendor name":             {Runtime: "ollama", Domains: []string{"ollama.com"}},
+		"runtime named twice":        {Runtime: "claude", Vendor: "Someone", Domains: []string{"example.com"}},
+		"private suffix, unanchored": {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"googleapis.com"}},
+		"ICANN suffix, anchored":     {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"co.uk"}, Networks: []string{"as15169"}},
+		"exclusion outside domains":  {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"ollama.com"}, ExcludeDomains: []string{"storage.googleapis.com"}},
+		"network not an AS number":   {Runtime: "ollama", Vendor: "Ollama", Domains: []string{"ollama.com"}, Networks: []string{"Google LLC"}},
 	} {
 		if _, err := PrepareDetectionTuning(with(v)); !errors.Is(err, ErrInvalidDetectionTuning) {
 			t.Errorf("%s: err %v, want a refusal", name, err)
 		}
+	}
+}
+
+// Antigravity's maker is Google's API hosts on Google's own network, never
+// a Cloud Storage host (anyone's buckets), and never on an address the hub
+// attributes to Google's rented compute or only from its built-in table.
+func TestAntigravityIsGoogleAPIsButNotCloudStorage(t *testing.T) {
+	d := DefaultDetectionTuning()
+	for name, want := range map[string]string{
+		"generativelanguage.googleapis.com":                  "Google",
+		"oauth2.googleapis.com":                              "Google",
+		"storage.googleapis.com":                             "",
+		"my-bucket.storage.googleapis.com":                   "",
+		"storage-upload.googleapis.com":                      "",
+		"storage-download.googleapis.com":                    "",
+		"firebasestorage.googleapis.com":                     "",
+		"googleapis.com.example.net":                         "",
+		"x.storage.googleapis.com.":                          "",
+		"antigravity-cli-auto-updater-1.us-central1.run.app": "",
+	} {
+		if got := d.RuntimeVendor("antigravity", name); got != want {
+			t.Errorf("antigravity to %s: maker %q, want %q", name, got, want)
+		}
+	}
+	if d.RuntimeVendor("claude", "oauth2.googleapis.com") != "" {
+		t.Error("Google's API hosts counted as another runtime's maker")
+	}
+	for _, c := range []struct {
+		asn, tenancy, source string
+		want                 bool
+	}{
+		{"AS15169", TenancyVendor, "google", true},
+		{"AS396982", TenancyHosting, "google-cloud", false},
+		{"AS15169", TenancyHosting, "google", false},
+		{"AS15169", TenancyVendor, "built-in", false},
+		{"AS13335", TenancyVendor, "cloudflare-v4", false},
+	} {
+		if got := d.InRuntimeVendorNetwork("antigravity", c.asn, c.tenancy, c.source); got != c.want {
+			t.Errorf("%s %s from %s: %v, want %v", c.asn, c.tenancy, c.source, got, c.want)
+		}
+	}
+	if d.InRuntimeVendorNetwork("claude", "AS15169", TenancyVendor, "google") {
+		t.Error("Google's network counted for Claude")
 	}
 }
 
