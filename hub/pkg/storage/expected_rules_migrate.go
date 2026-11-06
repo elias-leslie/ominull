@@ -121,6 +121,8 @@ func defaultQuietOrgs() []string {
 // from, so codex has none. Antigravity (agy) talks to Google's API hosts; its
 // network is AS15169 as attributed from goog.json less cloud.json. Cloud
 // Storage and Firebase Storage hosts are excluded: anyone's buckets live there.
+// So is www.googleapis.com, which also serves Drive and Cloud Storage uploads
+// (owner decision 2026-11-06).
 func defaultLegacyVendors() []legacyVendor {
 	return []legacyVendor{
 		{Runtime: "claude", Vendor: "Anthropic", Domains: []string{"anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com"},
@@ -128,7 +130,7 @@ func defaultLegacyVendors() []legacyVendor {
 		{Runtime: "antigravity", Vendor: "Google", Domains: []string{"googleapis.com"},
 			ExcludeDomains: []string{"storage.googleapis.com", "storage-download.googleapis.com", "storage-upload.googleapis.com",
 				"content-storage-download.googleapis.com", "content-storage-upload.googleapis.com", "storage.mtls.googleapis.com",
-				"firebasestorage.googleapis.com"},
+				"firebasestorage.googleapis.com", "www.googleapis.com"},
 			Networks: []string{"as15169"}},
 	}
 }

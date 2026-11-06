@@ -476,7 +476,7 @@ const liveRow = `{"first_seen_cooldown_minutes":240,"warmup_hours":12,
  {"workload":"/usr/bin/old","owner":"*","reason":"expired","expires_at":"2020-01-15T02:32:09Z"}],
 "admin_fanout_sources":["linux-davion-sidarli-reenrolled"],"admin_fanout_targets":[],"admin_fanout_max_hosts":8,
 "agent_runtime_vendors":[
- {"runtime":"antigravity","vendor":"Google","domains":["googleapis.com"],"exclude_domains":["content-storage-download.googleapis.com","content-storage-upload.googleapis.com","firebasestorage.googleapis.com","storage-download.googleapis.com","storage-upload.googleapis.com","storage.googleapis.com","storage.mtls.googleapis.com"],"prefixes":[],"networks":["as15169"]},
+ {"runtime":"antigravity","vendor":"Google","domains":["googleapis.com"],"exclude_domains":["content-storage-download.googleapis.com","content-storage-upload.googleapis.com","firebasestorage.googleapis.com","storage-download.googleapis.com","storage-upload.googleapis.com","storage.googleapis.com","storage.mtls.googleapis.com","www.googleapis.com"],"prefixes":[],"networks":["as15169"]},
  {"runtime":"claude","vendor":"Anthropic","domains":["anthropic.com","claude.ai","claude.com","claudeusercontent.com"],"exclude_domains":[],"prefixes":["160.79.104.0/23","2607:6bc0::/48"],"networks":[]},
  {"runtime":"codex","vendor":"OpenAI","domains":["chatgpt.com","openai.com"],"exclude_domains":[],"prefixes":[],"networks":[]}]}`
 
@@ -612,6 +612,10 @@ func TestTheLiveRowAndExclusionsMigrateToRulesWithoutLoosening(t *testing.T) {
 		c.Kind, c.Path, c.User, c.Domain = KindBandwidthSpike, "/home/kasadis/.local/bin/agy.real", "kasadis", "oauth2.googleapis.com"
 	})
 	agyAPI.Path = "/usr/bin/agy"
+	if !expects(got, with(agyAPI, func(c *ExpectCtx) { c.Domain = "generativelanguage.googleapis.com" })) ||
+		expects(got, with(agyAPI, func(c *ExpectCtx) { c.Domain = "www.googleapis.com" })) {
+		t.Error("agy to www.googleapis.com (Drive and Cloud Storage uploads too) must page; the Gemini API host must not")
+	}
 	if !expects(got, agyAPI) || expects(got, with(agyAPI, func(c *ExpectCtx) { c.Domain = "storage.googleapis.com" })) {
 		t.Error("the antigravity vendor did not carry over with its exclusions")
 	}

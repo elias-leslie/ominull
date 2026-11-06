@@ -327,6 +327,7 @@ func TestAgyToGoogleAPIsIsItsMakerButCloudStorageStillPages(t *testing.T) {
 	}
 	for i, c := range []struct{ path, name, ip string }{
 		{agy, "storage.googleapis.com", "172.217.118.5"},
+		{agy, "www.googleapis.com", "172.217.118.7"},
 		{"/usr/bin/curl", "people-pa.googleapis.com", "172.217.118.6"},
 		{agy, "play.googleapis.com", "34.54.84.110"},
 	} {
