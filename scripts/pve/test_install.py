@@ -87,9 +87,14 @@ class InstallTests(unittest.TestCase):
         tools.mkdir()
         (tools / "ssh").write_text(FAKE_SSH)
         (tools / "ssh").chmod(0o755)
+        # Stands in for `aico declare`; the real one would record a host change on this machine.
+        self.declared = self.dir / "declared"
+        (tools / "aico").write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$AICO_DECLARED"\n')
+        (tools / "aico").chmod(0o755)
         self.env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"], "FAKE_PVE": str(self.pve),
                     "OMINULL_PVE_KEY_DIR": str(self.dir / "keys"), "HOME": str(self.dir),
-                    "PVE_HOST": "pve-host", "OMINULL_PVE_FROM": "198.51.100.128"}
+                    "PVE_HOST": "pve-host", "OMINULL_PVE_FROM": "198.51.100.128",
+                    "AICO_DECLARED": str(self.dir / "declared")}
         (self.dir / ".ssh").mkdir()
 
     def install(self, *args):
@@ -115,10 +120,12 @@ class InstallTests(unittest.TestCase):
             key = self.dir / "keys" / (role + ".ed25519")
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.dir / "keys").stat().st_mode & 0o777, 0o700)
+        self.assertIn("declare --host pve --what keys", self.declared.read_text())
 
     def test_rerun_keeps_keys_and_pin_and_repin_only_on_request(self):
         self.assertEqual(self.install().returncode, 0)
         before = self.keys.read_text()
+        self.declared.unlink()
         pin = self.pve / "etc-hub/release-public.pem"
         # Stands in for the pin a rotation release moved.
         private = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"],
@@ -129,6 +136,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("release pin kept", result.stdout)
         self.assertEqual(self.keys.read_text(), before)
+        self.assertFalse(self.declared.exists())
         self.assertEqual(pin.read_text(), moved)
         result = self.install("--repin-release-key")
         self.assertIn("release pin written", result.stdout)
