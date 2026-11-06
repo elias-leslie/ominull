@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/netip"
 	"strings"
@@ -34,6 +35,7 @@ type legacyLists struct {
 	KnownWorkloads      []legacyWorkload `json:"known_workloads"`
 	AgentRuntimeVendors *[]legacyVendor  `json:"agent_runtime_vendors"`
 	AdminFanoutSources  []string         `json:"admin_fanout_sources"`
+	AdminFanoutTargets  []string         `json:"admin_fanout_targets"`
 	AdminFanoutMax      int              `json:"admin_fanout_max_hosts"`
 	ExpectedRules       *json.RawMessage `json:"expected_rules"`
 }
@@ -144,8 +146,12 @@ func seedExpectedRules() []ExpectedRule {
 // Findings sets the conversions share.
 var (
 	kindsVouched = []string{KindBandwidthSpike, KindBeacon, KindNovelProcess}
-	kindsPair    = []string{KindBandwidthSpike, KindBeacon, KindNovelProcess, KindNewPlaceUpload}
-	kindsVendor  = []string{KindBandwidthSpike, KindBandwidthBurst, KindNewPlaceUpload}
+	// kindsQuietProcess is what a quiet process silenced: the novelty, volume
+	// and beacon detectors and the off-hours shell, not the agent-runtime
+	// first-contact finding, which it never reached.
+	kindsQuietProcess = []string{KindBandwidthSpike, KindBandwidthBurst, KindBeacon, KindNovelDestination, KindNovelProcess, KindOffHours}
+	kindsPair         = []string{KindBandwidthSpike, KindBeacon, KindNovelProcess, KindNewPlaceUpload}
+	kindsVendor       = []string{KindBandwidthSpike, KindBandwidthBurst, KindNewPlaceUpload}
 	// kindsExclusion is what an exclusion covered: every behavioural detector
 	// and the cloud storage and agent rules, but not the floor-style new-place
 	// upload and lateral sweep, which ran before exclusions.
@@ -252,7 +258,7 @@ func rulesFromLegacy(l legacyLists, now time.Time) ([]ExpectedRule, []string) {
 	if ps := programsFromEntries(procs, true, "quiet process", &dropped); len(ps) > 0 {
 		rules = append(rules, ExpectedRule{ID: "system-components", Name: "System components",
 			Reason:   "Operating system and fleet components whose job is to talk to their vendor on a timer, run as the system or as their own service account.",
-			Programs: ps})
+			Findings: append([]string(nil), kindsQuietProcess...), Programs: ps})
 	}
 	if len(asns) > 0 {
 		rules = append(rules, ExpectedRule{ID: "vendor-networks", Name: "Vendor networks are not new",
@@ -289,6 +295,12 @@ func rulesFromLegacy(l legacyLists, now time.Time) ([]ExpectedRule, []string) {
 			dropped = append(dropped, "expired known workload "+k.Workload)
 			continue
 		}
+		if strings.TrimSpace(k.Owner) == "" {
+			// The old model refused a workload without an owner; it never
+			// matched, and must not become one that matches every network.
+			dropped = append(dropped, "known workload "+k.Workload+" (no owner)")
+			continue
+		}
 		rules = append(rules, ruleFromWorkload(k))
 	}
 	vendors := []legacyVendor(nil)
@@ -300,6 +312,12 @@ func rulesFromLegacy(l legacyLists, now time.Time) ([]ExpectedRule, []string) {
 	for _, v := range vendors {
 		if len(v.Prefixes) == 0 && len(v.Networks) == 0 {
 			dropped = append(dropped, "runtime vendor "+v.Runtime+" (a name alone proves nothing)")
+			continue
+		}
+		if len(tidyDomains(v.Domains)) == 0 {
+			// The old match always needed the name under the vendor's domains
+			// as well as the address.
+			dropped = append(dropped, "runtime vendor "+v.Runtime+" (no domains: an address alone is not the maker's service)")
 			continue
 		}
 		rules = append(rules, ExpectedRule{ID: "vendor-" + plainSlug(v.Runtime), Name: v.Vendor + " service for " + v.Runtime,
@@ -401,7 +419,8 @@ func ruleFromExclusion(ex legacyExclusion, now time.Time) (ExpectedRule, string)
 		r.Protocol = proto
 	}
 	if v := strings.TrimSpace(ex.ProcessPath); v != "" && v != "*" {
-		r.Programs = []ExpectedProgram{{Path: ProcessPathKey(v)}}
+		// The exclusion matched this path and no other, byte for byte.
+		r.Programs = []ExpectedProgram{{Path: exactPathForm(v), Exact: true}}
 	}
 	if v := strings.TrimSpace(ex.DstIPRange); v != "" && v != "*" {
 		p, ok := parsePrefixOrAddr(v)
@@ -464,9 +483,19 @@ func (s *Store) migrateExpectedRules(now time.Time) {
 		rules, dropped = rulesFromLegacy(probe, now)
 		t.ExpectedRules = rules
 	}
-	have := map[string]bool{}
+	if hasRow && !converted {
+		for _, target := range probe.AdminFanoutTargets {
+			// The managed-host list became the infrastructure zone.
+			if next, ok := withInfraTarget(t, target); ok {
+				t = next
+			} else {
+				dropped = append(dropped, "admin fan-out target "+target+" (not a private address or network, or it overlaps a lab network)")
+			}
+		}
+	}
+	have := map[string]string{}
 	for _, r := range t.ExpectedRules {
-		have[r.ID] = true
+		have[r.ID] = ruleKey(r)
 	}
 	for _, ex := range exclusions {
 		r, why := ruleFromExclusion(ex, now)
@@ -480,8 +509,24 @@ func (s *Store) migrateExpectedRules(now time.Time) {
 			dropped = append(dropped, "exclusion "+ex.ID+" ("+strings.Join(bad, "; ")+")")
 			continue
 		}
-		if !have[kept[0].ID] {
-			t.ExpectedRules = append(t.ExpectedRules, kept[0])
+		rule := kept[0]
+		// Two exclusions can read to one id (ids are sanitised); both stay. A
+		// rule an earlier run already carried over is not added again.
+		base := rule.ID
+		for n := 1; ; n++ {
+			rule.ID = base
+			if n > 1 {
+				rule.ID = fmt.Sprintf("%s-%d", base, n)
+			}
+			was, taken := have[rule.ID]
+			if !taken {
+				have[rule.ID] = ruleKey(rule)
+				t.ExpectedRules = append(t.ExpectedRules, rule)
+				break
+			}
+			if was == ruleKey(rule) {
+				break
+			}
 		}
 	}
 	if _, err := s.SaveDetectionTuning(t, "upgrade"); err != nil {
@@ -492,6 +537,21 @@ func (s *Store) migrateExpectedRules(now time.Time) {
 		s.dropExclusionsTable()
 	}
 	log.Printf("[+] Detection tuning: converted to %d expected rules (not carried over: %s)", len(t.ExpectedRules), strings.Join(dropped, ", "))
+}
+
+// withInfraTarget adds an old admin fan-out target to the infrastructure
+// zone when the zones stay valid with it.
+func withInfraTarget(t DetectionTuning, target string) (DetectionTuning, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return t, true
+	}
+	next := t
+	next.InfraCIDRs = tidyList(append(append([]string(nil), t.InfraCIDRs...), target))
+	if _, err := next.validZones(); err != nil {
+		return t, false
+	}
+	return next, true
 }
 
 func (s *Store) dropExclusionsTable() {

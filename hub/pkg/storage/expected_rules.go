@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -97,6 +98,20 @@ const (
 	ExpectedTenancyAny = "any"
 )
 
+// FloorPortList is SMB, RDP, telnet and RPC: how a worm moves. No expected rule
+// explains a flow on one (the detector's floor, detector/floor.go).
+var FloorPortList = [...]int{23, 135, 445, 3389}
+
+// IsFloorPort says whether a port is on the sensitive-port floor.
+func IsFloorPort(p int) bool {
+	for _, f := range FloorPortList {
+		if p == f {
+			return true
+		}
+	}
+	return false
+}
+
 // AnyNetwork is the network entry for any named network.
 const AnyNetwork = "*"
 
@@ -110,10 +125,15 @@ const ExpectedMaxWorkloadLifetime = 90 * 24 * time.Hour
 // left out for a program that updates itself. RunAs binds the entry to the
 // account it runs as: "system" for root and the system accounts, or one
 // service account name (which also admits the system ones).
+//
+// Exact matches the reported path as it is written, with no pattern, no case
+// folding of a Unix path and no " (deleted)" allowance: what an exclusion
+// named, carried over as it was.
 type ExpectedProgram struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256,omitempty"`
 	RunAs  string `json:"run_as,omitempty"`
+	Exact  bool   `json:"exact,omitempty"`
 }
 
 // ExpectedRule is one expected thing. Every clause that is set must match; a
@@ -242,6 +262,11 @@ func (r ExpectedRule) matches(t DetectionTuning, c ExpectCtx, now time.Time) boo
 	if r.Expired(now) || !r.covers(c.Kind) {
 		return false
 	}
+	// A fan-out that touches a floor port is never routine, whatever a rule
+	// says (a saved row can hold one that a save would now refuse).
+	if c.Kind == KindLateralSweep && (IsFloorPort(c.Port) || IsFloorPort(r.Port)) {
+		return false
+	}
 	if len(r.Hosts) > 0 && !listHas(r.Hosts, c.Host) && !listHas(r.Hosts, c.Role) {
 		return false
 	}
@@ -266,14 +291,15 @@ func (r ExpectedRule) matches(t DetectionTuning, c ExpectCtx, now time.Time) boo
 	if !r.destinationMatches(c) {
 		return false
 	}
-	if c.Kind == KindLateralSweep && c.Targets > ruleMaxHosts(r) {
+	if c.Kind == KindLateralSweep && c.Targets > RuleMaxHosts(r) {
 		return false
 	}
 	return true
 }
 
-// ruleMaxHosts is how many hosts a lateral fan-out rule admits.
-func ruleMaxHosts(r ExpectedRule) int {
+// RuleMaxHosts is how many hosts a lateral fan-out rule admits: its max_hosts,
+// else the default (an omitted bound is not an unlimited one, nor a smaller one).
+func RuleMaxHosts(r ExpectedRule) int {
 	if r.MaxHosts > 0 {
 		return r.MaxHosts
 	}
@@ -286,7 +312,11 @@ func (r ExpectedRule) programMatches(c ExpectCtx) bool {
 		return false
 	}
 	for _, p := range r.Programs {
-		if !matchWorkload(p.Path, key) {
+		if p.Exact {
+			if !sameExactPath(p.Path, c.Path) {
+				continue
+			}
+		} else if !matchWorkload(p.Path, key) {
 			continue
 		}
 		if p.SHA256 != "" && !strings.EqualFold(p.SHA256, strings.TrimSpace(c.SHA)) {
@@ -308,16 +338,35 @@ func (r ExpectedRule) programMatches(c ExpectCtx) bool {
 	return false
 }
 
+var windowsDriveRe = regexp.MustCompile(`^[A-Za-z]:/`)
+
+// sameExactPath compares an exact program path with the path a process
+// reported: byte for byte for a Unix path, without case for a Windows one.
+func sameExactPath(want, got string) bool {
+	want, got = exactPathForm(want), exactPathForm(got)
+	if want == "" {
+		return false
+	}
+	if windowsDriveRe.MatchString(want) {
+		return strings.EqualFold(want, got)
+	}
+	return want == got
+}
+
+func exactPathForm(p string) string {
+	return strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+}
+
 // runAsSystem binds a program to root or the system's own accounts.
 const runAsSystem = "system"
 
 func (r ExpectedRule) anchored() bool { return len(r.Prefixes) > 0 || len(r.Networks) > 0 }
 
 // destinationMatches applies the destination clauses. An excepted name never
-// matches. A published prefix of the maker proves the destination by itself.
-// A network proves it only for the names the rule lists: with Domains set, the
-// name the client asked for must be under one of them, so the maker's network
-// alone does not cover a customer's bucket on it.
+// matches. A rule that lists Domains needs the name the client asked for under
+// one of them, whichever way the address proves the maker (its published
+// prefix or its network): the address alone would cover a customer's bucket on
+// the maker's network, or any program's own server inside its range.
 func (r ExpectedRule) destinationMatches(c ExpectCtx) bool {
 	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(c.Domain), "."))
 	for _, d := range r.ExceptDomains {
@@ -328,14 +377,6 @@ func (r ExpectedRule) destinationMatches(c ExpectCtx) bool {
 	if !r.anchored() {
 		return true
 	}
-	if addr, err := netaddr.Parse(strings.TrimSpace(c.DstIP)); err == nil {
-		addr = addr.WithZone("").Unmap()
-		for _, raw := range r.Prefixes {
-			if p, err := netip.ParsePrefix(raw); err == nil && p.Contains(addr) {
-				return true
-			}
-		}
-	}
 	if len(r.Domains) > 0 {
 		named := false
 		for _, d := range r.Domains {
@@ -343,6 +384,14 @@ func (r ExpectedRule) destinationMatches(c ExpectCtx) bool {
 		}
 		if !named {
 			return false
+		}
+	}
+	if addr, err := netaddr.Parse(strings.TrimSpace(c.DstIP)); err == nil {
+		addr = addr.WithZone("").Unmap()
+		for _, raw := range r.Prefixes {
+			if p, err := netip.ParsePrefix(raw); err == nil && p.Contains(addr) {
+				return true
+			}
 		}
 	}
 	for _, n := range r.Networks {
@@ -437,6 +486,12 @@ func (r ExpectedRule) problem() string {
 	}
 	if r.coversLateral() && (len(r.Hosts) == 0 || len(r.Programs) == 0 || r.Port == 0) {
 		return "rule " + id + ": a rule that makes a lateral fan-out expected must name the hosts, the programs and the one port it is for"
+	}
+	if r.coversLateral() && IsFloorPort(r.Port) {
+		return fmt.Sprintf("rule %s: port %d is on the detection floor (SMB, RDP, telnet, RPC); no rule makes a fan-out on it expected", id, r.Port)
+	}
+	if r.Vendor != "" && len(r.Domains) == 0 {
+		return "rule " + id + ": a rule that names a vendor must name the vendor's domains; an address alone does not show it is the maker's own service"
 	}
 	if r.MaxHosts < 0 || r.MaxHosts > AdminFanoutMaxDefault {
 		return fmt.Sprintf("rule %s: max_hosts %d must be between 1 and %d", id, r.MaxHosts, AdminFanoutMaxDefault)
@@ -556,6 +611,9 @@ func (p ExpectedProgram) problem() string {
 	if p.RunAs != "" && p.RunAs != runAsSystem && (strings.ContainsAny(p.RunAs, "@* ") || strings.HasPrefix(p.RunAs, runAsSystem+":")) {
 		return fmt.Sprintf("program %q: run_as must be system or one account name", p.Path)
 	}
+	if p.Exact && strings.ContainsAny(p.Path, "*?[]") {
+		return fmt.Sprintf("program %q: an exact path has no pattern in it", p.Path)
+	}
 	if !isPathWorkload(p.Path) {
 		return fmt.Sprintf("program %q is not an absolute path; a program is named by where it is installed, not by its name", p.Path)
 	}
@@ -604,6 +662,29 @@ func validWorkloadPattern(w string) error {
 		return fmt.Errorf("workload %q is inline code, which is never a known program", w)
 	}
 	return nil
+}
+
+// readableRules keeps the rules a save would accept, in order, and says which
+// it left out. A rule silences detection, so one that fails the checks (a saved
+// row can hold what an older build accepted) covers nothing, as an old
+// exclusion that failed its own checks never matched; the first of two rules
+// with one id stands. DetectionTuningProblem reports the row.
+func readableRules(rules []ExpectedRule) (kept []ExpectedRule, skipped []string) {
+	seen := map[string]bool{}
+	kept = make([]ExpectedRule, 0, len(rules))
+	for _, r := range rules {
+		if msg := r.problem(); msg != "" {
+			skipped = append(skipped, msg)
+			continue
+		}
+		if seen[r.ID] {
+			skipped = append(skipped, fmt.Sprintf("rule id %q is used twice", r.ID))
+			continue
+		}
+		seen[r.ID] = true
+		kept = append(kept, r)
+	}
+	return kept, skipped
 }
 
 // validExpectedRules checks every rule and that ids are unique.
@@ -696,7 +777,11 @@ func (r ExpectedRule) tidy() ExpectedRule {
 	seen := map[ExpectedProgram]bool{}
 	programs := make([]ExpectedProgram, 0, len(r.Programs))
 	for _, p := range r.Programs {
-		p.Path = ProcessPathKey(p.Path)
+		if p.Exact {
+			p.Path = exactPathForm(p.Path)
+		} else {
+			p.Path = ProcessPathKey(p.Path)
+		}
 		p.SHA256 = strings.ToLower(strings.TrimSpace(p.SHA256))
 		p.RunAs = strings.ToLower(strings.TrimSpace(p.RunAs))
 		if p.Path == "" || seen[p] {

@@ -79,8 +79,11 @@ func judgeDrillCase(c detector.DrillCase) string {
 	if want == "" {
 		want = storage.ClassPage
 	}
-	if got := storage.AlertClass(f); got != want {
+	if got := storage.AlertClass(f); want != detector.DrillAnyClass && got != want {
 		return fmt.Sprintf("%s: raised as %s, not %s", c.Rule, got, want)
+	}
+	if want == detector.DrillAnyClass {
+		return "" // raised, which is all this case asks
 	}
 	if want != storage.ClassPage {
 		return "" // recorded as it should be; held by design

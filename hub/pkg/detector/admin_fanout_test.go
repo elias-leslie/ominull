@@ -335,3 +335,32 @@ func TestFloorSweepIsNotHiddenByAnEarlierSweep(t *testing.T) {
 		t.Fatalf("want one floor sweep alert, got %d", floors)
 	}
 }
+
+// A window that touches a floor port is never routine administration, even
+// when a (stored, unvalidated) lateral rule names that port and every host is
+// inventoried.
+func TestAdminFanoutNeverExplainsAFloorPort(t *testing.T) {
+	for _, port := range []uint16{445, 3389, 135, 23} {
+		cfg := storage.DefaultDetectionTuning()
+		cfg.InfraCIDRs = []string{"10.0.0.0/24"}
+		cfg.ExpectedRules = []storage.ExpectedRule{{ID: "bad", Reason: "r", Findings: []string{storage.KindLateralSweep},
+			Hosts: []string{"ws-admin"}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}}, Port: int(port)}}
+		window := map[string]*sweepTarget{}
+		for i := 1; i <= 3; i++ {
+			window[fmt.Sprintf("10.0.0.%d", i)] = &sweepTarget{ports: map[uint16]bool{port: true}, actors: map[string]bool{"": true}}
+		}
+		base := storage.ExpectCtx{Host: "ws-admin", Path: "/usr/bin/ssh", Direction: "OUTBOUND", Protocol: 6}
+		ok, why := adminFanout(cfg, storage.Endpoint{ID: "ws-admin"}, base, window, func(string) bool { return true })
+		if ok {
+			t.Errorf("port %d: explained as routine (%s)", port, why)
+		}
+	}
+	// The same window on 22 is routine under an admin rule on 22.
+	cfg := storage.DefaultDetectionTuning()
+	cfg.ExpectedRules = []storage.ExpectedRule{adminRule("ws-admin")}
+	window := map[string]*sweepTarget{"10.0.0.1": {ports: map[uint16]bool{22: true}, actors: map[string]bool{"": true}}}
+	base := storage.ExpectCtx{Host: "ws-admin", Path: "/usr/bin/ssh", Direction: "OUTBOUND", Protocol: 6}
+	if ok, why := adminFanout(cfg, storage.Endpoint{ID: "ws-admin"}, base, window, func(string) bool { return true }); !ok {
+		t.Errorf("admin ssh on 22 not routine: %s", why)
+	}
+}

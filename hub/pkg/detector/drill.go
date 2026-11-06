@@ -49,6 +49,12 @@ type DrillCase struct {
 	WantClass string `json:"want_class,omitempty"`
 }
 
+// DrillAnyClass as a WantClass asks only that the finding is raised, whatever
+// class the tuning's thresholds give it: a sweep on an ordinary port may be
+// recorded or paged, depending on the program, the host count and
+// lan_sweep_hosts.
+const DrillAnyClass = "any"
+
 // Raised returns the case's finding of the type it wants, the one of the
 // class it wants where there are several (a beacon is raised when it is first
 // seen and again when it is strong enough to page).
@@ -62,7 +68,7 @@ func (c DrillCase) Raised() (storage.AnomalyAlert, bool) {
 		if f.AnomalyType != c.Want {
 			continue
 		}
-		if storage.AlertClass(f) == want {
+		if want != DrillAnyClass && storage.AlertClass(f) == want {
 			return f, true
 		}
 		if first == nil {
@@ -180,13 +186,18 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 	cases = append(cases, run(DrillCase{Rule: "rare beacon", Want: "C2_BEACONING"}, live, beacon))
 
 	// An agent's ssh fan-out from an admin workstation that also reaches SMB:
-	// raised, and neither the actor nor the admin rule may explain it.
+	// raised, and neither the actor nor the admin rule may explain it. The
+	// hosts are in the infrastructure zone, so the only thing between this
+	// window and the rule's suppression is the floor port.
 	admin := live
+	admin.InfraCIDRs = append(append([]string(nil), live.InfraCIDRs...), lan(0)+"/24")
 	admin.ExpectedRules = append(append([]storage.ExpectedRule(nil), live.ExpectedRules...), storage.ExpectedRule{
 		ID: "floor-drill-admin-ssh", Reason: "the drill's own admin ssh rule", Findings: []string{storage.KindLateralSweep},
 		Hosts: []string{DrillEndpointID}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}}, Port: 22, MaxHosts: storage.AdminFanoutMaxDefault})
+	// Exactly the shell threshold of hosts: within the rule's bound, so the
+	// first window the sweep is judged in is one the rule would explain.
 	var ssh []storage.Event
-	for i := 0; i < 2*lateralShellHosts; i++ {
+	for i := 0; i < lateralShellHosts; i++ {
 		// SMB first, so every window the sweep is judged in holds it.
 		port := uint16(22)
 		if i == 0 {
@@ -197,6 +208,21 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 		ssh = append(ssh, ev)
 	}
 	cases = append(cases, run(DrillCase{Rule: "agent ssh fan-out reaching a floor port", Want: "LATERAL_PORT_SWEEP"}, admin, ssh))
+
+	// A lateral rule that names a floor port itself, which a save refuses but a
+	// row from an older build, or a change to the matcher, could let through:
+	// the hosts are inventoried, the program and host are the rule's, every
+	// connection is on SMB. It must still page.
+	onFloor := live
+	onFloor.InfraCIDRs = admin.InfraCIDRs
+	onFloor.ExpectedRules = append(append([]storage.ExpectedRule(nil), live.ExpectedRules...), storage.ExpectedRule{
+		ID: "floor-drill-lateral-on-floor-port", Reason: "the drill's own rule on a floor port", Findings: []string{storage.KindLateralSweep},
+		Hosts: []string{DrillEndpointID}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/ssh"}}, Port: 445, MaxHosts: storage.AdminFanoutMaxDefault})
+	var smb []storage.Event
+	for i := 0; i < lateralShellHosts; i++ {
+		smb = append(smb, flow("/usr/bin/ssh", lan(241+i), 445, 60, time.Duration(i)*time.Second))
+	}
+	cases = append(cases, run(DrillCase{Rule: "lateral rule on a floor port", Want: "LATERAL_PORT_SWEEP"}, onFloor, smb))
 
 	silent := DrillCase{Rule: "host gone quiet", Want: silenceAnomalyType, Tuning: live}
 	quiet := ep
@@ -238,7 +264,7 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 			// is recorded; the case still has to raise.
 			lateral := DrillCase{Rule: "lateral sweep as " + path + " (" + user + ")", Want: "LATERAL_PORT_SWEEP"}
 			if isInterpreterOrShell(filepath.Base(path)) {
-				lateral.WantClass = storage.ClassRecord
+				lateral.WantClass = DrillAnyClass
 			}
 			cases = append(cases,
 				run(DrillCase{Rule: "port sweep as " + path + " (" + user + ")", Want: "PORT_SCAN_RECON"}, live, ports),
@@ -418,9 +444,10 @@ func drillPinhole(ph pinhole, ep storage.Endpoint, lan func(int) string, tuning 
 		}
 		lateral := DrillCase{Rule: "lateral sweep", Want: "LATERAL_PORT_SWEEP"}
 		// A sweep on a port outside the floor list (a rule for ssh on 22) is
-		// recorded, not paged; the case still has to raise.
+		// recorded or paged by the program, the host count and lan_sweep_hosts;
+		// the case only has to raise.
 		if ph.port != 0 && !FloorPort(int(ph.port)) {
-			lateral.WantClass = storage.ClassRecord
+			lateral.WantClass = DrillAnyClass
 		}
 		cases = add(cases, lateral, fanout)
 	}

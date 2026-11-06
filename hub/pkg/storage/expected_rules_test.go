@@ -276,7 +276,7 @@ func TestASaveRefusesUnsoundRules(t *testing.T) {
 // Google's own network and never on Cloud Storage (anyone's buckets).
 func TestRuntimeMakerRulesShipAndKeepToTheirService(t *testing.T) {
 	d := DefaultDetectionTuning()
-	claude := ExpectCtx{Kind: KindBandwidthSpike, Path: "/home/alice/.local/share/claude/versions/2.1.5", User: "alice"}
+	claude := ExpectCtx{Kind: KindBandwidthSpike, Path: "/home/alice/.local/share/claude/versions/2.1.5", User: "alice", Domain: "api.anthropic.com"}
 	for _, ip := range []string{"160.79.104.10", "160.79.105.255", "2607:6bc0::10", "::ffff:160.79.104.10"} {
 		for _, kind := range []string{KindBandwidthSpike, KindBandwidthBurst, KindNewPlaceUpload} {
 			if !expects(d, with(claude, func(c *ExpectCtx) { c.DstIP, c.Kind = ip, kind })) {
@@ -619,7 +619,7 @@ func TestTheLiveRowAndExclusionsMigrateToRulesWithoutLoosening(t *testing.T) {
 	if !expects(got, agyAPI) || expects(got, with(agyAPI, func(c *ExpectCtx) { c.Domain = "storage.googleapis.com" })) {
 		t.Error("the antigravity vendor did not carry over with its exclusions")
 	}
-	if !expects(got, ExpectCtx{Kind: KindBandwidthSpike, Path: "/usr/bin/claude", DstIP: "160.79.104.9"}) {
+	if !expects(got, ExpectCtx{Kind: KindBandwidthSpike, Path: "/usr/bin/claude", DstIP: "160.79.104.9", Domain: "api.anthropic.com"}) {
 		t.Error("the claude vendor range did not carry over")
 	}
 	if expects(got, ExpectCtx{Kind: KindBandwidthSpike, Path: "/usr/bin/codex", DstIP: "104.18.1.1", Domain: "chatgpt.com"}) {

@@ -293,9 +293,11 @@ except_domains, prefixes, networks, tenancy, port, protocol, direction,
 max_hosts, expires_at}`. Every clause that is set must match; a list inside a
 clause matches on any entry.
 
-- Program: `programs` is `[{path, sha256, run_as}]` (lower-cased installed path,
+- Program: `programs` is `[{path, sha256, run_as, exact}]` (lower-cased installed path,
   `*` for one path segment such as a version number; `run_as` is `system` for
-  root and the system accounts, or one account name); `runtime` names an agent
+  root and the system accounts, or one account name; `exact` keeps the path as
+  written, case and all, with no pattern and no ` (deleted)` allowance, as a
+  migrated exclusion had it); `runtime` names an agent
   runtime from `agent_runtimes`; `workload` is an interpreter plus the script it
   runs (`python3.13 /srv/app/.venv/bin/python -m app.worker`) or an installed
   path. A program in a folder any account can write (`/tmp`, `/var/tmp`,
@@ -307,15 +309,19 @@ clause matches on any entry.
   `networks` or `prefixes` (`*` means any named network).
 - Destination: `domains`, `prefixes` and `networks` (AS numbers, exact network
   names, or `*` for any named network). A name is only what a client sent, so
-  `domains` must be anchored by `prefixes` or `networks`; a prefix match proves
-  the destination alone (vendor prefixes no wider than /16 or /32). `except_domains`
+  `domains` must be anchored by `prefixes` or `networks`, and a rule that lists
+  `domains` needs the name the client asked for under one of them as well as the
+  address (a rule that names a `vendor` must list its domains; vendor prefixes no
+  wider than /16 or /32). `except_domains`
   are names under the listed domains that are anyone's (Cloud Storage buckets) and
   never match. `tenancy` is `vendor` (only a published maker range), the default
   (any network that is not rented compute) or `any` (rented compute too, which
   an implant can hide in). A rule with no prefix and no network matches any
   destination.
 - Narrowing: `hosts` (endpoint ids or roles), `port`, `protocol`, `direction`, and
-  `max_hosts` for a lateral fan-out (at most 8).
+  `max_hosts` for a lateral fan-out (at most 8; left out it means 8). A lateral
+  rule names hosts, programs and one port, never a floor port (23, 135, 445,
+  3389), and a window that touches a floor port is never routine.
 - Effect: `findings` lists the kinds it makes expected (`NOVEL_PROCESS_EGRESS`,
   `OFF_HOURS_ACTIVITY`, `BANDWIDTH_SPIKE`, `BANDWIDTH_BURST`, `C2_BEACONING`,
   `NOVEL_DESTINATION`, `NEW_PLACE_UPLOAD`, `AGENT_NEW_DESTINATION`,

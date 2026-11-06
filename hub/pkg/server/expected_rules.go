@@ -228,9 +228,19 @@ func (s *Server) handleMarkExpected(w http.ResponseWriter, r *http.Request) {
 	s.policyMu.Lock()
 	defer s.policyMu.Unlock()
 	before := s.store.GetDetectionTuning()
-	if _, ok := before.RuleByID(rule.ID); ok {
+	// The rule this would write, rebuilt from the finding, is what must cover
+	// it, whether it is new or already stored.
+	c := detector.FindingExpectCtx(finding, "")
+	c.Kind = rule.Findings[0]
+	if stored, ok := before.RuleByID(rule.ID); ok {
 		// Already expected: this only dismisses the finding, so it is
-		// recorded and counted on the Nightshift feed like any other.
+		// recorded and counted on the Nightshift feed like any other. A rule
+		// of that id that was edited, narrowed or has lapsed may no longer
+		// cover it, and dismissing would hide a finding that fires again.
+		if _, covered := before.Expected(c); !covered {
+			writeJSONError(w, http.StatusConflict, "a rule with this id ("+stored.ID+") already exists but does not cover this finding any more, so nothing was dismissed; edit that rule, or delete it and mark again")
+			return
+		}
 		if err := s.acknowledgeFinding(r, finding.ID); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -247,8 +257,6 @@ func (s *Server) handleMarkExpected(w http.ResponseWriter, r *http.Request) {
 	}
 	// The rule must cover the finding it came from, or marking would dismiss
 	// something that fires again an hour later.
-	c := detector.FindingExpectCtx(finding, "")
-	c.Kind = rule.Findings[0]
 	if _, ok := after.Expected(c); !ok {
 		writeJSONError(w, http.StatusBadRequest, "the rule this would write does not cover the finding it came from, so it was not saved; write the rule by hand")
 		return

@@ -20,7 +20,8 @@ import (
 //     test guest;
 //   - the process is a program the rule names by its installed path (the ssh
 //     client), not any process called ssh;
-//   - every connection in the window went to the rule's port;
+//   - every connection in the window went to the rule's port, and none to a
+//     floor port;
 //   - every host is inventoried: an enrolled endpoint's address, a lab or
 //     infrastructure address (managed hosts without an agent, like the
 //     gateway);
@@ -80,6 +81,11 @@ func adminFanout(cfg storage.DetectionTuning, src storage.Endpoint, base storage
 	sort.Strings(ips)
 	rule := ""
 	for _, p := range sortedPorts(ports) {
+		// A floor port in the window is never routine: SMB, RDP, telnet and
+		// RPC are how a worm moves, and no rule explains them.
+		if FloorPort(p) {
+			return false, fmt.Sprintf("the window reached port %d, which is on the detection floor", p)
+		}
 		c := base
 		c.Port = p
 		r, ok := cfg.Expected(c)

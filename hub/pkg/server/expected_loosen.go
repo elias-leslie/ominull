@@ -85,6 +85,9 @@ func programsWiden(was, now []storage.ExpectedProgram) bool {
 // path, q pinned to no build or the same one, q open to any account or the
 // same one (an account name also admits the system accounts).
 func programWithin(p, q storage.ExpectedProgram) bool {
+	if q.Exact && (!p.Exact || p.Path != q.Path) {
+		return false
+	}
 	if !strings.EqualFold(p.Path, q.Path) {
 		return false
 	}
@@ -94,19 +97,27 @@ func programWithin(p, q storage.ExpectedProgram) bool {
 	return q.RunAs == "" || q.RunAs == p.RunAs || (p.RunAs == "system" && q.RunAs != "system")
 }
 
+// anyProtocol reads "any" as the empty clause it means.
+func anyProtocol(p string) string {
+	if p == "any" {
+		return ""
+	}
+	return p
+}
+
 // ruleLoosens reports whether now covers anything old did not.
 func ruleLoosens(old, now storage.ExpectedRule) bool {
 	if gainsEntry(old.Kinds(), now.Kinds()) {
 		return true
 	}
-	if laterExpiry(old.ExpiresAt, now.ExpiresAt) || now.MaxHosts > old.MaxHosts {
+	if laterExpiry(old.ExpiresAt, now.ExpiresAt) || storage.RuleMaxHosts(now) > storage.RuleMaxHosts(old) {
 		return true
 	}
 	if programsWiden(old.Programs, now.Programs) {
 		return true
 	}
 	if scalarWidens(old.Runtime, now.Runtime) || scalarWidens(old.Workload, now.Workload) || tenancyRank(now.Tenancy) > tenancyRank(old.Tenancy) ||
-		scalarWidens(old.Protocol, now.Protocol) || scalarWidens(old.Direction, now.Direction) ||
+		scalarWidens(anyProtocol(old.Protocol), anyProtocol(now.Protocol)) || scalarWidens(old.Direction, now.Direction) ||
 		(old.Port != 0 && old.Port != now.Port) {
 		return true
 	}

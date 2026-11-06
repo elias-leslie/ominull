@@ -821,7 +821,7 @@ func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
 	}
 	got := store.GetDetectionTuning()
 	claude := storage.ExpectCtx{Kind: storage.KindBandwidthSpike, Host: "ws", Path: "/home/u/.local/share/claude/versions/2.1.5", User: "u",
-		DstIP: "198.51.100.9", Port: 443, Direction: "OUTBOUND"}
+		DstIP: "198.51.100.9", Domain: "api.anthropic.com", Port: 443, Direction: "OUTBOUND"}
 	if !expects(got, claude) {
 		t.Fatalf("the added range is not honoured: %+v", got.ExpectedRules)
 	}

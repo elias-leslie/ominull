@@ -21,17 +21,10 @@ import (
 
 // floorPorts are SMB, RDP, telnet and RPC: how a worm moves. No expected rule,
 // actor or admin rule explains a flow on one.
-var floorPorts = [...]int{23, 135, 445, 3389}
+var floorPorts = storage.FloorPortList
 
 // FloorPort says whether a port is on the sensitive-port floor.
-func FloorPort(p int) bool {
-	for _, f := range floorPorts {
-		if p == f {
-			return true
-		}
-	}
-	return false
-}
+func FloorPort(p int) bool { return storage.IsFloorPort(p) }
 
 // Bandwidth.
 const (

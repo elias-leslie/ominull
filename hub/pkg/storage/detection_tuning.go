@@ -289,7 +289,10 @@ func (s *Store) GetDetectionTuning() DetectionTuning {
 	}
 	t.UpdatedAt = updated
 	t.UpdatedBy = by
-	return t.normalised()
+	t = t.normalised()
+	// A rule the checks refuse covers nothing (DetectionTuningProblem says so).
+	t.ExpectedRules, _ = readableRules(t.ExpectedRules)
+	return t
 }
 
 // SaveDetectionTuning writes the tuning after clamping it. Anything a form can

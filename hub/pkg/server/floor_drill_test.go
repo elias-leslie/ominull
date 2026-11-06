@@ -84,7 +84,7 @@ func TestLooseningAFloorRuleMakesTheDrillRaise(t *testing.T) {
 			if _, err := s.SaveDetectionTuning(tu, "test"); err != nil {
 				t.Fatal(err)
 			}
-		}, []string{"lateral sweep", "lab escape", "agent ssh fan-out reaching a floor port"}},
+		}, []string{"lateral sweep", "lab escape", "agent ssh fan-out reaching a floor port", "lateral rule on a floor port"}},
 		{"rule on SMB", func(t *testing.T, s *storage.Store) { add(t, s, rule(445, "")) }, nil},
 		{"rule on an internet range", func(t *testing.T, s *storage.Store) { add(t, s, rule(0, "203.0.113.0/24")) },
 			[]string{"bandwidth burst", "rare beacon"}},
