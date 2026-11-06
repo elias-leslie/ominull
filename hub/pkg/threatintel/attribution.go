@@ -113,7 +113,8 @@ func table() *attributionTable {
 // buildTable sorts longest-prefix-first so the first match is the most specific
 // one, and puts a shared or rented range ahead of a vendor range that covers the
 // same bits - Google's cloud.json ranges sit inside goog.json, and the customer
-// answer is the one that must win.
+// answer is the one that must win - then a feed's range ahead of the same
+// built-in one.
 func buildTable(entries []NetworkPrefix, source string) *attributionTable {
 	rules := make([]prefixRule, 0, len(entries))
 	for _, e := range entries {
@@ -143,7 +144,14 @@ func buildTable(entries []NetworkPrefix, source string) *attributionTable {
 		if rules[i].prefix.Bits() != rules[j].prefix.Bits() {
 			return rules[i].prefix.Bits() > rules[j].prefix.Bits()
 		}
-		return tenancyRank(rules[i].record.Tenancy) < tenancyRank(rules[j].record.Tenancy)
+		if ri, rj := tenancyRank(rules[i].record.Tenancy), tenancyRank(rules[j].record.Tenancy); ri != rj {
+			return ri < rj
+		}
+		// A published feed's answer for the same range beats the built-in
+		// fallback's (172.217.0.0/16 is in both): the feed is the maker's
+		// own statement, and the built-in table is only coarse cover for
+		// when no feed has loaded.
+		return rules[i].record.Source != "built-in" && rules[j].record.Source == "built-in"
 	})
 	built := &attributionTable{rules: rules, source: source, builtAt: time.Now().UTC(), count: len(rules)}
 	for _, rule := range rules {

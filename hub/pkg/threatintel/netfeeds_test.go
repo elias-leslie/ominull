@@ -345,3 +345,17 @@ func TestAFailedFeedKeepsItsPreviousRows(t *testing.T) {
 		}
 	}
 }
+
+// A published feed's range beats the built-in fallback's identical range, so
+// the answer names the feed: Google's 172.217.0.0/16 is in both.
+func TestAFeedRangeBeatsTheSameBuiltinRange(t *testing.T) {
+	entries := append(BuiltinAttribution(), NetworkPrefix{Prefix: "172.217.0.0/16", Country: "US", CountryName: "United States",
+		ASN: "AS15169", Org: "Google LLC", Tenancy: TenancyVendor, Source: "google"})
+	if _, err := LoadAttribution(entries, "test feeds"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = LoadAttribution(BuiltinAttribution(), "built-in") })
+	if got := ResolveGeoIP("172.217.113.4"); got.Source != "google" || got.Tenancy != TenancyVendor {
+		t.Fatalf("172.217.113.4 resolved from %q as %q, want the google feed's vendor answer", got.Source, got.Tenancy)
+	}
+}
