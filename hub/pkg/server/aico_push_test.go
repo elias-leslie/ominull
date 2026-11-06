@@ -567,3 +567,98 @@ func TestPullFeedIsGoneAndDiagnosticsStayAdminOnly(t *testing.T) {
 		t.Errorf("POST findings = %d", w.Code)
 	}
 }
+
+// A row the hub stops producing (a recovered section, a key no longer retired)
+// is resolved once, ok with no next_run, so Aico never shows it late; a failed
+// push resolves it again on the next pass.
+func TestAicoPushResolvesRowsTheHubStopsProducing(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	rcv := newAicoReceiver(t)
+	now := time.Now().UTC()
+	aicoConfigure(t, srv, store, rcv, now)
+	const gone = "ominull.builds.00000000000000aa"
+	keys := `[{"id":"1932669bb5871af4","clean_from":"1.8.71"},{"id":"00000000000000aa","clean_from":"1.0.0"}]`
+	if err := store.SetSetting(retiredKeysSetting, keys); err != nil {
+		t.Fatal(err)
+	}
+	row := func(id string) map[string]any {
+		for _, r := range rcv.rows {
+			if r["id"] == id {
+				return r
+			}
+		}
+		return nil
+	}
+	srv.aicoPushPass(now, rcv.server.Client())
+	if r := row(gone); r == nil || r["next_run"] == nil {
+		t.Fatalf("first pass row = %v", r)
+	}
+	if err := store.SetSetting(retiredKeysSetting, `[{"id":"1932669bb5871af4","clean_from":"1.8.71"}]`); err != nil {
+		t.Fatal(err)
+	}
+	rcv.set(http.StatusInternalServerError)
+	srv.aicoPushPass(now.Add(time.Minute), rcv.server.Client())
+	rcv.set(http.StatusOK)
+	srv.aicoPushPass(now.Add(2*time.Minute), rcv.server.Client())
+	r := row(gone)
+	if r == nil || r["state"] != "ok" || r["next_run"] != nil || r["what"] != "Old release key 00000000" ||
+		r["meaning"] != "Resolved: the OmniNull hub no longer reports this" {
+		t.Fatalf("resolution row = %v", r)
+	}
+	if row("ominull.hub") == nil || row("ominull.hub")["next_run"] == nil {
+		t.Fatal("a live row lost its next_run")
+	}
+	srv.aicoPushPass(now.Add(3*time.Minute), rcv.server.Client())
+	if r := row(gone); r != nil {
+		t.Fatalf("resolved twice: %v", r)
+	}
+}
+
+func TestAicoResolvedRowsFitTheRoom(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	shown := map[string]string{"ominull.a": "A", "ominull.b": "", "ominull.live": "L"}
+	live := []aicoRow{{ID: "ominull.live", NextRun: "x"}}
+	out := aicoResolvedRows(shown, live, now, 5)
+	if len(out) != 2 || out[0].ID != "ominull.a" || out[0].What != "A" || out[1].What != "ominull.b" || out[1].NextRun != "" {
+		t.Fatalf("resolved = %+v", out)
+	}
+	if out := aicoResolvedRows(shown, live, now, 1); len(out) != 1 {
+		t.Fatalf("room 1 = %+v", out)
+	}
+	if out := aicoResolvedRows(shown, live, now, 0); len(out) != 0 {
+		t.Fatalf("room 0 = %+v", out)
+	}
+}
+
+// Over the weekly page budget, detection health is a warn row, not ok.
+func TestAicoDetectionHealthOverBudgetWarns(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	state := func() string {
+		for _, r := range srv.aicoRows(now) {
+			if r.ID == "ominull.detection.health" {
+				return r.State
+			}
+		}
+		t.Fatal("no detection health row")
+		return ""
+	}
+	if got := state(); got != "ok" {
+		t.Fatalf("no pages = %s", got)
+	}
+	for _, inc := range []string{"inc-a", "inc-b"} {
+		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: inc + "-1", TenantID: "t-01", EndpointID: "e", Hostname: "dev",
+			AnomalyType: "C2_BEACONING", Severity: "HIGH", Title: "t", Evidence: `{"class":"page","incident":"` + inc + `"}`,
+			Timestamp: now.Add(-time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := state(); got != "warn" {
+		t.Fatalf("over budget = %s", got)
+	}
+}

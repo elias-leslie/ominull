@@ -476,7 +476,10 @@ What is pushed (a body of `{"notices": [...], "rows": [...]}`, at most 50 of eac
   alerts, which are closed in the console), Look into it, and Open when the hub URL is `https://`.
 - **Rows.** The health findings, one Status row each (`ominull.*`, machine `ominull-hub`, project `ominull`): `ok`
   when resolved or only a note, else `warn`; never `failed`, so a row never phones the owner by itself (alerts do,
-  as notices). `next_run` is five minutes ahead, so a hub that stops pushing shows late. Per-item findings fold into
+  as notices). `next_run` is five minutes ahead, so a hub that stops pushing shows late. A row the hub stops producing (a
+  section that recovered, a key taken off the retired list) is sent once more as `ok`, "Resolved: the OmniNull hub no
+  longer reports this", with no `next_run`, so it never shows late (setting `aico_push_rows` lists the rows Aico
+  shows). `ominull.detection.health` warns while paged incidents exceed the weekly page budget. Per-item findings fold into
   one row per family (`ominull.run`, `ominull.decisions`, `ominull.compliance`) with the worst state.
 - **Retired release keys.** Setting `retired_release_keys` (JSON `[{"id","clean_from"}]`, default
   `[{"id":"1932669bb5871af4","clean_from":"1.8.71"}]`) gives one row `ominull.builds.<id>` per key: `warn` naming up to

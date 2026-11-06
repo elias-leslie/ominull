@@ -39,6 +39,10 @@ const (
 	aicoLastAtSetting  = "aico_push_last_at"
 	aicoLastOKSetting  = "aico_push_last_ok_at"
 	aicoLastErrSetting = "aico_push_last_error"
+	// aicoRowsSetting is JSON {"<row id>": "<what>"}: the rows Aico last
+	// accepted with a next_run. A row the hub stops producing is resolved
+	// once (aicoResolvedRows), so it never shows late in Aico.
+	aicoRowsSetting = "aico_push_rows"
 	// retiredKeysSetting is JSON [{"id","clean_from"}]: release keys that
 	// agents older than clean_from still trust.
 	retiredKeysSetting = "retired_release_keys"
@@ -219,7 +223,7 @@ type aicoRow struct {
 	State   string `json:"state"`
 	Meaning string `json:"meaning"`
 	LastRun string `json:"last_run"`
-	NextRun string `json:"next_run"`
+	NextRun string `json:"next_run,omitempty"`
 }
 
 // aicoPushPass sends one push: the unsent notices (at most 50) and every
@@ -236,8 +240,14 @@ func (s *Server) aicoPushPass(now time.Time, client *http.Client) {
 	if noticeErr != nil {
 		log.Printf("[!] Aico push: reading alerts failed: %v", noticeErr)
 	}
-	rows := s.aicoRows(now)
-	err := aicoPost(client, target, key, notices, rows)
+	rows := s.aicoAllRows(now)
+	shown := s.aicoShownRows()
+	// A row cut by the 50 limit is still produced, so it is never resolved.
+	resolved := aicoResolvedRows(shown, rows, now, aicoListMax-min(len(rows), aicoListMax))
+	if len(rows) > aicoListMax {
+		rows = rows[:aicoListMax]
+	}
+	err := aicoPost(client, target, key, notices, append(append([]aicoRow{}, rows...), resolved...))
 	_ = s.store.SetSetting(aicoLastAtSetting, now.Format(time.RFC3339))
 	switch {
 	case err != nil:
@@ -250,6 +260,7 @@ func (s *Server) aicoPushPass(now time.Time, client *http.Client) {
 		} else {
 			_ = s.store.SetSetting(aicoLastErrSetting, "")
 		}
+		s.saveAicoShownRows(shown, rows, resolved)
 		if len(tokens) > 0 {
 			if err := s.store.MarkAicoPushSent(tokens, now); err != nil {
 				log.Printf("[!] Aico push: recording sent notices failed: %v", err)
@@ -286,6 +297,69 @@ func aicoPost(client *http.Client, target, key string, notices []aicoNotice, row
 		return fmt.Errorf("Aico answered %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// aicoShownRows reads the rows Aico last accepted with a next_run (id -> what).
+func (s *Server) aicoShownRows() map[string]string {
+	shown := map[string]string{}
+	if raw, _ := s.store.GetSetting(aicoRowsSetting); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &shown)
+	}
+	return shown
+}
+
+// aicoResolvedRows resolves the rows Aico shows that the hub no longer
+// produces (a section that recovered, a finding that went away): one ok row
+// with no next_run, so Aico shows it settled instead of late. At most room.
+func aicoResolvedRows(shown map[string]string, rows []aicoRow, now time.Time, room int) []aicoRow {
+	live := map[string]bool{}
+	for _, r := range rows {
+		live[r.ID] = true
+	}
+	var gone []string
+	for id := range shown {
+		if !live[id] {
+			gone = append(gone, id)
+		}
+	}
+	sort.Strings(gone)
+	var out []aicoRow
+	for _, id := range gone {
+		if len(out) >= room {
+			break
+		}
+		what := shown[id]
+		if what == "" {
+			what = id
+		}
+		out = append(out, aicoRow{ID: id, What: cutRunes(what, 120), Kind: "check", Machine: aicoRowMachine, Project: aicoRowProject,
+			State: "ok", Meaning: "Resolved: the OmniNull hub no longer reports this", LastRun: now.UTC().Format(time.RFC3339)})
+	}
+	return out
+}
+
+// saveAicoShownRows records, after Aico accepted a push, the rows it now
+// shows with a next_run: this pass's rows, plus earlier ones not yet resolved.
+func (s *Server) saveAicoShownRows(shown map[string]string, rows, resolved []aicoRow) {
+	next := map[string]string{}
+	for id, what := range shown {
+		next[id] = what
+	}
+	for _, r := range resolved {
+		delete(next, r.ID)
+	}
+	for _, r := range rows {
+		if r.NextRun != "" {
+			next[r.ID] = r.What
+		}
+	}
+	raw, err := json.Marshal(next)
+	if err == nil {
+		err = s.store.SetSetting(aicoRowsSetting, string(raw))
+	}
+	if err != nil {
+		log.Printf("[!] Aico push: recording the shown rows failed: %v", err)
+	}
 }
 
 // ---- notices ----
@@ -542,11 +616,17 @@ func btoi(b bool) int {
 // aicoRows is every health row plus the retired-build rows, at most 50 with
 // the ones needing a look first.
 func (s *Server) aicoRows(now time.Time) []aicoRow {
-	rows := append(aicoFindingRows(s.healthFindings(now), now), s.retiredBuildRows(now)...)
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].State == "warn" && rows[j].State != "warn" })
+	rows := s.aicoAllRows(now)
 	if len(rows) > aicoListMax {
 		rows = rows[:aicoListMax]
 	}
+	return rows
+}
+
+// aicoAllRows is every row the hub produces this pass, warn first, uncut.
+func (s *Server) aicoAllRows(now time.Time) []aicoRow {
+	rows := append(aicoFindingRows(s.healthFindings(now), now), s.retiredBuildRows(now)...)
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].State == "warn" && rows[j].State != "warn" })
 	return rows
 }
 

@@ -265,7 +265,7 @@ func TestNightshiftFeedDigestIsANote(t *testing.T) {
 	}
 }
 
-// Over the weekly page budget the feed says which rule is noisiest, as a note.
+// Over the weekly page budget the finding needs a look and names the noisiest rule.
 func TestNightshiftFeedDetectionHealthNamesTheNoisiestRule(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
@@ -309,7 +309,7 @@ func TestNightshiftFeedDetectionHealthNamesTheNoisiestRule(t *testing.T) {
 	page("b", "C2_BEACONING", "inc-b", "")
 	page("c", "DECOY_TOUCH", "inc-c", "")
 	f := find()
-	if f.StatusID != ocsfStatusNew || f.SeverityID != ocsfSevInformational ||
+	if f.StatusID != ocsfStatusNew || f.SeverityID != ocsfSevLow ||
 		f.Message != "3 incidents paged in the last 7 days, more than the weekly page budget of 1. The noisiest rule is beacon (2 incidents); if those were not worth a page, tune that rule. Every page was still sent." {
 		t.Fatalf("over budget = %d/%d %q", f.StatusID, f.SeverityID, f.Message)
 	}

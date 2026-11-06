@@ -322,8 +322,9 @@ func (s *Server) recordedDigest(now time.Time, uid, title string, types []string
 }
 
 // detectionHealthFinding compares the incidents that paged in the last week
-// with the page budget (page_budget_per_week). Over budget it is a note naming
-// the noisiest rule, so the rule gets tuned; it never holds a page back.
+// with the page budget (page_budget_per_week). Over budget it needs a look
+// (low severity, so its Aico row warns) and names the noisiest rule, so the
+// rule gets tuned; it never holds a page back.
 func (s *Server) detectionHealthFinding(now time.Time) (feedFinding, error) {
 	incidents, err := s.store.PagedIncidents(now.Add(-7*24*time.Hour), detector.DrillEndpointID)
 	if err != nil {
@@ -360,7 +361,7 @@ func (s *Server) detectionHealthFinding(now time.Time) (feedFinding, error) {
 		msg = fmt.Sprintf("%s paged in the last 7 days, more than the weekly page budget of %d, each from a different rule (%s). No rule is repeating, so there is nothing to tune. Every page was still sent.",
 			plural(len(incidents), "incident", "incidents"), budget, strings.Join(names, ", "))
 	}
-	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
+	return s.feedFinding(now, uid, title, ocsfSevLow, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
 // ruleName is a detector's type in owner words.
