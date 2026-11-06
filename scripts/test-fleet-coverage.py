@@ -37,11 +37,11 @@ class FleetCoverage(unittest.TestCase):
     def test_off_machines_are_not_counted_but_named(self):
         r = fc.row("m", NOW, fc.fleet_machines(STATUS), {"davion-sidarli", "aico", "neri-hunters", "agent-work"},
                    off=fc.off_machines(STATUS))
-        self.assertEqual(r["meaning"], "1 of 5 running fleet machines has no OmniNull agent: apps; "
+        self.assertEqual(r["meaning"], "1 of 5 fleet machines has no OmniNull agent: apps; "
                                        "not counted while off: jobinator")
         r = fc.row("m", NOW, {"aico", "jobinator"}, {"aico"}, off={"jobinator"})
         self.assertEqual((r["state"], r["meaning"]),
-                         ("ok", "All 1 running fleet machines run an OmniNull agent; not counted while off: jobinator"))
+                         ("ok", "All 1 fleet machines have an OmniNull agent; not counted while off: jobinator"))
 
     def test_hosts_are_short_lower_case(self):
         builds = {"endpoints": [{"hostname": "DAVION-SIDARLI.lan"}, {"hostname": "aico"}, {"hostname": ""}, "x"]}
@@ -53,13 +53,13 @@ class FleetCoverage(unittest.TestCase):
         r = fc.row("davion-sidarli", NOW, {"davion-sidarli", "aico", "neri-hunters", "apps"},
                    {"davion-sidarli", "aico", "davion-gem"})
         self.assertEqual(r["state"], "warn")
-        self.assertEqual(r["meaning"], "2 of 4 running fleet machines have no OmniNull agent: apps, neri-hunters")
+        self.assertEqual(r["meaning"], "2 of 4 fleet machines have no OmniNull agent: apps, neri-hunters")
         self.assertEqual(r["id"], "ominull.fleet.coverage")
         self.assertEqual(r["next_run"], "2026-11-06T14:30:00Z")
 
     def test_all_covered_is_ok(self):
         r = fc.row("davion-sidarli", NOW, {"aico"}, {"aico", "davion-gem"})
-        self.assertEqual((r["state"], r["meaning"]), ("ok", "All 1 running fleet machines run an OmniNull agent"))
+        self.assertEqual((r["state"], r["meaning"]), ("ok", "All 1 fleet machines have an OmniNull agent"))
 
     def test_unknown_is_never_covered(self):
         self.assertEqual(fc.row("m", NOW, {"aico"}, None, "the OmniNull hub was not read (x)")["state"], "warn")

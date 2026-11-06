@@ -5,8 +5,8 @@ Aico's fleet is the machines that report a machine row to Aico Status; OmniNull'
 endpoints. This compares the two each run, so neither list can drift from the other unnoticed, and writes one row to
 Aico Status on this machine (POST /api/status/rows on loopback):
 
-  ok    every running fleet machine has an enrolled agent
-  warn  N running fleet machines have none, named; or the hub or Aico could not be read (unknown is never "all covered")
+  ok    every fleet machine has an enrolled agent, apart from machines that are off
+  warn  N fleet machines that are not off have none, named; or the hub or Aico could not be read (unknown is never "all covered")
 
 Two kinds of machine row are not counted:
   - the hub's own (row ominull.machine): the hub is the detection backend, not an endpoint; its co-installed agent was
@@ -76,7 +76,7 @@ def _cut(text: str) -> str:
 
 def row(machine: str, now: dt.datetime, fleet: set[str] | None, hosts: set[str] | None, error: str = "",
         off: set[str] | frozenset[str] = frozenset()) -> dict[str, Any]:
-    """The Status row: ok, warn naming the uncovered running machines, or warn saying what could not be read."""
+    """The Status row: ok, warn naming the uncovered machines that are not off, or warn saying what could not be read."""
     base = {"id": ROW_ID, "what": "Fleet machines without an OmniNull agent", "kind": "check", "machine": machine,
             "project": "ominull", "last_run": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "next_run": (now + dt.timedelta(minutes=2 * EVERY_MIN)).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -84,15 +84,15 @@ def row(machine: str, now: dt.datetime, fleet: set[str] | None, hosts: set[str] 
         return {**base, "state": "warn", "meaning": _cut(f"Not known which fleet machines are covered: {error or 'nothing read'}")}
     if not fleet:
         return {**base, "state": "warn", "meaning": "Not known which fleet machines are covered: Aico Status lists no machines"}
-    idle = sorted((fleet - hosts) & off)
-    running = fleet - set(idle)
-    missing = sorted(running - hosts)
+    idle = sorted((fleet - hosts) & off)  # no agent, but nothing runs there now
+    counted = fleet - set(idle)
+    missing = sorted(counted - hosts)
     note = f"; not counted while off: {', '.join(idle)}" if idle else ""
     if not missing:
-        return {**base, "state": "ok", "meaning": _cut(f"All {len(running)} running fleet machines run an OmniNull agent{note}")}
+        return {**base, "state": "ok", "meaning": _cut(f"All {len(counted)} fleet machines have an OmniNull agent{note}")}
     n = len(missing)
     return {**base, "state": "warn", "meaning": _cut(
-        f"{n} of {len(running)} running fleet machines {'has' if n == 1 else 'have'} no OmniNull agent: "
+        f"{n} of {len(counted)} fleet machines {'has' if n == 1 else 'have'} no OmniNull agent: "
         f"{', '.join(missing)}{note}")}
 
 
