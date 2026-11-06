@@ -50,8 +50,8 @@ the remaining agents after native provenance and heartbeat convergence.
 
 ### Session signing (routine release keys)
 
-Inside the owner's work session, Nightshift's signer can sign with a routine
-release key instead of the main release key (Nightshift's signer signs either one without asking anyone): run the release with
+Inside the owner's work session, `ominull-release-signer` can sign with a routine
+release key instead of the main release key (it signs either one without asking anyone): run the release with
 `OMINULL_SIGNING_ROUTINE=1`. The signing backend asks the signer for
 `pubkey routine` and refuses a key that is not on the hub's list signed by the
 pinned release key (`GET /api/v1/trust/routine-keys`). It verifies every
@@ -99,13 +99,16 @@ prompt. Inside an active owner work session:
 ```bash
 st elevate request ominull-admin --reason 'OmniNull release X.Y.Z' --wait
 OMINULL_SIGNING_ROUTINE=1 OMINULL_SIGNING_BACKEND=command \
-OMINULL_SIGNING_COMMAND=~/.local/lib/nightshift/bin/nightshift-release-signer \
+OMINULL_SIGNING_COMMAND=~/.local/bin/ominull-release-signer \
 OMINULL_HUB_URL=https://<hub>:9443 \
 st elevate run ominull-admin -- scripts/release.sh ...
 st elevate revoke ominull-admin
 ```
 
-The session authorizes routine signing and the `ominull-admin` grant without
+The signer (`hub/cmd/ominull-release-signer`; install with `scripts/install-release-signer.sh`) runs its root half
+through `sudo -n`, opens the key from the key store (`OMINULL_SIGNING_STORE`, default
+`/var/lib/nightshift/release-signing`; public half `OMINULL_SIGNING_PUBLIC`) and signs only what `begin` froze: each
+package once, then its release statement once. Making a routine key list is not part of it. The session authorizes the `ominull-admin` grant without
 owner taps. Use the actual release arguments in place of `...`.
 
 New installs take a routine-signed package too. The bootstrap scripts

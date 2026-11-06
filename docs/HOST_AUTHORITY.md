@@ -173,7 +173,8 @@ the console's job history shows it as "signed by Nightshift" or "signed by Night
 ## ominullctl host-script run
 
 Runs on the machine that holds Nightshift's signer (the workstation), never on the hub, so the hub never holds the
-signing keys. Nightshift's timers call it.
+signing keys. Nightshift's timers call it. (Release signing is separate: `ominull-release-signer`, see PACKAGING.md; it
+does not sign host grants.)
 
 ```
 ominullctl host-script run ENDPOINT --package NAME [--mode audit|enforce|revert] [--auto] [--host LABEL]

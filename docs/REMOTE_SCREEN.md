@@ -269,7 +269,7 @@ length-prefix framing** (§6.5).
   access or downloads**.
 - The helper binary is **signed and digest-pinned in the agent release** exactly
   like the agent binary (add it to the release artifact set and the version /
-  digest sites; signing goes through Nightshift's release signer, which signs without asking anyone).
+  digest sites; signing goes through `ominull-release-signer`, which signs without asking anyone).
 - **Lay the capture + input backend behind a trait** (e.g. `ScreenBackend`:
   `monitors()`, `capture_tiles(dirty) -> Vec<Tile>`, `inject(input)`,
   `follow_input_desktop()`) with a Windows DXGI/GDI implementation now, so the

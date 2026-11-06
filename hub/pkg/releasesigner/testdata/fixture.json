@@ -1,0 +1,56 @@
+{
+ "seal_hex": "98c127fdd147ee3d5569ea0568fefe6a968f092e8ccffc29b31de0b0ca4d176c",
+ "store": {
+  "v": 1,
+  "seals": {
+   "root": {
+    "pub": "1add73c38a929a84b222d6973ea6839a3ae881212fcdc1e375e5d20f214bab42"
+   },
+   "p1": {
+    "pub": "ea87592c96fab6e29c687d71164f76c7d815eeea38d0909551c8f50d7c467259"
+   }
+  },
+  "keys": [
+   {
+    "id": "57387cd5f9413041",
+    "label": "test release",
+    "pubkey": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEj6rAPYe2b8WMiXTHBHT2BbmrkVMP\nVnDJJkbwsbER1H3Yal7a1dbWP4Nk0YMupJUZcT4D9tFhUu3m071hVpJAkw==\n-----END PUBLIC KEY-----\n",
+    "wraps": {
+     "root": {
+      "epk": "1fc46d092a6f4d07299349707aeb4a49786f5784b6d2c37a8dc5da49bb230d61",
+      "nonce": "9f567ff914715fc2b5b741b5",
+      "ct": "1b28c472e1ebce97fe640896fd1a4917947f48fbf11457f7c597de7fc185366281bc0f2608ae5f78444f399f4c5d3e524d7d46e9881b4d104e5cddfe835f5306b90de221ffcb17804a0f45f8b0a0f33b5101c05480eb686494f60d48dc4c3c45c98a965301864c92e64a76591f75a97323f1c3265eb8022f2479b08be2d7d61a64b9e70b783eeab71438a5c05e3cf9e6876fcf1eb7ae26be1ef6"
+     },
+     "p1": {
+      "epk": "02e564e598993632af5cb66d3dc30b469ea1fbe97929d4be9930e8a06ed7185e",
+      "nonce": "2449fbd87118c8dfa8d4f05f",
+      "ct": "c8aa236483d27668187d47839a754c275d1b7e8e5771bef06d637920df049ca9c2e6d0297aae9ade41648b9275e5a8918cf6c3e4825e9b21cb6e487f3a87e10ca84486068486a6da1fa0a911410bcf228fdaf8854edf7c6c8694b134a02c39e46426d2bec432cdebffe267b0c5b9fb3d1f5f78c4e9d26b2379525361636ac45b86b38611fa87cc04f0dee02c7cae1fde652fc74145a02dc4bc3b"
+     }
+    }
+   }
+  ],
+  "routine_keys": [
+   {
+    "id": "65680172c69bc2cd",
+    "label": "session test",
+    "pubkey": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjS0epU+G1h5NgQsGx4NgbCW0/fnq\nJXhvOC5CsUBhJilXLEf4vwWLYH+XwDxqD5/enaVXMGtw7fkKbO8XSrxXoA==\n-----END PUBLIC KEY-----\n",
+    "wraps": {
+     "root": {
+      "epk": "38a5336ea34042a8ee3be6d9672f315dcdfaec20c0b6cad62e95e64c90899435",
+      "nonce": "14406b7625b8adc531bc7c0a",
+      "ct": "1c4a1522a64e7bc4d499589b5e545e17d3c6d8c1b3cccac66fc70f0fd30469597ae702a880ccee548ed9836988a21b8bb73a85b1e311b91778af630565bacca100ee423c9cdea15a62014330b0b478c80b3737d44871eb6aaa61effeaf5ea17429c0be67d6c045f0a3429e23a26a6b50c575ce9363ac5c50407bbccda8ffbd7f5cc07abce65230c4b7bfd3cb8d74c5d5396a519fe18be3f6db15"
+     },
+     "p1": {
+      "epk": "11a2165fe4b23ee70f9738394a81bd4c585dd63a2ab8b282ba9aa6f95aaeb45c",
+      "nonce": "91785f73057d59033495b39d",
+      "ct": "e99219bae0df213919b9fdcc89d888401e33496bcc601a8a3eb2b68e0adc995cb776bf2949a22cd71dcbc3addfe03a0f20b20fcc5ae7ea9dc6f431bc962d6e0189183d0c6e97d8d78a16cea1af7bfcca9839ede2378acf24c15a25f37b0543f1efbc8c52980b587bad3b83b60fd3027ea271474d97767d85536f15c0ce9315ea82b94cb6d5151d4d0ea3d5926256e51b11f5730b1ecea3d9b03e"
+     }
+    }
+   }
+  ],
+  "routine_list": {
+   "epoch": 1,
+   "keys": "65680172c69bc2cd:00"
+  }
+ }
+}

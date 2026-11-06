@@ -79,7 +79,7 @@ signing_pubkey() {
     esac
 }
 
-# Routine mode (OMINULL_SIGNING_ROUTINE=1, Nightshift's session signing): the
+# Routine mode (OMINULL_SIGNING_ROUTINE=1, the owner's session signing): the
 # signer's routine key must be one the pinned release key listed on the hub
 # (GET /api/v1/trust/routine-keys). That signed list goes beside the packages
 # as dist/routine-keys.json, which the hub installer on Proxmox reads; agents
@@ -140,7 +140,7 @@ if [ -z "${signing_pub}" ]; then
     exit 1
 fi
 if [ "${OMINULL_SIGNING_ROUTINE:-0}" = 1 ]; then
-    [ "${BACKEND}" = command ] || { echo "[-] Routine signing needs the command backend (Nightshift's signer)." >&2; exit 1; }
+    [ "${BACKEND}" = command ] || { echo "[-] Routine signing needs the command backend (ominull-release-signer)." >&2; exit 1; }
     list="$(routine_list)" || { echo "[-] Could not read the hub's routine release keys." >&2; exit 1; }
     signing_xy="$(printf '%s\n' "${signing_pub}" | openssl pkey -pubin -outform DER 2>/dev/null | tail -c 64 | od -An -v -tx1 | tr -d ' \n')"
     routine_id="$(printf '%s' "${list}" | jq -r --arg xy "${signing_xy}" '.keys[] | select(.xy == $xy) | .id')"
@@ -166,8 +166,8 @@ verify_sig() {
     openssl dgst -sha256 -verify "${verify_pub}" -signature "$2" "$1" >/dev/null 2>&1
 }
 
-# A command backend may put a whole run behind one session (Nightshift's
-# nightshift-release-signer signs it without asking anyone):
+# A command backend may put a whole run behind one session (ominull-release-signer
+# signs it without asking anyone):
 #   CMD begin release VERSION NAME[=SHA256]...   or   CMD begin trust TENANT FILE
 # prints a session token that later "CMD sign" calls get as
 # OMINULL_SIGNING_SESSION; "CMD end" closes it. A signer without sessions exits

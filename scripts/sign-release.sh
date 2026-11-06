@@ -14,7 +14,8 @@
 #   command  OMINULL_SIGNING_COMMAND is an executable for a token, HSM or a
 #            signing service: "CMD pubkey" prints the PEM public key, "CMD sign
 #            FILE" prints the DER ECDSA-SHA256 signature over FILE. The key never
-#            leaves it. Nightshift's nightshift-release-signer signs the whole
+#            leaves it. ominull-release-signer (hub/cmd/ominull-release-signer,
+#            installed by scripts/install-release-signer.sh) signs the whole
 #            release in one session (begin/end in lib/signing-backend.sh).
 # The private key is never in this repo, on the hub, or in CI.
 set -euo pipefail
