@@ -478,7 +478,7 @@ Hosts whose run would be the identical payload are grouped into one request.
 The schedule asks the authority like `maint run` and dispatches at once
 (at most 50 hosts per run; the rest wait for the next pass). A run the
 authority will not sign, or an authority that is not available, shows up as a
-schedule block (console and Nightshift feed) with its reason and is tried again
+schedule block (console and health findings) with its reason and is tried again
 on the next pass.
 
 **Audit-then-enforce.** A safe package (not careful, not maintenance mode or Restart) may set `on_drift` to
@@ -489,9 +489,9 @@ it is dispatched at once ("PACKAGE (enforce: the scheduled audit found drift)").
 next scheduled audit; a hand-run audit's drift never triggers it. Careful packages (and any with a role) are
 refused when you set `on_drift` (`400`): auto-enforce is only for safe packages, so run a careful package's enforce by hand.
 
-## Nightshift feed
+## Health findings
 
-The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries these records:
+The hub's health findings (`/api/v1/health/findings`, pushed to Aico as Status rows; see the project guide) carry these records:
 
 - `ominull.maintenance`: critical (pushes) when the latest run of any package
   on any host failed or returned no result line, with counts in the message
@@ -512,7 +512,7 @@ The existing findings feed (`/api/v1/integrations/nightshift/findings`) carries 
   settings row `maintenance.run_records`).
 
 **Escalation.** `POST /api/v1/maintenance/escalate {"job_id","reason"}` (admin) hands a run to the owner: it becomes
-one decision (group `job:<id>`, answer `handled`) on the decisions card and the Nightshift feed, audited
+one decision (group `job:<id>`, answer `handled`) on the decisions card and the health findings, audited
 `MAINTENANCE_ESCALATED`. `404` unknown job, `400` no reason or not a script run. Escalating the same job again
 replaces the reason; the newest 50 are kept (settings row `maintenance.escalations`).
 
@@ -539,7 +539,7 @@ latest runs (`ominull.decisions.playbook.<id>`,
   `maintenance.decisions` (the newest 500).
 - **Nightshift inbox (removed).** Nightshift no longer relays decisions:
   `/api/v1/integrations/nightshift/decisions` and `/decisions/answer` are gone.
-  The feed records still carry `"answer_in":"Nightshift inbox or OmniNull console"`;
+  The finding records still carry `"answer_in":"Nightshift inbox or OmniNull console"`;
   read it as the console (or `POST /api/v1/maintenance/decisions` with the admin key).
 - **Coming back.** An answered item opens again only if a run that finished
   after the answer reports it again.

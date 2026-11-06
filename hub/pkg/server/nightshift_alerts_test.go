@@ -75,10 +75,10 @@ func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	key := issueFeedKey(t, srv)
+	key := "mock_admin_token"
 
-	summary := func(contract string) (int, string, map[string]any) {
-		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings"+contract, key)
+	summary := func() (int, string, map[string]any) {
+		w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", key)
 		var doc feedDoc
 		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
 			t.Fatal(err)
@@ -92,7 +92,7 @@ func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
 		return 0, "", nil
 	}
 
-	sev, msg, um := summary("?contract=v4")
+	sev, msg, um := summary()
 	if sev != ocsfSevHigh {
 		t.Errorf("severity = %d, want the worst alert's (HIGH = %d)", sev, ocsfSevHigh)
 	}
@@ -121,11 +121,6 @@ func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
 	if len(indented) > 4096 {
 		t.Errorf("summary details are %d bytes, over Nightshift's 4 KiB cap", len(indented))
 	}
-
-	sev, msg, um = summary("")
-	if sev != ocsfSevInformational || !strings.Contains(msg, "8 new open anomalies") || um["alerts"] != nil {
-		t.Errorf("v1 summary changed: %d %q %v", sev, msg, um["alerts"])
-	}
 }
 
 // An alert the hub explains as the owner's own ssh is listed for the record
@@ -153,14 +148,14 @@ func TestNightshiftFeedOwnAutomationDoesNotPage(t *testing.T) {
 	}
 	add(storage.AnomalyAlert{ID: "a-own", EndpointID: "ws-01", AnomalyType: "LATERAL_PORT_SWEEP", Severity: "CRITICAL",
 		Title: "Lateral Port Sweep / Internal Fan-Out (3 Hosts)", ProcessPath: "/usr/bin/ssh", Evidence: string(own), Timestamp: now.Add(-time.Minute)})
-	key := issueFeedKey(t, srv)
+	key := "mock_admin_token"
 	type sum struct {
 		SeverityID int
 		Message    string
 		Unmapped   map[string]any
 	}
 	read := func() sum {
-		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", key)
+		w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", key)
 		var doc feedDoc
 		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
 			t.Fatal(err)
@@ -358,8 +353,8 @@ func TestAgentEgressDigestIsInformationalAndNamed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	key := issueFeedKey(t, srv)
-	w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", key)
+	key := "mock_admin_token"
+	w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", key)
 	var doc feedDoc
 	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
 		t.Fatal(err)
@@ -422,9 +417,6 @@ func TestRelayAlertVerdict(t *testing.T) {
 	}
 	if code, _ := post(`{"ids":["open"]}`, "mock_admin_token"); code != http.StatusUnauthorized {
 		t.Fatalf("admin key on the verdict relay: %d", code)
-	}
-	if code, _ := post(`{"ids":["open"]}`, issueFeedKey(t, srv)); code != http.StatusUnauthorized {
-		t.Fatalf("feed key confirmed an alert: %d", code)
 	}
 	code, out := post(`{"ids":["open","old","hunt","low","intel","beacon","missing"]}`, k.Key)
 	if code != http.StatusOK || out["confirmed"] != float64(1) || len(out["skipped"].([]any)) != 6 {
@@ -581,10 +573,10 @@ func TestNightshiftFeedListsPagesFirstAndCountsUnlistedPages(t *testing.T) {
 		add(fmt.Sprintf("m-%d", i), "MEDIUM", time.Duration(i+1)*time.Minute)
 	}
 	add("h-0", "HIGH", time.Hour)
-	key := issueFeedKey(t, srv)
+	key := "mock_admin_token"
 	summary := func() (map[string]any, []feedAlert) {
 		t.Helper()
-		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", key)
+		w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", key)
 		var doc feedDoc
 		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
 			t.Fatal(err)
@@ -687,10 +679,10 @@ func TestNightshiftFeedListsEachIncidentBeforeRepeats(t *testing.T) {
 		add(fmt.Sprintf("a-%d", i), "HIGH", "inc-a", time.Duration(i+1)*time.Minute)
 	}
 	add("b-0", "MEDIUM", "inc-b", time.Hour)
-	key := issueFeedKey(t, srv)
+	key := "mock_admin_token"
 	summary := func() (map[string]any, []feedAlert) {
 		t.Helper()
-		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", key)
+		w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", key)
 		var doc feedDoc
 		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
 			t.Fatal(err)

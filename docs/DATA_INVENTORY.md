@@ -1,8 +1,7 @@
 # Data inventory
 
-OmniNull collects, Nightshift decides. The Linux agent reports what data a host holds as metadata only; the hub keeps
-the latest picture and hands a bounded copy to Nightshift (findings contract v3), which classifies it and turns it into
-a per-asset data map, posture deductions and drift findings.
+The Linux agent reports what data a host holds as metadata only; the hub keeps
+the latest picture for the console and the API. Nightshift's pull feed that carried a copy of it is retired.
 
 ## Agent (Linux)
 
@@ -52,7 +51,7 @@ Admin endpoints (fleet-wide, not for tenant administrators):
 sending nothing, when a decoy's placement names no file path. Run it again whenever canaries change or an endpoint is
 enrolled.
 
-## Hub storage and the Nightshift feed
+## Hub storage
 
 The hub validates every run (schema `ominull.data-inventory/1`, path and rule formats, counts, at most 20000 stores
 and 5000 items, start time no more than 5 minutes ahead of the hub) and drops anything at or under a canary path
@@ -62,6 +61,4 @@ short (`partial`) or whose content was not all read (`content_partial`), and a r
 were dropped) the items it did not see outside cut-short stores. A run older than the last one stored is
 acknowledged and ignored.
 
-The v3 feed (`?contract=v3`, and v4, which adds each anomaly record's `tier`; `hub/pkg/server/data_inventory_feed.go`) adds `data_inventory`: one block per endpoint
-with the scan summary, host facts (left out above 32 KiB), at most 400 stores and 400 items, and truncation flags;
-at most 64 blocks, the whole document fitted to 960 KiB. Nightshift's side of the contract is its `docs/ingest.md` (v3).
+The pull feed that used to carry the inventory to Nightshift is gone; nothing else reads it from the hub's findings.

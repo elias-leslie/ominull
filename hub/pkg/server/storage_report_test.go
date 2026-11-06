@@ -54,7 +54,7 @@ func TestStorageReportAndFeedFinding(t *testing.T) {
 		t.Errorf("a tenant key read the hub-wide report: %d", w.Code)
 	}
 
-	w = feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", "mock_admin_token")
+	w = feedRequest(srv, http.MethodGet, "/api/v1/health/findings", "mock_admin_token")
 	var doc feedDoc
 	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
 		t.Fatal(err)

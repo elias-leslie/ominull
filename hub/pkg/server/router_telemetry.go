@@ -159,8 +159,7 @@ func healthWord(r storage.RouterIngestResult) string {
 
 // handleRouterHealth returns the latest reading of every gateway that sent
 // one, with the firmware it runs and when that last changed. Read-only; the
-// same document serves operators and Nightshift's router check, which owns the
-// history and the alerting.
+// same document serves operators.
 func (s *Server) handleRouterHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

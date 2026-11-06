@@ -1,10 +1,8 @@
 package server
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -17,29 +15,20 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// Nightshift findings feed.
+// Health findings.
 //
-// Nightshift, the host steward, pulls one summarised findings document from
-// the hub every cycle and shows it on its board. The document follows the
-// contract Nightshift owns (nightshift.findings/v1: an OCSF Detection Finding
-// subset, documented in Nightshift's docs/ingest.md). Neither side imports the
-// other; this file and that document are the whole interface.
+// The hub summarises its own state (alerts, quiet agents, certificates,
+// storage, maintenance, detection health) as OCSF-shaped findings. Since
+// Nightshift retired they are not pulled by anyone: aico_push.go turns them
+// into Status rows and the paging alerts into notices, and an administrator
+// can read the raw list at GET /api/v1/health/findings for diagnostics.
 //
-// The feed carries counts and states, not telemetry: how many anomalies are
-// open, which agents have gone quiet, whether the router collector is still
-// reporting. Messages hold only counts, because Nightshift may push them;
-// device names stay in the structured fields, which only its board shows.
-//
-// Nightshift authenticates with its own key, issued by an administrator and
-// stored here only as a SHA-256. That key opens this one read-only route and
-// nothing else: it is not a tenant key and no other middleware knows it.
-// Reissuing it revokes the previous one.
+// The findings carry counts and states, not telemetry. Messages hold only
+// counts; device names stay in the structured fields.
 
 const (
-	nightshiftFeedKeySetting = "nightshift_feed_key_sha256"
-	nightshiftSchema         = "nightshift.findings/v1"
-	nightshiftSource         = "ominull"
-	ocsfVersion              = "1.3.0"
+	findingSource = "ominull"
+	ocsfVersion   = "1.3.0"
 
 	feedAnomalyWindow = 24 * time.Hour
 	// An always-on server agent that has been quiet this long is a problem. A
@@ -68,62 +57,16 @@ func hashFeedKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// nightshiftFeedAuth admits the Nightshift feed key on this route only, and
-// otherwise the normal credentials restricted to a fleet administrator: the
-// feed is fleet-wide, so an administrator scoped to one tenant is refused.
-func (s *Server) nightshiftFeedAuth(next http.HandlerFunc) http.HandlerFunc {
-	fallback := s.authMiddleware(requireAdmin(func(w http.ResponseWriter, r *http.Request) {
+// fleetAdminAuth admits a fleet administrator only: the health findings are
+// fleet-wide, so an administrator scoped to one tenant is refused.
+func (s *Server) fleetAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.authMiddleware(requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Tenant-ID") != "" {
-			writeJSONError(w, http.StatusForbidden, "the Nightshift feed is fleet-wide; a tenant administrator cannot read it")
+			writeJSONError(w, http.StatusForbidden, "this is fleet-wide; a tenant administrator cannot use it")
 			return
 		}
 		next(w, r)
 	}))
-	return func(w http.ResponseWriter, r *http.Request) {
-		key := strings.TrimSpace(r.Header.Get("X-API-Key"))
-		if want, _ := s.store.GetSetting(nightshiftFeedKeySetting); key != "" && want != "" && secretEqual(hashFeedKey(key), want) {
-			if s.throttle.blocked(clientIP(r)) {
-				w.Header().Set("Retry-After", "60")
-				writeJSONError(w, http.StatusTooManyRequests, "too many failed authentication attempts; try again shortly")
-				return
-			}
-			for _, h := range []string{"X-Role", "X-Tenant-ID", "X-Username", "X-User-ID", "X-Client-CN", "X-Device-Endpoint-ID", "X-Operator-ID", "X-Auth-Method", "X-Router-ID"} {
-				r.Header.Del(h)
-			}
-			r.Header.Set("X-Role", "nightshift-feed")
-			r.Header.Set("X-Username", "nightshift")
-			r.Header.Set("X-Auth-Method", "feed-key")
-			next(w, r)
-			return
-		}
-		fallback(w, r)
-	}
-}
-
-// handleNightshiftFeedKey issues the feed key. Admin only; the key is shown
-// once and only its hash is kept.
-func (s *Server) handleNightshiftFeedKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if r.Header.Get("X-Role") != "admin" || r.Header.Get("X-Tenant-ID") != "" {
-		writeJSONError(w, http.StatusForbidden, "only an administrator can issue the Nightshift feed key")
-		return
-	}
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "generating the key failed")
-		return
-	}
-	key := "nsf_" + hex.EncodeToString(raw)
-	if err := s.store.SetSetting(nightshiftFeedKeySetting, hashFeedKey(key)); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "the key could not be saved")
-		return
-	}
-	s.audit(r, "NIGHTSHIFT_FEED_KEY_ISSUED", "nightshift", "Issued the Nightshift findings feed key; any earlier key is revoked")
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]string{"key": key, "route": "/api/v1/integrations/nightshift/findings"})
 }
 
 type feedFinding struct {
@@ -152,7 +95,7 @@ func (s *Server) feedFinding(now time.Time, uid, title string, severity, status 
 		Time:    now.UnixMilli(),
 		Message: message,
 		FindingInfo: map[string]any{
-			"uid": uid, "title": title, "types": []string{strings.SplitN(strings.TrimPrefix(uid, nightshiftSource+"."), ".", 2)[0]},
+			"uid": uid, "title": title, "types": []string{strings.SplitN(strings.TrimPrefix(uid, findingSource+"."), ".", 2)[0]},
 		},
 		Resources: resources,
 		Unmapped:  unmapped,
@@ -181,36 +124,13 @@ func humanAge(d time.Duration) string {
 	}
 }
 
-func (s *Server) anomalyFinding(now time.Time, detail bool) (feedFinding, error) {
+// anomalyFinding is the alert summary: the newest paging alerts, each
+// described (nightshift_alerts.go), at the severity of the worst of them.
+func (s *Server) anomalyFinding(now time.Time) (feedFinding, error) {
 	win, err := s.store.SummariseOpenAnomalies(now.Add(-feedAnomalyWindow))
 	if err != nil {
 		return feedFinding{}, err
 	}
-	if detail {
-		return s.anomalyDetailFinding(now, win)
-	}
-	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_severity": win.BySeverity,
-		"by_type": win.ByType, "by_host": win.ByHost, "backlog": win.Backlog, "tier": storage.TierPage}
-	const uid, title = "ominull.anomalies.summary", "Open anomalies"
-	if win.Total == 0 {
-		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-			fmt.Sprintf("No new open anomalies in the last 24 h (%d open in the backlog)", win.Backlog), nil, unmapped), nil
-	}
-	crit, high := win.BySeverity["CRITICAL"], win.BySeverity["HIGH"]
-	// Only a critical verdict asks for attention; the rest is volume the
-	// prove-out is measuring, so it is a note on the board.
-	sev := ocsfSevInformational
-	if crit > 0 {
-		sev = ocsfSevHigh
-	}
-	msg := fmt.Sprintf("%s in the last 24 h (%d critical, %d high); %d open in the backlog",
-		plural(win.Total, "new open anomaly", "new open anomalies"), crit, high, win.Backlog)
-	return s.feedFinding(now, uid, title, sev, ocsfStatusNew, msg, nil, unmapped), nil
-}
-
-// anomalyDetailFinding is the v4 summary: the newest paging alerts, each
-// described (nightshift_alerts.go), at the severity of the worst of them.
-func (s *Server) anomalyDetailFinding(now time.Time, win storage.AnomalyWindow) (feedFinding, error) {
 	const uid, title = "ominull.anomalies.summary", "Open alerts"
 	unmapped := map[string]any{"window_hours": int(feedAnomalyWindow.Hours()), "by_severity": win.BySeverity,
 		"by_type": win.ByType, "by_host": win.ByHost, "tier": storage.TierPage, "severity_basis": "alert"}
@@ -641,27 +561,21 @@ func (s *Server) routerFindings(now time.Time) ([]feedFinding, error) {
 	return out, nil
 }
 
-// handleNightshiftFeed serves the findings document.
-func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	now := time.Now().UTC()
+// healthFindings builds every finding of the hub's state. A section that
+// cannot be read says so rather than vanishing: an empty list would look like
+// a quiet fleet.
+func (s *Server) healthFindings(now time.Time) []feedFinding {
 	findings := []feedFinding{s.feedFinding(now, "ominull.hub", "Hub", ocsfSevInformational, ocsfStatusResolved,
 		"OmniNull hub "+s.agentVersion+" answering", nil, nil)}
-	// A section that cannot be read says so rather than vanishing: an empty
-	// feed would look like a quiet fleet.
 	add := func(section string, f []feedFinding, err error) {
 		if err != nil {
 			findings = append(findings, s.feedFinding(now, "ominull.hub."+section+"_unavailable", "Hub section unavailable",
-				ocsfSevMedium, ocsfStatusNew, "The hub could not read its "+section+" for Nightshift", nil, nil))
+				ocsfSevMedium, ocsfStatusNew, "The hub could not read its "+section, nil, nil))
 			return
 		}
 		findings = append(findings, f...)
 	}
-	contract := r.URL.Query().Get("contract")
-	a, err := s.anomalyFinding(now, contract == "v4")
+	a, err := s.anomalyFinding(now)
 	add("anomalies", []feedFinding{a}, err)
 	hl, err := s.huntFinding(now)
 	add("hunt_leads", []feedFinding{hl}, err)
@@ -697,46 +611,19 @@ func (s *Server) handleNightshiftFeed(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		add("detection_policy", nil, err)
 	}
-	doc := map[string]any{
-		"schema":       nightshiftSchema,
-		"source":       nightshiftSource,
-		"generated_at": now.Format(time.RFC3339),
-		"findings":     findings,
-	}
-	// v2 is asked for, never assumed: a v1 validator rejects any other schema
-	// string, so v1 stays the default until every reader has moved.
-	switch c := contract; c {
-	case "", "v1":
-	case "v2", "v3", "v4":
-		v1, _ := json.Marshal(doc)
-		records, truncated, err := s.anomalyRecords(now, min(feedRecordBytes, feedDocumentBytes-len(v1)), c == "v4")
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "the hub could not read its anomaly records for Nightshift")
-			return
-		}
-		doc["schema"] = nightshiftSchemaV2
-		doc["anomaly_records"] = records
-		doc["anomaly_records_truncated"] = truncated
-		if c == "v3" || c == "v4" {
-			v2, _ := json.Marshal(doc)
-			blocks, cut, err := s.dataInventoryBlocks(now, feedDocumentBytesV3-len(v2)-256)
-			if err != nil {
-				writeJSONError(w, http.StatusInternalServerError, "the hub could not read its data inventory for Nightshift")
-				return
-			}
-			doc["schema"] = nightshiftSchemaV3
-			doc["data_inventory"] = blocks
-			doc["data_inventory_truncated"] = cut
-		}
-		if c == "v4" {
-			doc["schema"] = nightshiftSchemaV4
-		}
-	default:
-		writeJSONError(w, http.StatusBadRequest, "unknown contract; this hub serves v1, v2, v3 and v4")
+	return findings
+}
+
+// handleHealthFindings: GET /api/v1/health/findings, the raw list for
+// diagnostics (fleet administrator).
+func (s *Server) handleHealthFindings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	now := time.Now().UTC()
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, doc)
+	writeJSON(w, http.StatusOK, map[string]any{"generated_at": now.Format(time.RFC3339), "findings": s.healthFindings(now)})
 }
 
 // incidentsFirst orders described alerts (already worst first): the newest

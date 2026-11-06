@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -175,60 +174,6 @@ func TestDataInventoryUploadReplacesWhatACycleNoLongerSees(t *testing.T) {
 	}
 	if w := dataReq(srv, http.MethodGet, "/api/v1/data/inventory?endpoint_id=ws", deviceCredentialHeader, key, ""); w.Code == http.StatusOK {
 		t.Fatal("device read the data inventory")
-	}
-}
-
-func TestNightshiftFeedV3CarriesBoundedDataInventory(t *testing.T) {
-	t.Parallel()
-	srv, store, key := dataSetup(t)
-	if err := store.SetDataCanaries(storage.DataCanaries{EndpointID: "ws", Paths: []string{}, SyncedAt: time.Now(), Source: "t"}); err != nil {
-		t.Fatal(err)
-	}
-	var stores []string
-	var items [][2]string
-	for i := 0; i < 3000; i++ {
-		s := fmt.Sprintf("/srv/p%04d", i)
-		stores = append(stores, s)
-		if i < 600 {
-			items = append(items, [2]string{s + "/.env", s})
-		}
-	}
-	if w := dataReq(srv, http.MethodPost, "/api/v1/data/inventory", deviceCredentialHeader, key,
-		dataDoc("00000000000000a1", 1000, true, stores, items, "")); w.Code != http.StatusOK {
-		t.Fatalf("upload: %d %s", w.Code, w.Body.String())
-	}
-	get := func(contract string) map[string]json.RawMessage {
-		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings?contract="+contract, "mock_admin_token")
-		if w.Code != http.StatusOK {
-			t.Fatalf("%s: %d %s", contract, w.Code, w.Body.String())
-		}
-		if w.Body.Len() > feedDocumentBytesV3 {
-			t.Fatalf("%s document is %d bytes", contract, w.Body.Len())
-		}
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
-			t.Fatal(err)
-		}
-		return m
-	}
-	if v2 := get("v2"); v2["data_inventory"] != nil {
-		t.Fatal("v2 carries data_inventory")
-	}
-	v3 := get("v3")
-	if string(v3["schema"]) != `"nightshift.findings/v3"` {
-		t.Fatalf("schema %s", v3["schema"])
-	}
-	var blocks []feedDataBlock
-	if err := json.Unmarshal(v3["data_inventory"], &blocks); err != nil || len(blocks) != 1 {
-		t.Fatalf("blocks: %v %d", err, len(blocks))
-	}
-	b := blocks[0]
-	if b.EndpointID != "ws" || !strings.HasPrefix(b.DeviceID, "dev_") || len(b.Items) != feedDataItemsPerHost || !b.ItemsTruncated ||
-		len(b.Stores) == 0 || len(b.Stores) > feedDataStoresPerHost || !b.StoresTruncated {
-		t.Fatalf("block: id=%s dev=%s items=%d/%v stores=%d/%v", b.EndpointID, b.DeviceID, len(b.Items), b.ItemsTruncated, len(b.Stores), b.StoresTruncated)
-	}
-	if b.Scan["sandboxed"] != true || b.Scan["last_complete_at"] != float64(1010) {
-		t.Fatalf("scan summary: %v", b.Scan)
 	}
 }
 

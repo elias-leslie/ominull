@@ -81,7 +81,7 @@ func TestPolicyExpiryFeedWarnsBeforeAnExclusionOrKnownWorkloadLapses(t *testing.
 	}
 
 	w := httptest.NewRecorder()
-	srv.handleNightshiftFeed(w, httptest.NewRequest(http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4", nil))
+	srv.handleHealthFindings(w, httptest.NewRequest(http.MethodGet, "/api/v1/health/findings", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"uid":"ominull.detection.expiring"`) {
 		t.Fatalf("feed lacks the expiry finding: %d", w.Code)
 	}

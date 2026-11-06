@@ -569,10 +569,6 @@ func (s *Store) timeQueries(r *DataReport) {
 		_, err := s.SummariseOpenAnomalies(time.Now().Add(-24 * time.Hour))
 		return err
 	})
-	measure("nightshift_feed_outcomes", func() error {
-		_, _, err := s.ListAnomalyOutcomeDays(time.Now().Add(-14*24*time.Hour), 200)
-		return err
-	})
 }
 
 func processRSSBytes() int64 {

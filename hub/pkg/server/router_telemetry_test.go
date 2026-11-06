@@ -447,14 +447,14 @@ func TestRouterHealthIsStoredBoundedAndReadable(t *testing.T) {
 		t.Fatalf("first reading must not read as a firmware change: %+v", got[0])
 	}
 
-	key := issueFeedKey(t, srv)
-	if len(getRouterHealth(t, srv, "/api/v1/integrations/nightshift/router-health", key)) != 1 {
-		t.Fatal("Nightshift's feed key cannot read router health")
+	key := "mock_admin_token"
+	if len(getRouterHealth(t, srv, "/api/v1/router/health", key)) != 1 {
+		t.Fatal("an administrator cannot read router health")
 	}
-	if w := feedRequest(srv, http.MethodGet, "/api/v1/router/health", key); w.Code == http.StatusOK {
-		t.Fatal("the feed key opened the operator route")
+	if w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/router-health", key); w.Code != http.StatusNotFound {
+		t.Fatalf("the retired Nightshift router route answered %d", w.Code)
 	}
-	if w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/router-health", ""); w.Code != http.StatusUnauthorized {
+	if w := feedRequest(srv, http.MethodGet, "/api/v1/router/health", ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous read = %d", w.Code)
 	}
 }

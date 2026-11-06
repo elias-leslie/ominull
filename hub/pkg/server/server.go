@@ -78,7 +78,7 @@ type Server struct {
 	responseStore *response.Store
 	// responseAuth communicates with the Response Authority daemon
 	responseAuth responseauth.Client
-	// maintBlocks is why scheduled package runs could not run (Nightshift feed).
+	// maintBlocks is why scheduled package runs could not run (health findings).
 	maintBlocks maintenanceBlocks
 	// jobWake wakes ominullctl maint wait long-polls on job events.
 	jobWake wakeNotifier
@@ -738,6 +738,7 @@ func (s *Server) Start(addr string) error {
 	go s.agentRolloutLoop()
 	go s.maintenanceScheduleLoop()
 	go s.sessionJobsLoop()
+	go s.aicoPushLoop()
 	go s.stewardSessionLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
@@ -3764,10 +3765,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/storage/report", s.authMiddleware(s.handleStorageReport))
 	mux.HandleFunc("/api/v1/router/clients", s.authMiddleware(s.handleRouterClients))
 	mux.HandleFunc("/api/v1/router/health", s.authMiddleware(s.handleRouterHealth))
-	// Nightshift's router check reads the same document with its feed key.
-	mux.HandleFunc("/api/v1/integrations/nightshift/router-health", s.nightshiftFeedAuth(s.handleRouterHealth))
-	mux.HandleFunc("/api/v1/integrations/nightshift/findings", s.nightshiftFeedAuth(s.handleNightshiftFeed))
-	mux.HandleFunc("/api/v1/integrations/nightshift/key", s.authMiddleware(s.handleNightshiftFeedKey))
+	mux.HandleFunc("/api/v1/health/findings", s.fleetAdminAuth(s.handleHealthFindings))
+	mux.HandleFunc("/api/v1/integrations/aico", s.fleetAdminAuth(s.handleAicoPush))
 	// Routes behind the Nightshift relay key (no owner is ever asked: these
 	// carry facts and verdicts only).
 	mux.HandleFunc("/api/v1/integrations/nightshift/alerts/verdict", s.approvalRelayAuth(s.handleRelayAlertVerdict))

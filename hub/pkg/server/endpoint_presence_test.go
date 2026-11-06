@@ -70,7 +70,7 @@ func TestNightshiftFeedHonoursPresence(t *testing.T) {
 	agents := func() (status int, message string, resources int) {
 		t.Helper()
 		var doc feedDoc
-		w := feedRequest(srv, http.MethodGet, "/api/v1/integrations/nightshift/findings", "mock_admin_token")
+		w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", "mock_admin_token")
 		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
 			t.Fatal(err)
 		}

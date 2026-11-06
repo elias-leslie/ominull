@@ -225,7 +225,7 @@ ASCII characters, no `"` or `\`, no leading or trailing space; an unusable one
 reads `admin`, and is a 400 on routes the authority signs). The hub records it, as a claim, as
 `agent "<name>" (admin key)` wherever it records who acted: the audit,
 `anomaly_resolutions.resolved_by`, tuning saves, exclusions, isolations, the
-Nightshift feed's "by". `X-Username` stays the hub's own: it is cleared on the
+audit trail's "by". `X-Username` stays the hub's own: it is cleared on the
 way in and never taken from the caller. `scripts/hub-request.sh` (`hub_post`,
 `hub_curl_config`) and `ominullctl` send `$OMINULL_AGENT`, else the agent
 session they run in (`cc:<id> (Aico <window>)` or `codex:<id>`); a raw curl
@@ -258,17 +258,17 @@ belong to that name, so reattach with the same one.
 | `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens is authorized by the response authority on the same request (no second step) and recorded in the audit with a Nightshift note; a loosening the authority cannot read (invalid or over 16 KiB) is refused with the reason; the authority's audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
 | `/api/v1/detection/tuning/suppress` | POST | mark one finding's program/network pair expected |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
-| `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason; what it closes is recorded as `FINDINGS_ACKNOWLEDGED` and counted on the Nightshift feed's detection-policy note, like an acknowledgement |
+| `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason; what it closes is recorded as `FINDINGS_ACKNOWLEDGED` and counted on the health findings' detection-policy note, like an acknowledgement |
 | `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; moving a host toward parked is authorized by the response authority on the same request (kind `detection_policy`, target `endpoint:<id>`), back toward always on applies at once; audited |
 | `/api/v1/topology/workspace` | GET | grouped communication data with stable asset IDs and observed domain/process evidence |
 | `/api/v1/router/telemetry` | POST | ingest one gateway poll: DHCP leases, conntrack flows, resolver queries and the answers they returned |
 | `/api/v1/router/flows` | GET | stored flow rollups, filterable by source, destination and hours |
 | `/api/v1/router/talkers` | GET | which devices are talking and to whom, ranked by bytes and named where known |
 | `/api/v1/router/clients` | GET | per-client daily traffic from the gateway's own counters |
-| `/api/v1/router/health` | GET | the gateway's latest own-condition reading (WAN, uptime, memory, config storage, connection table, firmware and when it last changed, failed ssh logins, UPnP mappings); Nightshift reads the same document at `/api/v1/integrations/nightshift/router-health` with its feed key |
+| `/api/v1/router/health` | GET | the gateway's latest own-condition reading (WAN, uptime, memory, config storage, connection table, firmware and when it last changed, failed ssh logins, UPnP mappings) |
 | `/api/v1/router/identity` | POST | admin: issue a gateway client certificate; reissuing revokes the previous one |
-| `/api/v1/integrations/nightshift/findings` | GET | summarised findings for Nightshift (`nightshift.findings/v1`), with the feed key or admin |
-| `/api/v1/integrations/nightshift/key` | POST | admin: issue the Nightshift feed key, shown once and kept as a hash; reissuing revokes |
+| `/api/v1/health/findings` | GET | fleet administrator: the hub's health findings as `{generated_at, findings}`, for diagnostics (what the Aico rows are built from) |
+| `/api/v1/integrations/aico` | GET, POST | fleet administrator: the Aico push URL and key (see Aico push); the key itself is never returned |
 | `/oidc/start` | GET | begin native OIDC authorization-code sign-in |
 | `/oidc/callback` | GET | validate OIDC state, PKCE, nonce, issuer, and operator identity |
 
@@ -295,10 +295,10 @@ addresses unless the entry sets `include_rented`, because an interpreter's
 workload is read from its own command line and a process can imitate one. A
 reason is required, and so is an `expires_at` in the future when an entry is
 added or changed: past it the entry vouches for nothing, the next save drops
-it, and the Nightshift feed's detection-policy note lists it. Moving an expiry
+it, and the health findings' detection-policy note lists it. Moving an expiry
 later loosens (authorized and audited); moving it earlier tightens. Entries saved
 before expiries existed were given one 90 days out at upgrade. Exclusions and known workloads that lapse within
-`policy_expiry_warn_days` (hub setting, default 30, 1 to 89), or lapsed in the last week, make the Nightshift feed's
+`policy_expiry_warn_days` (hub setting, default 30, 1 to 89), or lapsed in the last week, make the health findings'
 `ominull.detection.expiring` medium (a daily agent item) with how to renew: re-POST the exclusion with the same id and
 fields and a later `expires_at`, or re-save the tuning with a later expiry on the workload. A known workload silences only the novelty findings (new
 destination, interpreter egress) and, for an owner-`*` entry, off-hours;
@@ -334,7 +334,7 @@ ssh fan-out that reaches SMB, a host gone quiet) run through a throwaway engine
 on the live tuning and exclusions. It stores no finding and isolates nothing.
 A rule that does not raise, isolate where it should, or that the feed would
 explain away (`Expected`) is a CRITICAL `ominull.detection.drill` on the
-Nightshift feed, as is a drill that has not run for more than eight days; a
+health findings, as is a drill that has not run for more than eight days; a
 missed drill runs again every hour until it passes. The lateral cases use the
 private /24 holding the most enrolled endpoints and twice each threshold. Both
 sweeps run again as each quiet process (path with `*` filled in, its pinned
@@ -380,9 +380,8 @@ recorded before the tiers were moved once at startup (setting
 `anomaly_hunt_tier_backfill_v1`). The replay route reports `paging`: before
 (every kept finding not held by learning) and after (kept findings of paging
 detectors), by type and by host. The detectors' code stays until labelled drills
-compare both tiers. The Nightshift feed carries the leads as
-`ominull.anomalies.hunt` (always informational) and, on `?contract=v4`, a `tier`
-on every anomaly record (`hunt` when every finding in it is a lead).
+compare both tiers. The health findings carry the leads as
+`ominull.anomalies.hunt` (always informational).
 
 Agent egress (`agent_runtimes`, `agent_*` in the tuning) keeps a baseline per
 AI agent runtime on each endpoint, matched by executable (Claude Code's native
@@ -417,46 +416,65 @@ Unknown and removed routes return not found. The old `/api/v1/pki/enroll`
 route is retained only for authenticated legacy recovery; new enrollment uses
 the profile API and returns device identity in the protected response.
 
-The Nightshift feed key opens only the findings route and is read-only. The
-document is Nightshift's contract (an OCSF Detection Finding subset, defined in
-Nightshift's `docs/ingest.md`). It carries counts and states: open anomalies in
-the last 24 hours, agent egress findings at their worst severity, server agents quiet for 30 minutes or more, workstation agents
-quiet for over 7 days, router collector freshness, and router certificate expiry. An endpoint's presence
+The hub summarises its own state as findings (an OCSF Detection Finding subset):
+open alerts in the last 24 hours, agent egress findings at their worst severity,
+server agents quiet for 30 minutes or more, workstation agents quiet for over 7
+days, router collector freshness and certificate expiry, and so on.
+`GET /api/v1/health/findings` (fleet administrator only) returns the raw list for
+diagnostics; Aico's Status rows are built from it. An endpoint's presence
 (`/api/v1/endpoints/presence`) changes its allowance: intermittent hosts are reported after 30 days quiet,
 parked hosts never; the hub's own `ENDPOINT_SILENT` finding follows the same presence.
-Device names appear only in structured fields, never in messages.
+Device names appear only in structured fields, never in messages, except the alert summary,
+which is the notice's sentence.
 
-`?contract=v2` serves `nightshift.findings/v2`: the same findings plus
-`anomaly_records`, one per device, kind and ISO week (`baseline_window_id`,
-e.g. `2026-W42`) over the current week and the four before it, newest first,
-cut at 500 records or 160 KiB, less when the v1 part is large, so the
-document stays under 224 KiB (`anomaly_records_truncated`). A record is
-`{device_id, kind, count, first_seen, last_seen, baseline_window_id, outcome,
-verified, outcome_source}`: `device_id` is an HMAC of the endpoint id under a
-hub secret created once (setting `nightshift_device_salt`; a malformed value
-fails the request rather than being replaced), `kind` a fixed enum (`other`
-for a type it does not list), times epoch milliseconds, and no hostname,
-domain or text.
-
-Outcomes come only from structured state. Resolving findings through
+Resolving findings through
 `POST /api/v1/anomalies/resolve` takes `verdict` (`benign`, `malicious`, or
 omitted), also on a finding already acknowledged; the tuning-covered path records `benign` by method `tuning`. A plain
-acknowledgement (single, batch, acknowledge-all, quiet pair) records no
-verdict and verifies nothing. Per window: a `malicious` verdict is
-`incident`/`verdict`; an `ISOLATE_HOST` or `AUTO_ISOLATE_HOST` audit (bulk
-isolation writes one per endpoint after it succeeds; the guard's `_FORCED` and
-`_UNVERIFIED` entries do not count) is `incident`/`isolation`; every finding
-closed by tuning is `benign`/`auto_resolved`; every finding closed by tuning
-or a `benign` verdict is `benign`/`acknowledged`; a kind that is not
-inherently hostile (not beaconing, threat intel, lateral sweep, DNS bypass,
-upload volume or `other`) seen in three earlier windows with no incident, at
-least one of them verified, is `benign`/`recurrence`. A device's benign labels
-before its latest incident are withdrawn, and a capped read marks every record
-unverified. Everything else is `unverified`, which the learner must not train
-on. The default document stays v1.
+acknowledgement (single, batch, acknowledge-all, quiet pair) records no verdict.
 
 See [Topology workspace](../docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins
 and the limits of observed domain/process evidence.
+
+## Aico push
+
+The hub pushes its paging alerts and its health to Aico (the owner's Needs you and Status), once a minute. Nightshift's
+pull feed is gone: there is no feed key and no `nightshift/findings` route. The relay-key routes stay
+(`alerts/verdict`, `approval-key`, `locks`, `agent-builds`, `routine-keys`, `agents/rollback`).
+
+Set it up as a fleet administrator (not a tenant administrator):
+
+```sh
+curl -s -X POST -H "X-API-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"url":"http://<aico LAN IPv4>:<port>/api/ominull/push"}' https://hub/api/v1/integrations/aico
+```
+
+The URL must be `http://` with a private or loopback IPv4 address, a port and exactly the path `/api/ominull/push`.
+The first save makes the push key (`onp_` plus 64 hex characters) and records `since`, so alerts older than that are
+not pushed. The answer is `{url, key_name, key_sha256, since, last_push_at, last_ok_at, last_error}`; `GET` returns
+the same. The key is only ever sent to Aico as `X-API-Key` and is never returned or logged. Put `key_name`
+(`ominull-hub`) and `key_sha256` in Aico's `~/.config/aico/ominull-keys.json`:
+`{"keys":[{"name":"ominull-hub","sha256":"<key_sha256>"}]}`. `{"rotate": true}` makes a new key; update that file
+with the new `key_sha256` straight after. Every change is audited (`AICO_PUSH_URL_SET`, `AICO_PUSH_KEY_MADE`,
+`AICO_PUSH_KEY_ROTATED`). A failed push keeps its notices and retries on the next pass; `last_error` says why.
+
+What is pushed (a body of `{"notices": [...], "rows": [...]}`, at most 50 of each):
+
+- **Notices.** Each open alert that pages (the same rule as the alert summary: a classed page, or an unclassed
+  high or critical alert the hub does not explain) since the later of seven days ago and `since`. One notice per
+  incident, and one more for an incident's first escalation; a repeat of an incident makes none. An alert with no
+  incident asks by its own id. Sent tokens are kept 30 days (table `aico_push_sent`). Each is a critical alert,
+  "Security alert on HOST", with the sentence and its time (UTC), a redacted command line, destinations and the likely
+  cause. Its key is `alerts:<alert ids>`: the owner's "That was me" sends those ids to
+  `/api/v1/integrations/nightshift/alerts/verdict`. Offers Not expected, Expected (not for threat-list and beacon
+  alerts, which are closed in the console), Look into it, and Open when the hub URL is `https://`.
+- **Rows.** The health findings, one Status row each (`ominull.*`, machine `ominull-hub`, project `ominull`): `ok`
+  when resolved or only a note, else `warn`; never `failed`, so a row never phones the owner by itself (alerts do,
+  as notices). `next_run` is five minutes ahead, so a hub that stops pushing shows late. Per-item findings fold into
+  one row per family (`ominull.run`, `ominull.decisions`, `ominull.compliance`) with the worst state.
+- **Retired release keys.** Setting `retired_release_keys` (JSON `[{"id","clean_from"}]`, default
+  `[{"id":"1932669bb5871af4","clean_from":"1.8.71"}]`) gives one row `ominull.builds.<id>` per key: `warn` naming up to
+  six enrolled, not retired agents (offline ones included) whose build is older than `clean_from` or unreadable,
+  else `ok`.
 
 ## Build, test, and release
 

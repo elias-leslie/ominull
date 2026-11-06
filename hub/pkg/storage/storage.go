@@ -797,6 +797,9 @@ func (s *Store) initSchema() error {
 	if err := s.initBaselineSchema(); err != nil {
 		return err
 	}
+	if err := s.initAicoPushSchema(); err != nil {
+		return err
+	}
 	// A failed repair is retried at the next start; it never keeps the hub down.
 	if err := s.repairByteCounts(); err != nil {
 		log.Printf("[!] %v", err)
