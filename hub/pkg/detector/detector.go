@@ -139,7 +139,7 @@ func (e *Engine) settings() storage.DetectionTuning {
 	e.mu.Unlock()
 
 	// The floor (floor.go) runs wherever the saved row is weaker; the
-	// Nightshift feed's detection-policy note names each such place.
+	// Aico push's detection-policy note names each such place.
 	t, _ := ClampToFloor(e.store.GetDetectionTuning())
 
 	e.mu.Lock()

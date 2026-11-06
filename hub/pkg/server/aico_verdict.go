@@ -10,16 +10,15 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// Owner verdicts from Nightshift.
+// Owner verdicts from Aico.
 //
-// Nightshift asks the owner about a paging alert it lists ("Was this you?").
-// When the owner answers "That was me", Nightshift sends the alert ids here
+// Aico asks the owner about a paging alert it pushed ("Was this you?").
+// When the owner answers "That was me", Aico sends the alert ids here
 // and the hub records the verdict the console's Confirm benign records, so the
-// owner answers once. "Not me" sends nothing: the alert stays open here and
-// Nightshift escalates it.
+// owner answers once. "Not me" sends nothing: the alert stays open here.
 //
-// The relay key carries it, like the approvals it already carries. With it the
-// relay can confirm benign only what Nightshift asks about: an open paging
+// The relay key carries it. With it the relay can confirm benign only what
+// Aico asks about: an open paging
 // alert (a classed page at any severity, or high or critical from before the
 // classes) of the last 24 hours that the hub does not explain,
 // never a held or older one, a threat-list or beacon match (those the owner
@@ -79,13 +78,13 @@ func (s *Server) handleRelayAlertVerdict(w http.ResponseWriter, r *http.Request)
 	n := 0
 	if len(ids) > 0 {
 		var closed storage.Dismissal
-		n, closed, err = s.store.ResolveAnomalies("", ids, storage.Resolution{Reason: "Owner answered on Nightshift: that was me",
-			By: "owner via Nightshift", Verdict: storage.VerdictBenign, Method: storage.MethodOperator})
+		n, closed, err = s.store.ResolveAnomalies("", ids, storage.Resolution{Reason: "Owner answered on Aico: that was me",
+			By: "owner via Aico", Verdict: storage.VerdictBenign, Method: storage.MethodOperator})
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "the verdict could not be saved")
 			return
 		}
-		s.audit(r, "NIGHTSHIFT_OWNER_BENIGN", "anomalies", "Owner confirmed benign on Nightshift: "+strings.Join(ids, ", "))
+		s.audit(r, "AICO_OWNER_BENIGN", "anomalies", "Owner confirmed benign on Aico: "+strings.Join(ids, ", "))
 		s.auditDismissal(r, findingsAcknowledgedAudit, "acknowledged", closed)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"confirmed": n, "skipped": skipped})

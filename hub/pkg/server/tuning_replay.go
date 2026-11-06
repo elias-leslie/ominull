@@ -165,7 +165,7 @@ func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) 
 	reason := strings.TrimSpace(req.Reason)
 	byReason := map[string]int{}
 	truncated := false
-	// Resolving takes findings out of the Nightshift feed's open counts like
+	// Resolving takes findings out of the Aico push's open counts like
 	// acknowledging them does, so what it closed is recorded the same way,
 	// after an error too: the chunks before it stay closed.
 	var closed storage.Dismissal

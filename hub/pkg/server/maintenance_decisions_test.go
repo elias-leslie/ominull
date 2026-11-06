@@ -170,7 +170,7 @@ func TestDecisionsAnsweredInTheConsoleOnly(t *testing.T) {
 		t.Fatalf("answer_in: %+v", findings)
 	}
 
-	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
+	issue := postAdmin(srv, "/api/v1/aico/relay-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}

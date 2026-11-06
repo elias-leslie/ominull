@@ -448,7 +448,7 @@ func TestWithoutTheAuthorityLooseningIsRefused(t *testing.T) {
 	}
 }
 
-// The Nightshift feed carries the day's changes as a note, and an unsound
+// The Aico push carries the day's changes as a note, and an unsound
 // tuning row as a critical finding.
 func TestTheFeedReportsPolicyChangesAndAnUnsoundRow(t *testing.T) {
 	t.Parallel()

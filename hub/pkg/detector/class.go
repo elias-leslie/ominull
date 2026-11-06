@@ -241,7 +241,7 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 		case cx.RoleOf(ep) == storage.RoleInfra:
 			return page("an always-on infrastructure host stopped reporting")
 		}
-		return record(fmt.Sprintf("%s host stopped reporting; expected stops are Nightshift's to explain", roleArticle(cx.RoleOf(ep))))
+		return record(fmt.Sprintf("%s host stopped reporting; Aico knows whether the stop was expected", roleArticle(cx.RoleOf(ep))))
 	case "ENDPOINT_RETURNED", "CLOUD_STORAGE_EGRESS":
 		return digest("reported in the daily digest")
 	case "BANDWIDTH_SPIKE":

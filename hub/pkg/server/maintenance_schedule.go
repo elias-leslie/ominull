@@ -11,7 +11,7 @@ package server
 // Each due run goes to the response authority like a hand-made one: the
 // authority checks it and signs the grants now, for hosts online now, and the
 // run is dispatched at once. Nobody is asked; a run the authority will not
-// sign shows up as a schedule block (Nightshift feed, console) with its
+// sign shows up as a schedule block (Aico push, console) with its
 // reason, and is tried again on the next pass.
 //
 // Audit-then-enforce: a safe package whose setting on_drift is "enforce"
@@ -47,7 +47,7 @@ const (
 	schedulerName         = "maintenance schedule"
 )
 
-// scheduleBlock is why a due run is not running (Nightshift feed).
+// scheduleBlock is why a due run is not running (Aico push).
 type scheduleBlock struct {
 	Package   string    `json:"package"`
 	Endpoints []string  `json:"endpoints"`

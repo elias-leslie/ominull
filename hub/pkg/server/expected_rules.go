@@ -234,7 +234,7 @@ func (s *Server) handleMarkExpected(w http.ResponseWriter, r *http.Request) {
 	c.Kind = rule.Findings[0]
 	if stored, ok := before.RuleByID(rule.ID); ok {
 		// Already expected: this only dismisses the finding, so it is
-		// recorded and counted on the Nightshift feed like any other. A rule
+		// recorded and counted on the Aico push like any other. A rule
 		// of that id that was edited, narrowed or has lapsed may no longer
 		// cover it, and dismissing would hide a finding that fires again.
 		if _, covered := before.Expected(c); !covered {

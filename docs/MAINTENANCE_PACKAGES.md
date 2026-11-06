@@ -537,10 +537,6 @@ latest runs (`ominull.decisions.playbook.<id>`,
   runs skip it there (a reason is required); `handled` just closes it.
   Answers are audited (`MAINTENANCE_DECISION`) and kept in the settings row
   `maintenance.decisions` (the newest 500).
-- **Nightshift inbox (removed).** Nightshift no longer relays decisions:
-  `/api/v1/integrations/nightshift/decisions` and `/decisions/answer` are gone.
-  The finding records still carry `"answer_in":"Nightshift inbox or OmniNull console"`;
-  read it as the console (or `POST /api/v1/maintenance/decisions` with the admin key).
 - **Coming back.** An answered item opens again only if a run that finished
   after the answer reports it again.
 - **Console.** A *Decisions for you* card at the top of the Maintenance page,

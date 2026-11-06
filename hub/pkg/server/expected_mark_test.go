@@ -304,7 +304,7 @@ func TestMarkingExpectedTwiceIsIdempotent(t *testing.T) {
 		t.Error("the second finding was left open")
 	}
 	// The second press only dismisses a finding, so it is recorded like any
-	// acknowledgement and the Nightshift feed counts it.
+	// acknowledgement and the Aico push counts it.
 	page, err := store.AuditHistory("", 10, "", storage.AuditFilter{Action: findingsAcknowledgedAudit})
 	if err != nil || len(page.Entries) != 2 {
 		t.Fatalf("acknowledgements recorded = %v %v, want one per press", page.Entries, err)

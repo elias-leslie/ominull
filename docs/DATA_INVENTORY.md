@@ -46,10 +46,9 @@ Admin endpoints (fleet-wide, not for tenant administrators):
 | `GET /api/v1/data/canaries?endpoint_id=ID` | synced or not, and the count |
 | `GET /api/v1/data/inventory?endpoint_id=ID` | the latest picture |
 
-`scripts/sync-data-canaries.sh` (with `OMINULL_HUB_URL`, `OMINULL_ADMIN_KEY_FILE`) syncs Nightshift's canaries
-(`nightshift canary paths --json`) to the workstation's endpoint and an empty list to every other endpoint. It stops,
-sending nothing, when a decoy's placement names no file path. Run it again whenever canaries change or an endpoint is
-enrolled.
+Canaries are synced by posting the list to `/api/v1/data/canaries` with the admin key: the real canary file paths for the
+machine that carries them and an empty list for every other endpoint. Post again whenever canaries change or an endpoint is
+enrolled; an endpoint scans nothing until its list has been synced once.
 
 ## Hub storage
 

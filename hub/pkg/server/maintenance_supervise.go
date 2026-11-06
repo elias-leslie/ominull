@@ -19,7 +19,7 @@ import (
 // visible window waiting for a click; the heartbeat names the window). The
 // reply carries a pending cancel, so a cancel reaches a running job within a
 // heartbeat. Everything that shows a run (Maintenance page, asset card, jobs
-// page, playbooks, the Nightshift feed) and ominullctl maint wait read the
+// page, playbooks, the Aico push) and ominullctl maint wait read the
 // run's live state from here.
 
 const (

@@ -7,7 +7,7 @@ package server
 // a self-declared label: the hub names it "steward (steward-key)" to the
 // response authority. It reaches only the routes in stewardRoutes: reading
 // and waiting on maintenance runs, escalating one (a console row and a
-// Nightshift feed finding), and taking a remote screen for a stuck run
+// Aico push finding), and taking a remote screen for a stuck run
 // (open, attach, close).
 //
 // A steward screen request names the run it is for (steward_run). The hub

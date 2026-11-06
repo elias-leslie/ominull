@@ -117,3 +117,32 @@ func TestRetiredTablesDroppedOnlyWhenEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The relay key keeps working under its Aico setting name, and the settings
+// Nightshift left with no reader are removed.
+func TestNightshiftSettingsMigrate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ominull.db")
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{oldRelayKeySetting: "hash-1", "nightshift_feed_key_sha256": "x", "nightshift_device_salt": "y"} {
+		if err := store.SetSetting(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.Close()
+	store, err = New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if v, _ := store.GetSetting(newRelayKeySetting); v != "hash-1" {
+		t.Fatalf("relay key after migration = %q", v)
+	}
+	for _, k := range append([]string{oldRelayKeySetting}, deadNightshiftSettings...) {
+		if v, _ := store.GetSetting(k); v != "" {
+			t.Errorf("%s still set", k)
+		}
+	}
+}

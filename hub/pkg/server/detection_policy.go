@@ -225,7 +225,7 @@ func credentialOf(r *http.Request) string {
 
 // policyAuthorized has the authority sign off a change that loosens
 // detection (nothing else is asked: the hub applies the change itself, the
-// authority audits it and the Nightshift feed's detection-policy note reports
+// authority audits it and the Aico push's detection-policy note reports
 // it). A change that loosens nothing passes without the authority. It returns
 // the authorization id for the audit row.
 func (s *Server) policyAuthorized(w http.ResponseWriter, r *http.Request, c policyChange) (string, bool) {
@@ -262,7 +262,7 @@ func (s *Server) policyAuthorized(w http.ResponseWriter, r *http.Request, c poli
 }
 
 // notePolicyChange records an applied change for the audit trail and for the
-// Nightshift feed's detection-policy note.
+// Aico push's detection-policy note.
 func (s *Server) notePolicyChange(r *http.Request, c policyChange, approvalID string) {
 	how := "tightened"
 	if approvalID != "" {
@@ -275,7 +275,7 @@ func (s *Server) notePolicyChange(r *http.Request, c policyChange, approvalID st
 	s.runFloorDrill(time.Now().UTC())
 }
 
-// Acknowledging or deleting findings takes them out of the Nightshift feed's
+// Acknowledging or deleting findings takes them out of the Aico push's
 // open counts, so each one is recorded and the feed's detection-policy note
 // counts them: a finding hidden before the feed read it still shows there.
 const (
@@ -668,7 +668,7 @@ func windowCovers(after, before storage.DetectionTuning) bool {
 	return true
 }
 
-// detectionPolicySection is the Nightshift feed's view of detection policy: a
+// detectionPolicySection is the Aico push's view of detection policy: a
 // CRITICAL finding while the saved tuning row is unsound, another while the
 // floor drill misses or is overdue (floor_drill.go), and an informational
 // note listing the day's changes, each with the credential it came through.
@@ -823,8 +823,8 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 		if !issuedComplete {
 			atLeast = "at least "
 		}
-		parts = append(parts, fmt.Sprintf("the Nightshift relay key was issued %s%s in the last 24 h, last by %s at %s; "+
-			"any admin-key holder can issue it, so a closure through it since then need not be Nightshift's own verdict",
+		parts = append(parts, fmt.Sprintf("the Aico relay key was issued %s%s in the last 24 h, last by %s at %s; "+
+			"any admin-key holder can issue it, so a closure through it since then need not be the owner's own verdict",
 			atLeast, plural(len(issued), "time", "times"), issued[0].Username, issued[0].Timestamp.UTC().Format(time.RFC3339)))
 	}
 	if len(clamped) > 0 {

@@ -12,7 +12,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - M5: Aico owns machine inventory, intent and liveness (plan: docs/audit-2026-11-06.md)
 - M8: Tripwires: canary credentials, decoy addresses, bad-domain matching on stored DNS (plan: docs/audit-2026-11-06.md)
 - M9: Monthly live drill that proves a page reaches the phone (plan: docs/audit-2026-11-06.md)
-- M4, M7: Agent release with one key, Linux updates through Aico fleet; drop dead routes, page budget and extra keys (plan: docs/audit-2026-11-06.md)
+- M4, M7: Agent release with one key, Linux updates through Aico fleet; drop the page budget note, legacy settings keys (copilot.config, legacy_agent_auth, byte/hunt repair flags), docs/history and extra keys. M7's Nightshift part is done: dead routes gone, alerts/verdict and agent-builds now under /api/v1/aico/ (plan: docs/audit-2026-11-06.md)
 - M6: Fold the response authority into the hub (owner approved 2026-11-06) (plan: docs/audit-2026-11-06.md)
 - M10-M12: Remote-admin kept everywhere (tidy only), console trim, Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
 - Console: overhaul the Traffic page once Topology is verified

@@ -10,9 +10,9 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// Nightshift reads every active agent's build with the relay key: offline
+// Aico reads every active agent's build with the relay key: offline
 // ones stay, retired ones go, and the admin key is not the relay key.
-func TestNightshiftAgentBuilds(t *testing.T) {
+func TestAicoAgentBuilds(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -25,13 +25,13 @@ func TestNightshiftAgentBuilds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
+	issue := postAdmin(srv, "/api/v1/aico/relay-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}
 	_ = json.Unmarshal(issue.Body.Bytes(), &k)
 	get := func(key string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("GET", "/api/v1/integrations/nightshift/agent-builds", nil)
+		req := httptest.NewRequest("GET", "/api/v1/aico/agent-builds", nil)
 		req.Header.Set("X-API-Key", key)
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
@@ -45,7 +45,7 @@ func TestNightshiftAgentBuilds(t *testing.T) {
 		t.Fatalf("builds: %d %s", w.Code, w.Body.String())
 	}
 	var out struct {
-		Endpoints []nightshiftBuildRow `json:"endpoints"`
+		Endpoints []aicoBuildRow `json:"endpoints"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	if len(out.Endpoints) != 2 || out.Endpoints[0].EndpointID != "ep-new" || out.Endpoints[0].AgentVersion != "1.8.73" ||

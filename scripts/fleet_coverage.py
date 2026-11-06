@@ -36,7 +36,7 @@ from typing import Any
 
 ROW_ID = "ominull.fleet.coverage"
 HUB_ROW_ID = "ominull.machine"  # the hub's own machine row (hub/pkg/server/aico_push.go)
-BUILDS_ROUTE = "/api/v1/integrations/nightshift/agent-builds"
+BUILDS_ROUTE = "/api/v1/aico/agent-builds"
 EVERY_MIN = 15  # the timer's period; the row shows late after two missed runs
 MEANING_MAX = 300
 

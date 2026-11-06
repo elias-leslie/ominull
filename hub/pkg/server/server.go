@@ -3561,15 +3561,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/router/health", s.authMiddleware(s.handleRouterHealth))
 	mux.HandleFunc("/api/v1/health/findings", s.fleetAdminAuth(s.handleHealthFindings))
 	mux.HandleFunc("/api/v1/integrations/aico", s.fleetAdminAuth(s.handleAicoPush))
-	// Routes behind the Nightshift relay key (no owner is ever asked: these
-	// carry facts and verdicts only).
-	mux.HandleFunc("/api/v1/integrations/nightshift/alerts/verdict", s.approvalRelayAuth(s.handleRelayAlertVerdict))
-	// Lock facts only (ceiling, host authority, remote access off) for the
-	// machines that carry a lock, so Nightshift confirms its installer's work.
-	mux.HandleFunc("/api/v1/integrations/nightshift/locks", s.approvalRelayAuth(s.handleNightshiftLocks))
-	// Each enrolled agent's build, so Nightshift checks none still trusts a retired release key.
-	mux.HandleFunc("/api/v1/integrations/nightshift/agent-builds", s.approvalRelayAuth(s.handleNightshiftBuilds))
-	mux.HandleFunc("/api/v1/integrations/nightshift/approval-key", s.authMiddleware(s.handleApprovalRelayKey))
+	// Routes behind Aico's relay key (no owner is ever asked: these carry facts
+	// and verdicts only). Aico's web server calls them.
+	mux.HandleFunc("/api/v1/aico/alerts/verdict", s.aicoRelayAuth(s.handleRelayAlertVerdict))
+	mux.HandleFunc("/api/v1/aico/agent-builds", s.aicoRelayAuth(s.handleAicoBuilds))
+	mux.HandleFunc("/api/v1/aico/relay-key", s.authMiddleware(s.handleAicoRelayKey))
 	mux.HandleFunc("/api/v1/router/flows", s.authMiddleware(s.handleRouterFlows))
 	mux.HandleFunc("/api/v1/router/talkers", s.authMiddleware(s.handleRouterTalkers))
 
@@ -3617,12 +3613,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/trust/bundle", s.authMiddleware(s.handleTrustBundle))
 	mux.HandleFunc("/api/v1/trust/routine-keys", s.authMiddleware(requireAdminRole(s.handleRoutineKeys)))
 	mux.HandleFunc("/api/v1/trust/routine-keys/statement", s.authMiddleware(requireAdminRole(s.handleRoutineKeysStatement)))
-	mux.HandleFunc("/api/v1/integrations/nightshift/routine-keys", s.approvalRelayAuth(s.handleRoutineKeys))
-	mux.HandleFunc("/api/v1/integrations/nightshift/routine-keys/statement", s.approvalRelayAuth(s.handleRoutineKeysStatement))
 	mux.HandleFunc("/api/v1/agent/config", s.deviceOrLegacyMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.authorized(s.resolveAgentUpdate, s.handleAgentsUpdate)))
 	mux.HandleFunc("/api/v1/agents/rollback", s.authMiddleware(requireAdminRole(s.handleAgentRollback)))
-	mux.HandleFunc("/api/v1/integrations/nightshift/agents/rollback", s.approvalRelayAuth(s.handleAgentRollback))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
 	mux.HandleFunc("/api/v1/device-auth/legacy", s.authMiddleware(s.handleLegacyAgentAuth))
 	mux.HandleFunc("/api/v1/device-auth/credentials", s.authMiddleware(requireAdmin(s.handleDeviceCredentials)))

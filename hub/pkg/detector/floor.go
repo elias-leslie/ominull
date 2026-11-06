@@ -15,7 +15,7 @@ import (
 // in code because raising any of them suppresses alerts, and each has changed
 // at most once. The tuning row (storage.DetectionTuning) may tighten past
 // them; where it holds a weaker value, ClampToFloor runs the floor instead and
-// says so on the Nightshift feed's detection-policy note. If a threshold here
+// says so on the Aico push's detection-policy note. If a threshold here
 // ever moves into the tuning, the bandwidth, sweep and lateral numbers move
 // together.
 

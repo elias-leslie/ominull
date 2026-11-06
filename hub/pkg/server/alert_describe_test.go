@@ -41,7 +41,7 @@ func TestSanitizeCommandRedactsSecretsAndShortens(t *testing.T) {
 
 // The v4 summary names each new paging alert in plain words with its facts;
 // its severity is the worst alert's, and v1 keeps the counts-only summary.
-func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
+func TestAlertFeedV4DescribesEachAlert(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -125,7 +125,7 @@ func TestNightshiftFeedV4DescribesEachAlert(t *testing.T) {
 
 // An alert the hub explains as the owner's own ssh is listed for the record
 // and does not page; an alert that needs the owner still does, listed first.
-func TestNightshiftFeedOwnAutomationDoesNotPage(t *testing.T) {
+func TestAlertFeedOwnAutomationDoesNotPage(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -279,10 +279,10 @@ func TestDescribeAlertActor(t *testing.T) {
 	if got := sweep("agent:codex:"); got.Expected != "Codex session outside Aico" {
 		t.Fatalf("codex outside Aico = %+v", got)
 	}
-	if got := sweep("service:nightshift:nightshift-check.service"); got.Expected != "Nightshift (nightshift-check.service)" {
+	if got := sweep("service:summitflow:summitflow-backend.service"); got.Expected != "SummitFlow (summitflow-backend.service)" {
 		t.Fatalf("service sweep = %+v", got)
 	}
-	for _, bad := range []string{"agent:evil:fb39ca7b", "agent:claude:ZZZ", "service:other:x.service", "service:nightshift:x; rm", "agent:claude:fb39ca7b "} {
+	for _, bad := range []string{"agent:evil:fb39ca7b", "agent:claude:ZZZ", "service:other:x.service", "service:nightshift:x.service", "service:summitflow:x; rm", "agent:claude:fb39ca7b "} {
 		if got := sweep(bad); got.Expected != "" || got.Actor != "" {
 			t.Errorf("actor %q accepted: %+v", bad, got)
 		}
@@ -401,13 +401,13 @@ func TestRelayAlertVerdict(t *testing.T) {
 	add("low", "LATERAL_PORT_SWEEP", "MEDIUM", hour, "")
 	add("intel", "THREAT_INTEL_MATCH", "CRITICAL", hour, "")
 	add("beacon", "C2_BEACONING", "HIGH", hour, "")
-	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
+	issue := postAdmin(srv, "/api/v1/aico/relay-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}
 	_ = json.Unmarshal(issue.Body.Bytes(), &k)
 	post := func(body, key string) (int, map[string]any) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/nightshift/alerts/verdict", strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/aico/alerts/verdict", strings.NewReader(body))
 		req.Header.Set("X-API-Key", key)
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
@@ -423,7 +423,7 @@ func TestRelayAlertVerdict(t *testing.T) {
 		t.Fatalf("verdict = %d %v", code, out)
 	}
 	reason, by, _, ok := store.AnomalyResolution("open")
-	if !ok || by != "owner via Nightshift" || !strings.Contains(reason, "that was me") {
+	if !ok || by != "owner via Aico" || !strings.Contains(reason, "that was me") {
 		t.Fatalf("resolution = %q %q %v", reason, by, ok)
 	}
 	if _, _, _, ok := store.AnomalyResolution("old"); ok {
@@ -445,8 +445,8 @@ func TestRelayAlertVerdict(t *testing.T) {
 	if len(issued) != 1 || !strings.Contains(issued[0]["change"].(string), "credential api-key (unverified)") {
 		t.Fatalf("relay key issuance on the note = %v", f.Unmapped["relay_key_issued"])
 	}
-	if !strings.Contains(f.Message, "the Nightshift relay key was issued 1 time in the last 24 h") ||
-		!strings.Contains(f.Message, "need not be Nightshift's own verdict") {
+	if !strings.Contains(f.Message, "the Aico relay key was issued 1 time in the last 24 h") ||
+		!strings.Contains(f.Message, "need not be the owner's own verdict") {
 		t.Fatalf("note does not name the relay key issuance: %q", f.Message)
 	}
 	if last, _ := f.Unmapped["relay_key_last_issued"].(map[string]any); last["at"] != issued[0]["at"] {
@@ -469,10 +469,10 @@ func TestRelayKeyIssuanceOnTheDetectionPolicyNote(t *testing.T) {
 
 	// An issuance before the window, then a relay-key closure in it.
 	if err := store.RecordAudit(storage.AuditEntry{ID: "old-issue", Username: "admin", Action: relayKeyIssuedAudit,
-		Resource: "nightshift", Details: "Issued the Nightshift relay key", Timestamp: now.Add(-72 * time.Hour)}); err != nil {
+		Resource: "aico", Details: "Issued the Aico relay key", Timestamp: now.Add(-72 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordAudit(storage.AuditEntry{ID: "relay-close", Username: "nightshift-relay", Action: findingsAcknowledgedAudit,
+	if err := store.RecordAudit(storage.AuditEntry{ID: "relay-close", Username: "aico-relay", Action: findingsAcknowledgedAudit,
 		Resource: "findings", Details: "acknowledged 1 finding, 1 HIGH or CRITICAL (LATERAL_PORT_SWEEP); credential relay-key (unverified)",
 		Timestamp: now.Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
@@ -505,13 +505,13 @@ func TestRelayKeyIssuanceOnTheDetectionPolicyNote(t *testing.T) {
 	// Reissuing with no closure at all still makes the note new and says who.
 	srv3, store3 := setupTestServer(t)
 	defer store3.Close()
-	if w := postAdmin(srv3, "/api/v1/integrations/nightshift/approval-key", ``); w.Code != http.StatusOK {
+	if w := postAdmin(srv3, "/api/v1/aico/relay-key", ``); w.Code != http.StatusOK {
 		t.Fatalf("issue = %d %s", w.Code, w.Body.String())
 	}
 	f = feedNote(t, srv3, "ominull.detection.changes")
 	issued, _ := f.Unmapped["relay_key_issued"].([]map[string]any)
 	if f.StatusID != ocsfStatusNew || len(issued) != 1 ||
-		!strings.HasPrefix(f.Message, "the Nightshift relay key was issued 1 time in the last 24 h, last by ") {
+		!strings.HasPrefix(f.Message, "the Aico relay key was issued 1 time in the last 24 h, last by ") {
 		t.Fatalf("note after a reissue = %d %q %v", f.StatusID, f.Message, issued)
 	}
 	if f.Unmapped["relay_key_last_issued"] != nil {
@@ -530,7 +530,7 @@ func TestRelayKeyIssuanceListIsCapped(t *testing.T) {
 	total := feedDismissedListShown + 7
 	for i := 0; i < total; i++ {
 		if err := store.RecordAudit(storage.AuditEntry{ID: fmt.Sprintf("issue-%03d", i), Username: "admin", Action: relayKeyIssuedAudit,
-			Resource: "nightshift", Details: "Issued the Nightshift relay key",
+			Resource: "aico", Details: "Issued the Aico relay key",
 			Timestamp: now.Add(-time.Duration(total-i) * time.Minute)}); err != nil {
 			t.Fatal(err)
 		}
@@ -555,7 +555,7 @@ func TestRelayKeyIssuanceListIsCapped(t *testing.T) {
 // The alerts that page are listed first, and more_paging counts the unlisted
 // ones that would: report-only alerts never hide a page, and a reader that
 // explains every listed page knows whether anything unseen still asks.
-func TestNightshiftFeedListsPagesFirstAndCountsUnlistedPages(t *testing.T) {
+func TestAlertFeedListsPagesFirstAndCountsUnlistedPages(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -662,7 +662,7 @@ func TestDescribeAlertCarriesClassAndIncident(t *testing.T) {
 // before any incident's repeats, so a medium incident is never hidden behind
 // another's high repeats, and more_paging counts unlisted classed pages at any
 // severity.
-func TestNightshiftFeedListsEachIncidentBeforeRepeats(t *testing.T) {
+func TestAlertFeedListsEachIncidentBeforeRepeats(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -736,12 +736,12 @@ func TestRelayAlertVerdictFollowsTheClass(t *testing.T) {
 	add("medpage", "MEDIUM", `{"class":"page","incident":"inc-m"}`)
 	add("record", "HIGH", `{"class":"record"}`)
 	add("legacy", "MEDIUM", "")
-	issue := postAdmin(srv, "/api/v1/integrations/nightshift/approval-key", ``)
+	issue := postAdmin(srv, "/api/v1/aico/relay-key", ``)
 	var k struct {
 		Key string `json:"key"`
 	}
 	_ = json.Unmarshal(issue.Body.Bytes(), &k)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/nightshift/alerts/verdict",
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/aico/alerts/verdict",
 		strings.NewReader(`{"ids":["medpage","record","legacy"]}`))
 	req.Header.Set("X-API-Key", k.Key)
 	w := httptest.NewRecorder()

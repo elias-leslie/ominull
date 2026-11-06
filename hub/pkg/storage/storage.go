@@ -691,6 +691,10 @@ func (s *Store) initSchema() error {
 		return err
 	}
 
+	if err := s.migrateNightshiftSettings(); err != nil {
+		return err
+	}
+
 	if err := s.initDeviceIdentitySchema(); err != nil {
 		return err
 	}
@@ -2148,7 +2152,7 @@ func (s *Store) AcknowledgeAnomaly(id string) error {
 
 // Dismissal counts the findings one acknowledge or clear took out of the
 // open list: an operator, a tenant key or an agent holding the admin key can
-// otherwise hide a finding before the Nightshift feed has read it.
+// otherwise hide a finding before the Aico push has read it.
 type Dismissal struct {
 	Count int
 	// High counts the HIGH and CRITICAL findings among them; HighTypes names

@@ -11,7 +11,7 @@ import (
 )
 
 // The storage report is hub-wide: a hub operator reads it, a tenant key does
-// not, and the Nightshift feed carries it as one "Data per endpoint" finding
+// not, and the Aico push carries it as one "Data per endpoint" finding
 // that is informational within budget and a warning over it.
 func TestStorageReportAndFeedFinding(t *testing.T) {
 	t.Parallel()

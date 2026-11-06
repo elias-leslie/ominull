@@ -17,7 +17,7 @@ type AnomalyWindow struct {
 	Backlog int `json:"backlog"`
 }
 
-// SummariseOpenAnomalies returns the counts the Nightshift feed reports.
+// SummariseOpenAnomalies returns the counts the Aico push reports.
 func (s *Store) SummariseOpenAnomalies(since time.Time) (AnomalyWindow, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -52,7 +52,7 @@ func (s *Store) SummariseOpenAnomalies(since time.Time) (AnomalyWindow, error) {
 
 // NewOpenAlerts returns the open paging findings raised since a point in
 // time (not acknowledged, not held), worst severity first and newest first
-// within it, at most limit of them. The Nightshift feed describes each one.
+// within it, at most limit of them. The Aico push describes each one.
 func (s *Store) NewOpenAlerts(since time.Time, limit int) ([]AnomalyAlert, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

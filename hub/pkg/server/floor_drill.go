@@ -15,7 +15,7 @@ import (
 // The weekly floor drill (detector/drill.go), run inside the hub process: not
 // by a timer under a user account, which an agent could disable, and not
 // through /api/v1/events. Each run's outcome is kept in one setting, and the
-// Nightshift feed raises a CRITICAL when the last run missed a floor rule or
+// Aico push raises a CRITICAL when the last run missed a floor rule or
 // the drill has not run for more than eight days.
 
 const (
@@ -128,7 +128,7 @@ func (s *Server) floorDrillLoop() {
 	}
 }
 
-// floorDrillFinding is the drill on the Nightshift feed.
+// floorDrillFinding is the drill on the Aico push.
 func (s *Server) floorDrillFinding(now time.Time) feedFinding {
 	const uid, title = "ominull.detection.drill", "Detection floor drill"
 	rec, ok := s.lastFloorDrill()

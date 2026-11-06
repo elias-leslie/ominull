@@ -248,7 +248,7 @@ func (s *Server) detectionTuningGate(w http.ResponseWriter, r *http.Request) {
 }
 
 // acknowledgeFinding dismisses one finding the way /anomalies/acknowledge
-// does, with its audit row, so the Nightshift feed counts it.
+// does, with its audit row, so the Aico push counts it.
 func (s *Server) acknowledgeFinding(r *http.Request, id string) error {
 	done, err := s.store.AcknowledgeFindings("", []string{id}, false)
 	s.auditDismissal(r, findingsAcknowledgedAudit, "acknowledged", done)

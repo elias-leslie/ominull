@@ -550,19 +550,10 @@ func TestRetiredBuildRow(t *testing.T) {
 	}
 }
 
-func TestPullFeedIsGoneAndDiagnosticsStayAdminOnly(t *testing.T) {
+func TestHealthFindingsStayAdminOnly(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
-	for _, c := range []struct{ method, path string }{
-		{http.MethodGet, "/api/v1/integrations/nightshift/findings"},
-		{http.MethodGet, "/api/v1/integrations/nightshift/findings?contract=v4"},
-		{http.MethodPost, "/api/v1/integrations/nightshift/key"},
-	} {
-		if w := feedRequest(srv, c.method, c.path, "mock_admin_token"); w.Code != http.StatusNotFound {
-			t.Errorf("%s %s = %d, want 404", c.method, c.path, w.Code)
-		}
-	}
 	if w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", "mock_tenant_token"); w.Code != http.StatusForbidden {
 		t.Errorf("tenant key read the findings: %d", w.Code)
 	}

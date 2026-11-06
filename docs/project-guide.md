@@ -260,9 +260,9 @@ belong to that name, so reattach with the same one.
 | `/api/v1/agent/config` | GET | device-scoped control/config response |
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
-| `/api/v1/agents/rollback` | POST | admin (or Nightshift's relay key at `/api/v1/integrations/nightshift/agents/rollback`): `{version, reason}` retires an agent release: halts its staged rollouts, drops its queued updates and refuses to roll it again; machines already on it stay until a newer release; no authorization needed |
-| `/api/v1/trust/routine-keys` | GET/POST | admin (or the relay key at `/api/v1/integrations/nightshift/routine-keys`): the routine release keys the pinned release key listed, `{epoch, keys:[{id, public_key}], signature}` over `OMINULL-ROUTINE-KEYS-V1` (`/statement` returns the exact bytes; a higher epoch replaces, an empty list revokes). Agents get it in the heartbeat and accept a routine key only for agent packages and their release statements; a release signed with one rolls out canaries first |
-| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens is authorized by the response authority on the same request (no second step) and recorded in the audit with a Nightshift note; a loosening the authority cannot read (invalid or over 16 KiB) is refused with the reason; the authority's audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
+| `/api/v1/agents/rollback` | POST | admin: `{version, reason}` retires an agent release: halts its staged rollouts, drops its queued updates and refuses to roll it again; machines already on it stay until a newer release; no authorization needed |
+| `/api/v1/trust/routine-keys` | GET/POST | admin: the routine release keys the pinned release key listed, `{epoch, keys:[{id, public_key}], signature}` over `OMINULL-ROUTINE-KEYS-V1` (`/statement` returns the exact bytes; a higher epoch replaces, an empty list revokes). Agents get it in the heartbeat and accept a routine key only for agent packages and their release statements; a release signed with one rolls out canaries first |
+| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens is authorized by the response authority on the same request (no second step) and recorded in the audit with a detection-policy note; a loosening the authority cannot read (invalid or over 16 KiB) is refused with the reason; the authority's audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
 | `/api/v1/detection/expected` | GET/POST/PUT/DELETE | the expected rules (below): GET returns `{rules, findings, explicit, now}`; POST or PUT upserts one rule by `id` (admin); DELETE `?id=` removes one (admin, tightens, applies at once); a write that loosens is authorized by the response authority on the same request and audited as `EXPECTED_RULE_SAVED` / `EXPECTED_RULE_DELETED` |
 | `/api/v1/detection/expected/mark` | POST | admin: `{id, reason?, all_hosts?, days?}` turns a finding into a narrow expected rule (this program, this network, this host, this kind) and acknowledges the finding; audited as `EXPECTED_RULE_MARKED`; no release needed |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
@@ -409,7 +409,7 @@ resolver bypass of a removed agent runtime, counts). The authority's audit
 statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...",
 shortened to the count when the change leaves no room) or with "floor drill:
 blinds no floor case (the 10 MB burst yields to expected rules)". The drill does not block the save: the authority signs it and the
-audit and the Nightshift note show what it blinds. Presence and retirement
+audit and the detection-policy note show what it blinds. Presence and retirement
 reach no floor rule the drill runs, so their statements carry
 no drill.
 
@@ -419,7 +419,7 @@ and return against presence, sweeps, threat intelligence, beaconing, volume,
 sensitive ports and the agent egress rules. The behavioural detectors
 (`NOVEL_DESTINATION`, `NOVEL_PROCESS_EGRESS`, `OFF_HOURS_ACTIVITY`) write hunt
 leads: stored in full with `held_reason` `hunt` and `tier` in the evidence, out
-of every open count, the default alert list and the Nightshift summary, shown
+of every open count, the default alert list and the Aico push summary, shown
 under HUNT LEADS (`GET /api/v1/anomalies?held=hunt`, `hunt_total`) and bounded
 by the anomaly retention. On agent-heavy endpoints (tuning
 `agent_heavy_endpoints` by endpoint id, `agent_heavy_roles` by role tag, and,
@@ -503,9 +503,9 @@ and the limits of observed domain/process evidence.
 
 ## Aico push
 
-The hub pushes its paging alerts and its health to Aico (the owner's Needs you and Status), once a minute. Nightshift's
-pull feed is gone: there is no feed key and no `nightshift/findings` route. The relay-key routes stay
-(`alerts/verdict`, `approval-key`, `locks`, `agent-builds`, `routine-keys`, `agents/rollback`).
+The hub pushes its paging alerts and its health to Aico (the owner's Needs you and Status), once a minute. There is no pull
+feed. Aico calls back on two routes behind the relay key (`X-API-Key`, `nsa_` prefix; an admin issues or rotates it with
+`POST /api/v1/aico/relay-key`): `POST /api/v1/aico/alerts/verdict` and `GET /api/v1/aico/agent-builds`.
 
 Set it up as a fleet administrator (not a tenant administrator):
 
@@ -531,7 +531,7 @@ What is pushed (a body of `{"notices": [...], "rows": [...]}`, at most 50 of eac
   incident asks by its own id. Sent tokens are kept 30 days (table `aico_push_sent`). Each is a critical alert,
   "Security alert on HOST", with the sentence and its time (UTC), a redacted command line, destinations and the likely
   cause. Its key is `alerts:<alert ids>`: the owner's "That was me" sends those ids to
-  `/api/v1/integrations/nightshift/alerts/verdict`. Offers Not expected, Expected (not for threat-list and beacon
+  `/api/v1/aico/alerts/verdict`. Offers Not expected, Expected (not for threat-list and beacon
   alerts, which are closed in the console), Look into it, and Open when the hub URL is `https://`.
 - **Rows.** The health findings, one Status row each (`ominull.*`, machine `ominull-hub`, project `ominull`): `ok`
   when resolved or only a note, else `warn`; never `failed`, so a row never phones the owner by itself (alerts do,

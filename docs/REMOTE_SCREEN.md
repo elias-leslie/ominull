@@ -655,8 +655,7 @@ asked and why.
   key once; `DELETE` revokes it. The steward reaches only its route list
   (maintenance wait/escalate/list and the screen session routes).
 - **No rule:** the per-machine steward rule, its token, `POST
-  /api/v1/screen/steward` and `/api/v1/integrations/nightshift/steward-screen`
-  are removed, as are `rule_token` and `narrow` on a session request.
+  /api/v1/screen/steward` are removed, as are `rule_token` and `narrow` on a session request.
 - **Opening:** the steward sends `POST /api/v1/screen/sessions` with
   `steward_run` (a maintenance job on that machine in needs_hands or stalled).
   The hub opens it only inside the machine's maintenance window, never

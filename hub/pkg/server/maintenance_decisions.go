@@ -4,7 +4,7 @@ package server
 // whose uninstaller needs someone at the screen, one left open) comes back as
 // detail.needs_owner items: {"id","name","reason","keep"}. The hub groups the
 // open ones per run (a playbook run, or one package's latest runs) into one
-// Nightshift feed record each, and the owner answers from the Maintenance page
+// Aico push record each, and the owner answers from the Maintenance page
 // or POST /api/v1/maintenance/decisions:
 //
 //   keep:    leave it on that machine. When the item names a list setting

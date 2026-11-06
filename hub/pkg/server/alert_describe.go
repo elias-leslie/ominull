@@ -14,7 +14,7 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// Alert detail for the Nightshift feed.
+// Alert detail for the Aico push.
 //
 // A count ("2 new anomalies, 2 critical") tells the owner that something
 // happened and nothing that lets them judge it. The summary finding therefore
@@ -422,14 +422,14 @@ func riskyWhy(anomalyType string) string {
 
 var (
 	actorAgent   = regexp.MustCompile(`^agent:(claude|codex):([0-9a-f]{4,64})?$`)
-	actorService = regexp.MustCompile(`^service:(nightshift|summitflow):([\w@.:-]{1,120}\.(?:service|scope))$`)
+	actorService = regexp.MustCompile(`^service:(summitflow):([\w@.:-]{1,120}\.(?:service|scope))$`)
 )
 
 // actorLabel turns the endpoint's actor ("agent:claude:fb39ca7b",
-// "service:nightshift:nightshift-check.service") into owner words; anything
+// "service:summitflow:summitflow-backend.service") into owner words; anything
 // else is dropped. The agent reads it from the process's own ancestry and
 // cgroup, so it only ever describes that endpoint's own alert. The agent
-// label matches Nightshift's, which swaps in the Aico window title.
+// label names the Aico window.
 func actorLabel(actor string) string {
 	if m := actorAgent.FindStringSubmatch(actor); m != nil {
 		tool := map[string]string{"claude": "Claude Code", "codex": "Codex"}[m[1]]
@@ -439,7 +439,7 @@ func actorLabel(actor string) string {
 		return tool + " session outside Aico"
 	}
 	if m := actorService.FindStringSubmatch(actor); m != nil {
-		return map[string]string{"nightshift": "Nightshift", "summitflow": "SummitFlow"}[m[1]] + " (" + m[2] + ")"
+		return "SummitFlow (" + m[2] + ")"
 	}
 	return ""
 }

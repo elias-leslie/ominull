@@ -185,7 +185,7 @@ func TestResolvingFindingsNamesTheAgentThatLabelledItself(t *testing.T) {
 	}
 }
 
-// Resolving closes findings like acknowledging them, so the Nightshift feed's
+// Resolving closes findings like acknowledging them, so the Aico push's
 // detection-policy note counts and lists what a resolve closed, by id and in
 // a covered batch; a verdict on a finding already closed adds nothing.
 func TestResolvingFindingsIsCountedOnTheFeedNote(t *testing.T) {

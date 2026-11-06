@@ -156,7 +156,7 @@ type HuntWindow struct {
 	ByClass map[string]int `json:"by_class"`
 }
 
-// SummariseHuntLeads returns the hunt-lead counts the Nightshift feed reports.
+// SummariseHuntLeads returns the hunt-lead counts the Aico push reports.
 func (s *Store) SummariseHuntLeads(since time.Time) (HuntWindow, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

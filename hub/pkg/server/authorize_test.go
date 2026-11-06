@@ -133,6 +133,12 @@ func TestApprovalRoutesAreGone(t *testing.T) {
 		"/api/v1/integrations/nightshift/approval-rules", "/api/v1/integrations/nightshift/approval-rules/challenge",
 		"/api/v1/integrations/nightshift/decisions", "/api/v1/integrations/nightshift/decisions/answer",
 		"/api/v1/integrations/nightshift/steward-screen",
+		// Everything under the old Nightshift prefix is gone, relay-key routes too.
+		"/api/v1/integrations/nightshift/alerts/verdict", "/api/v1/integrations/nightshift/agent-builds",
+		"/api/v1/integrations/nightshift/approval-key", "/api/v1/integrations/nightshift/locks",
+		"/api/v1/integrations/nightshift/routine-keys", "/api/v1/integrations/nightshift/routine-keys/statement",
+		"/api/v1/integrations/nightshift/agents/rollback", "/api/v1/integrations/nightshift/findings",
+		"/api/v1/integrations/nightshift/key",
 	} {
 		for _, m := range []string{"GET", "POST", "DELETE"} {
 			req := httptest.NewRequest(m, p, strings.NewReader(`{}`))
@@ -144,12 +150,12 @@ func TestApprovalRoutesAreGone(t *testing.T) {
 			}
 		}
 	}
-	// The relay key survives: Nightshift still reads locks and builds with it.
-	if r := httptest.NewRequest("GET", "/api/v1/integrations/nightshift/locks", nil); r != nil {
+	// Aico's relay routes answer 401 without the key.
+	for _, p := range []string{"/api/v1/aico/agent-builds", "/api/v1/aico/alerts/verdict"} {
 		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, r)
+		srv.Handler().ServeHTTP(w, httptest.NewRequest("GET", p, nil))
 		if w.Code != http.StatusUnauthorized {
-			t.Errorf("locks without the relay key: %d, want 401", w.Code)
+			t.Errorf("%s without the relay key: %d, want 401", p, w.Code)
 		}
 	}
 }

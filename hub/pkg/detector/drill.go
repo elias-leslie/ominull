@@ -23,7 +23,7 @@ import (
 // destination range or a port. The throwaway engine stores no finding, writes no device
 // memory and isolates nothing: its isolate hook only notes that
 // it was asked. The server judges the result and reports a miss, or a drill
-// that has stopped running, on the Nightshift feed (server/floor_drill.go).
+// that has stopped running, on the Aico push (server/floor_drill.go).
 
 // DrillEndpointID is the endpoint the synthetic events come from. It is never
 // enrolled; no finding from it is stored.

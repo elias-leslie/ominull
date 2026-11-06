@@ -20,7 +20,7 @@ import (
 // endpoint-day (endpoint data) or per router-client-day (router data), hot
 // (raw window in SQLite) versus retained (rollups past it), with projections
 // for more endpoints and days, against fixed budgets. The console and the
-// Nightshift feed read the cached report; it is rebuilt by the retention
+// Aico push read the cached report; it is rebuilt by the retention
 // sweep (dbstat reads every page, so not per request).
 
 // DataBudgets are the goal posts the report is measured against.
@@ -565,7 +565,7 @@ func (s *Store) timeQueries(r *DataReport) {
 	measure("recent_flows_200", func() error { _, err := s.QueryEvents("", "", 200); return err })
 	measure("topology_1h", func() error { _, err := s.GetTopologyGraph(time.Hour); return err })
 	measure("analytics_summary", func() error { _, err := s.analyticsSummaryUncached(""); return err })
-	measure("nightshift_feed_anomalies", func() error {
+	measure("anomaly_feed", func() error {
 		_, err := s.SummariseOpenAnomalies(time.Now().Add(-24 * time.Hour))
 		return err
 	})

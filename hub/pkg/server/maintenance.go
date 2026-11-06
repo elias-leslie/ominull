@@ -274,7 +274,7 @@ func windowsInterpreter(interp string) bool {
 	return false
 }
 
-// maintenanceFindings is the Nightshift feed's maintenance record. A package
+// maintenanceFindings is the Aico push's maintenance record. A package
 // whose latest run on a host failed or never answered needs the owner: that
 // is the one finding raised to critical (Nightshift pushes it). On a host
 // that is off now nothing can repeat the run until it is back, so its failure
