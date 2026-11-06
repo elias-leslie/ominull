@@ -2,12 +2,19 @@
 Ominull is an endpoint telemetry, detection and containment hub for operators managing Linux and Windows devices. It pairs a fleet console, observed network evidence, device identity and bounded response controls with agents on each machine, all served from a self-hosted Linux hub.
 
 ## Now
-- Audit the whole product for the long-term shape: detection value, change cost, live config vs code, ceremony to drop (report: docs/audit-2026-11-06.md)
+- M1: One expected-rule model used by every rule; Mark as expected works for self-updating programs (plan: docs/audit-2026-11-06.md)
+- M2: Stop writing noise findings (off-hours, novel process/destination, bandwidth spike) (plan: docs/audit-2026-11-06.md)
+- M3: Hub deploys like a service: build, copy, restart, no signing or agent rebuild (plan: docs/audit-2026-11-06.md)
 - agy maker rule: Google API hosts expected, Cloud Storage still pages; maker exclusions as live config
 - Agent: close the terminal-session grant signature gap, then fuzz and sanitizer-harden hub-input parsing (security, first)
 - Console: browser-check and accessibility-check the Topology rewrite (700fe82; shipped, never checked past a render)
 - Windows agent: confirm ESTATS byte counts stay clean after 1.8.99 (32-bit wraps unconfirmed), fix any left in agent/src/service.c
 ## Next
+- M5: Aico owns machine inventory, intent and liveness (plan: docs/audit-2026-11-06.md)
+- M8: Tripwires: canary credentials, decoy addresses, bad-domain matching on stored DNS (plan: docs/audit-2026-11-06.md)
+- M9: Monthly live drill that proves a page reaches the phone (plan: docs/audit-2026-11-06.md)
+- M4, M7: Agent release with one key, Linux updates through Aico fleet; drop dead routes, page budget and extra keys (plan: docs/audit-2026-11-06.md)
+- M6, M10-M12: Response authority, remote-admin split, console trim, Go Linux agent: after the owner's decisions (plan: docs/audit-2026-11-06.md)
 - Console: overhaul the Traffic page once Topology is verified
 - Rust static library for hub-input parsing and signature verification (C ABI, both platforms) after the grant fix
 - Trust fabric: IP and CIDR rules enforced end to end, including older agents that refuse ranges (plan: docs/TRUST_FABRIC.md)
