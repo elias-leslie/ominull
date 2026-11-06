@@ -2,6 +2,8 @@
 Ominull is an endpoint telemetry, detection and containment hub for operators managing Linux and Windows devices. It pairs a fleet console, observed network evidence, device identity and bounded response controls with agents on each machine, all served from a self-hosted Linux hub.
 
 ## Now
+- Audit the whole product for the long-term shape: detection value, change cost, live config vs code, ceremony to drop (report: docs/audit-2026-11-06.md)
+- agy maker rule: Google API hosts expected, Cloud Storage still pages; maker exclusions as live config
 - Agent: close the terminal-session grant signature gap, then fuzz and sanitizer-harden hub-input parsing (security, first)
 - Console: browser-check and accessibility-check the Topology rewrite (700fe82; shipped, never checked past a render)
 - Windows agent: confirm ESTATS byte counts stay clean after 1.8.99 (32-bit wraps unconfirmed), fix any left in agent/src/service.c
