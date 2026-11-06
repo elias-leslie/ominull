@@ -468,6 +468,27 @@ func TestAVendorEntryMayNotVouchForMoreThanOneService(t *testing.T) {
 	}
 }
 
+// A row saved before exclude_domains and networks existed reads back as
+// written: its entries do not pick up fields from the shipped entry that
+// sorts to the same position (Claude read back with Google's network live).
+func TestASavedVendorListDoesNotInheritShippedFields(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.db.Exec(`INSERT INTO detection_tuning (id, settings, updated_at, updated_by) VALUES (1, ?, ?, 'old')`,
+		`{"agent_runtime_vendors":[{"runtime":"claude","vendor":"Anthropic","domains":["anthropic.com"],"prefixes":["160.79.104.0/23"]},`+
+			`{"runtime":"codex","vendor":"OpenAI","domains":["openai.com"],"prefixes":[]}]}`, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	got := s.GetDetectionTuning().AgentRuntimeVendors
+	if len(got) != 2 {
+		t.Fatalf("vendors %+v", got)
+	}
+	for _, v := range got {
+		if len(v.Networks) != 0 || len(v.ExcludeDomains) != 0 {
+			t.Fatalf("%s inherited shipped fields: %+v", v.Runtime, v)
+		}
+	}
+}
+
 // Antigravity's maker is Google's API hosts on Google's own network, never
 // a Cloud Storage host (anyone's buckets), and never on an address the hub
 // attributes to Google's rented compute or only from its built-in table.

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -422,6 +423,21 @@ type AgentRuntimeVendor struct {
 	ExcludeDomains []string `json:"exclude_domains"`
 	Prefixes       []string `json:"prefixes"`
 	Networks       []string `json:"networks"`
+}
+
+// UnmarshalJSON starts from an empty entry. Saved tuning is decoded over the
+// shipped defaults, and encoding/json decodes an array into the existing
+// elements in place, so without this a saved entry missing a field (a row
+// saved before exclude_domains and networks existed) kept whatever the
+// shipped entry at its position held: Claude read back with Google's network.
+func (v *AgentRuntimeVendor) UnmarshalJSON(b []byte) error {
+	type plain AgentRuntimeVendor
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*v = AgentRuntimeVendor(p)
+	return nil
 }
 
 // defaultAgentRuntimeVendors: Anthropic's prefixes are from
