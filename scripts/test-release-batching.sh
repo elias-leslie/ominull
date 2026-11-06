@@ -7,9 +7,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
-mkdir -p "${work}/scripts" "${work}/hub/pkg" "${work}/agent/tests"
+mkdir -p "${work}/scripts/lib" "${work}/hub/pkg" "${work}/agent/tests"
 cp "${ROOT_DIR}/scripts/release.sh" "${work}/scripts/release.sh"
+cp "${ROOT_DIR}/scripts/lib/hub-admin-key.sh" "${work}/scripts/lib/hub-admin-key.sh"
 cd "${work}"
+# The batching guard runs before the hub is asked anything; placeholders keep
+# release.sh from reading the production key in this scratch repository.
+export OMINULL_HUB_URL=https://hub.invalid:9443 OMINULL_ADMIN_KEY=placeholder
 git init -q
 git config user.email test@example.invalid
 git config user.name test
