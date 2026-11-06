@@ -146,10 +146,13 @@ func TestAPolicyChangeIsDrilledAtOnce(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	srv.runFloorDrill(time.Now().UTC().Add(-time.Hour))
+	saved := time.Now().UTC()
 	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"warmup_hours":12}`, ""); w.Code != http.StatusOK {
 		t.Fatalf("tightening save = %d %s", w.Code, w.Body.String())
 	}
-	if rec, _ := srv.lastFloorDrill(); time.Since(rec.RanAt) > time.Minute {
+	// Judged against the save, not a wall-clock minute: under -race with the
+	// whole package running the save itself can take longer than that.
+	if rec, _ := srv.lastFloorDrill(); rec.RanAt.Before(saved) {
 		t.Fatalf("the change was not drilled: %+v", rec)
 	}
 }
