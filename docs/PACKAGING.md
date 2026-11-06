@@ -94,22 +94,27 @@ Host ominull-hub-install
 
 The agent also needs its own trusted Proxmox host-key entry in
 `~agent/.ssh/known_hosts` and its private key available without an interactive
-prompt. Inside an active owner work session:
+prompt. Then, inside the owner's work session:
 
 ```bash
-st elevate request ominull-admin --reason 'OmniNull release X.Y.Z' --wait
 OMINULL_SIGNING_ROUTINE=1 OMINULL_SIGNING_BACKEND=command \
 OMINULL_SIGNING_COMMAND=~/.local/bin/ominull-release-signer \
-OMINULL_HUB_URL=https://<hub>:9443 \
-st elevate run ominull-admin -- scripts/release.sh ...
-st elevate revoke ominull-admin
+scripts/release.sh ...
 ```
+
+When `OMINULL_HUB_URL` or `OMINULL_ADMIN_KEY` is unset, `release.sh` fills them in
+(`scripts/lib/hub-admin-key.sh`): the URL from `hub_base_url` in the owner's
+`scripts/st_extension/production.local.json`, the key from the first line of
+`/etc/ominull/admin.key` in the hub container, read as root over that file's
+`ssh_alias` and `lxc_id` into the environment only (never printed or written to
+disk). `scripts/lib/hub-admin-key.sh --check` does just that and asks the hub
+which release it serves. No grant or tap is involved.
 
 The signer (`hub/cmd/ominull-release-signer`; install with `scripts/install-release-signer.sh`) runs its root half
 through `sudo -n`, opens the key from the key store (`OMINULL_SIGNING_STORE`, default
 `/var/lib/nightshift/release-signing`; public half `OMINULL_SIGNING_PUBLIC`) and signs only what `begin` froze: each
-package once, then its release statement once. Making a routine key list is not part of it. The session authorizes the `ominull-admin` grant without
-owner taps. Use the actual release arguments in place of `...`.
+package once, then its release statement once. Making a routine key list is not part of it. Use the actual release
+arguments in place of `...`.
 
 New installs take a routine-signed package too. The bootstrap scripts
 (`/bootstrap.sh`, `/bootstrap.ps1` and the enrolment pages' scripts) install a

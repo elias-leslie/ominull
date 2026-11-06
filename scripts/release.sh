@@ -8,6 +8,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Unset OMINULL_HUB_URL / OMINULL_ADMIN_KEY come from the owner's production
+# config and the hub's own key file (scripts/lib/hub-admin-key.sh).
+. "${ROOT_DIR}/scripts/lib/hub-admin-key.sh"
+case "${1:-}" in -h|--help) ;; *) hub_admin_key_from_config || exit 1 ;; esac
 HUB_URL="${OMINULL_HUB_URL:-}"
 # The hub reaches Proxmox only through the hub-install key (scripts/deploy-hub.sh).
 DEPLOY_CMD="${OMINULL_DEPLOY_CMD:-${ROOT_DIR}/scripts/deploy-hub.sh}"
@@ -83,7 +87,7 @@ if [ "${DO_HUB}" -eq 1 ]; then
     }
     # Before anything is built or signed: a hub-install key that does not answer
     # would leave a signed release with nowhere to go.
-    # It needs OMINULL_HUB_URL, OMINULL_ADMIN_KEY and the hub CA, --hub-only included.
+    # It needs OMINULL_HUB_URL, OMINULL_ADMIN_KEY (read from the hub when unset) and the hub CA, --hub-only included.
     if [ -z "${OMINULL_DEPLOY_CMD:-}" ] && ! "${DEPLOY_CMD}" --check; then
         echo "[-] Nothing was built or signed. Until root has installed the hub-install key" >&2
         echo "    (scripts/pve/install.sh), deploy the old way: OMINULL_DEPLOY_CMD=scripts/deploy_remote.sh" >&2
@@ -118,7 +122,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
     bash "${ROOT_DIR}/scripts/test-release-batching.sh"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" "${ROOT_DIR}/scripts/sign-trust-bundle.sh" \
-        "${ROOT_DIR}/scripts/deploy-hub.sh" "${ROOT_DIR}/scripts/pve/install.sh" \
+        "${ROOT_DIR}/scripts/deploy-hub.sh" "${ROOT_DIR}/scripts/pve/install.sh" "${ROOT_DIR}/scripts/lib/hub-admin-key.sh" \
         "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
         "${ROOT_DIR}/scripts/retire-hub-host-agent.sh" \
         "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
