@@ -3,8 +3,8 @@
 #
 #   sudo scripts/pve/install.sh [--recipient age1...] [--repin-release-key] [--release-key-ref REF]
 #       [--hub-install-extra-pubkey FILE]
-#       as root: the authorized_keys change is an install receipt, not a tripwire ask
-#   scripts/pve/install.sh ...      as the owner: same install, Nightshift then asks about the key change
+#   scripts/pve/install.sh ...      as the owner: same install
+#       either way a changed authorized_keys is declared to host-steward (aico declare --host pve --what keys)
 #
 # Layout:  PVE host     /usr/local/sbin/ominull-backup-dispatch    (scripts/st_extension/pve_backup_dispatch.py)
 #                       /usr/local/sbin/ominull-observe-dispatch   (scripts/st_extension/pve_observe_dispatch.py)
@@ -91,10 +91,7 @@ declare -A SOURCE=([backup]=scripts/st_extension/pve_backup_dispatch.py [observe
   [hub-install]=scripts/pve/ominull-hub-install)
 
 work="$(mktemp -d)"; chmod 700 "$work"  # Root's own when run as root: nothing an agent can swap between show and install.
-rid=""; finished=0
-receipt() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from nightshift.installs import main; raise SystemExit(main(sys.argv[2:]))' \
-  /usr/local/lib/nightshift-exec/current "$@"; }
-trap '[ -z "$rid" ] || [ "$finished" = 1 ] || receipt finish "$rid" --failed || true; rm -rf "$work"' EXIT
+trap 'rm -rf "$work"' EXIT
 
 sha256() { python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"; }
 for role in "${ROLES[@]}"; do
@@ -133,11 +130,6 @@ done
 extra_line=""
 if [ -n "$extra_public" ]; then
   extra_line="restrict,from=\"$FROM\",command=\"${COMMAND[hub-install]}\" $extra_public ominull-hub-install-extra"
-fi
-
-if [ "$(id -u)" = 0 ] && [ -d /usr/local/lib/nightshift-exec/current/nightshift ]; then
-  rid=$(receipt begin ominull-pve-keys --repo "$ROOT" --expect "pve=/usr/local/sbin/ominull-*" \
-    --expect "pve=/etc/ominull-hub-install/*" --expect "pve=/etc/ominull-backup/*")
 fi
 
 b64() { base64 -w0 < "$1"; }
@@ -197,8 +189,7 @@ if [ -n "$recipient" ]; then
 elif [ ! -e /etc/ominull-backup/recipient ]; then
   echo "no backup recipient yet: the backup key refuses every backup until one is installed"
 fi
-# Tripwire signature, byte for byte Nightshift's format (deploy/executor/install-pve.sh): the AUTH lines name each
-# auth file transition this session makes, for the install receipt.
+# The AUTH lines name each auth file this session changed, so the change gets declared.
 sig() {
   local f=$1 h t
   { [ -e "$f" ] || [ -L "$f" ]; } && [ ! -d "$f" ] || { echo MISSING; return; }
@@ -235,7 +226,10 @@ for role in "${ROLES[@]}"; do
   key="$KEYDIR/$role.ed25519"
   if [ -f "$key.new" ]; then as_admin mv -f "$key.new.pub" "$key.pub"; as_admin mv -f "$key.new" "$key"; fi
 done
-if [ -n "$rid" ]; then receipt finish "$rid" --auth "pve=$work/pve-install.out"; finished=1; fi
+if grep -q '^AUTH' "$work/pve-install.out"; then
+  as_admin aico declare --host pve --what keys --hours 1 --reason "OmniNull forced-command keys installed or refreshed" ||
+    echo "authorized_keys changed on PVE; declare it: aico declare --host pve --what keys --reason ..." >&2
+fi
 
 # Each key reaches only its dispatcher: a shell command is refused, one read-only verb answers.
 host="$(as_admin ssh -G "$PVE" | awk '$1 == "hostname" {print $2}')"
