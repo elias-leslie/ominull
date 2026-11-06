@@ -2,7 +2,6 @@
 Ominull is an endpoint telemetry, detection and containment hub for operators managing Linux and Windows devices. It pairs a fleet console, observed network evidence, device identity and bounded response controls with agents on each machine, all served from a self-hosted Linux hub.
 
 ## Now
-- M1: One expected-rule model used by every rule; Mark as expected works for self-updating programs (plan: docs/audit-2026-11-06.md)
 - M2: Stop writing noise findings (off-hours, novel process/destination, bandwidth spike) and treat a listener's inbound connections as served, not outbound (pveproxy false port scan) (plan: docs/audit-2026-11-06.md)
 - M3: Hub deploys like a service: build, copy, restart, no signing or agent rebuild (plan: docs/audit-2026-11-06.md)
 - agy maker rule: Google API hosts expected, Cloud Storage still pages; maker exclusions as live config
@@ -14,7 +13,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - M8: Tripwires: canary credentials, decoy addresses, bad-domain matching on stored DNS (plan: docs/audit-2026-11-06.md)
 - M9: Monthly live drill that proves a page reaches the phone (plan: docs/audit-2026-11-06.md)
 - M4, M7: Agent release with one key, Linux updates through Aico fleet; drop dead routes, page budget and extra keys (plan: docs/audit-2026-11-06.md)
-- M6: Fold the response authority into the hub (owner approved 2026-11-06), after M1 (plan: docs/audit-2026-11-06.md)
+- M6: Fold the response authority into the hub (owner approved 2026-11-06) (plan: docs/audit-2026-11-06.md)
 - M10-M12: Remote-admin kept everywhere (tidy only), console trim, Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
 - Console: overhaul the Traffic page once Topology is verified
 - Rust static library for hub-input parsing and signature verification (C ABI, both platforms) after the grant fix
