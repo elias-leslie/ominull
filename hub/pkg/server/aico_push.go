@@ -623,11 +623,21 @@ func (s *Server) aicoRows(now time.Time) []aicoRow {
 	return rows
 }
 
-// aicoAllRows is every row the hub produces this pass, warn first, uncut.
+// aicoAllRows is every row the hub produces this pass: the hub's own machine row first, then the
+// rest with the ones needing a look first. Uncut.
 func (s *Server) aicoAllRows(now time.Time) []aicoRow {
 	rows := append(aicoFindingRows(s.healthFindings(now), now), s.retiredBuildRows(now)...)
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].State == "warn" && rows[j].State != "warn" })
-	return rows
+	return append([]aicoRow{aicoMachineRow(now)}, rows...)
+}
+
+// aicoMachineRow is the hub's own liveness row. Aico shows every other row of a machine as
+// unknown ("no word from ominull-hub") unless the machine itself reports a kind=machine row with
+// a next_run, so the hub pushes one every pass, ahead of the cut at aicoListMax.
+func aicoMachineRow(now time.Time) aicoRow {
+	return aicoRow{ID: "ominull.machine", What: aicoRowMachine, Kind: "machine", Machine: aicoRowMachine, Project: aicoRowProject,
+		State: "ok", Meaning: "The OmniNull hub is up and pushing its checks",
+		LastRun: now.UTC().Format(time.RFC3339), NextRun: now.Add(aicoRowsDue).UTC().Format(time.RFC3339)}
 }
 
 type retiredKey struct {

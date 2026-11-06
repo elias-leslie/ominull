@@ -483,6 +483,14 @@ func TestAicoPushSendsHealthRowsFromTheLiveHub(t *testing.T) {
 			t.Errorf("row %v", r)
 		}
 	}
+	for _, r := range rcv.rows {
+		if r["kind"] == "machine" && (r["machine"] != "ominull-hub" || r["next_run"] == nil || r["state"] != "ok") {
+			t.Errorf("machine row %v", r)
+		}
+	}
+	if ids["ominull.machine"] != "ok" {
+		t.Errorf("the hub did not push its own machine row; have %v", ids)
+	}
 	for _, id := range []string{"ominull.hub", "ominull.anomalies.summary", "ominull.agents.offline", "ominull.builds.1932669bb5871af4"} {
 		if ids[id] == "" {
 			t.Errorf("no row %s; have %v", id, ids)
