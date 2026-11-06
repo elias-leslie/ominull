@@ -3,7 +3,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 
 ## Now
 - M1: One expected-rule model used by every rule; Mark as expected works for self-updating programs (plan: docs/audit-2026-11-06.md)
-- M2: Stop writing noise findings (off-hours, novel process/destination, bandwidth spike) (plan: docs/audit-2026-11-06.md)
+- M2: Stop writing noise findings (off-hours, novel process/destination, bandwidth spike) and treat a listener's inbound connections as served, not outbound (pveproxy false port scan) (plan: docs/audit-2026-11-06.md)
 - M3: Hub deploys like a service: build, copy, restart, no signing or agent rebuild (plan: docs/audit-2026-11-06.md)
 - agy maker rule: Google API hosts expected, Cloud Storage still pages; maker exclusions as live config
 - Agent: close the terminal-session grant signature gap, then fuzz and sanitizer-harden hub-input parsing (security, first)
