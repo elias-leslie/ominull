@@ -181,10 +181,33 @@ jobs:
         shell: pwsh
         run: ./packages/windows/tests/test-packages.ps1
 
+  test-hub-input:
+    name: Agent Hub-Input Library
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install cross-compiler, wine and fuzzer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang mingw-w64 wine64 libcurl4-openssl-dev
+
+      - name: Compare the library with the C readers, run the agent tests on it
+        run: |
+          mkdir -p build
+          ./scripts/test-agent-hub-input.sh
+
+      - name: Replay the fuzz seeds and fixed crashes
+        env:
+          FUZZ_DIR: ${{ runner.temp }}/ominull-fuzz
+          FUZZ_HUB_INPUT: "1"
+        run: ./scripts/fuzz-agent.sh --regress
+
   build-packages:
     name: Cross-Platform Release Packaging
     runs-on: ubuntu-latest
-    needs: [version-consistency, test-hub, test-agents, test-topology, test-windows-native]
+    needs: [version-consistency, test-hub, test-agents, test-topology, test-windows-native, test-hub-input]
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

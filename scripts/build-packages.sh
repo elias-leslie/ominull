@@ -77,8 +77,9 @@ cp "${ROOT_DIR}/screen/target/x86_64-pc-windows-gnu/release/ominull-screen-helpe
 SCREEN_HELPER_SHA256="$(sha256sum "${BUILD_DIR}/ominull-screen-helper.exe" | cut -d' ' -f1)"
 
 echo "[*] Building Windows user-mode agent and recovery tool."
+bash "${ROOT_DIR}/scripts/build-hub-input.sh" x86_64-pc-windows-gnu
 x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
-	-DOMINULL_WFP_EMBEDDED \
+	-DOMINULL_WFP_EMBEDDED -DOMINULL_HUB_INPUT \
 	-DOMINULL_SCREEN_HELPER_SHA256="\"${SCREEN_HELPER_SHA256}\"" \
 	-D_WIN32_WINNT=0x0A00 \
 	-DNTDDI_VERSION=0x0A000006 \
@@ -92,6 +93,7 @@ x86_64-w64-mingw32-gcc -Wall -Wextra -Wformat=2 -O2 \
     "${ROOT_DIR}/agent/src/response_windows.c" \
     "${ROOT_DIR}/agent/src/trust_windows.c" \
     "${ROOT_DIR}/agent/windows/wfp_user.c" \
+    "${ROOT_DIR}/build/hubinput/x86_64-pc-windows-gnu/libominull_hubinput.a" -Wl,--gc-sections \
     -o "${BUILD_DIR}/ominulld.exe" \
     -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt \
     -lfwpuclnt -lole32 -lpsapi -lwtsapi32

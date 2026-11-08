@@ -34,6 +34,10 @@ trap 'rm -f "${build_log}"' EXIT
     -f "${ROOT_DIR}/packaging/linux/agent/build.Dockerfile" "${ROOT_DIR}/packaging/linux/agent" >"${build_log}" 2>&1 \
     || { cat "${build_log}" >&2; exit 1; }
 
+# The hub-input library is cross-platform Rust built on the host; only the link
+# happens in the baseline container. It needs nothing from libc beyond the baseline.
+bash "${SCRIPT_DIR}/build-hub-input.sh" x86_64-unknown-linux-gnu
+
 mkdir -p "${OUT_DIR}"
 # The container writes as root-mapped uid of the caller; the mounted source is read-only.
 "${docker[@]}" run --rm --user "$(id -u):$(id -g)" --network none \
@@ -42,7 +46,8 @@ mkdir -p "${OUT_DIR}"
         mkdir /tmp/w && cd /tmp/w && cp -r /src/agent /src/scripts . && mkdir build
         bash scripts/check-agent-libbpf.sh >/dev/null
         bash scripts/build-bpf.sh
-        gcc -Wall -Wextra -Wformat=2 -O2 -Iagent/include agent/linux/main.c \
+        gcc -Wall -Wextra -Wformat=2 -O2 -DOMINULL_HUB_INPUT -Iagent/include agent/linux/main.c \
+            /src/build/hubinput/x86_64-unknown-linux-gnu/libominull_hubinput.a -Wl,--gc-sections \
             -lbpf -lcurl -lutil -o build/ominulld
         bash scripts/check-agent-libbpf.sh build/ominulld >/dev/null
         bash scripts/check-agent-glibc.sh build/ominulld >/dev/null

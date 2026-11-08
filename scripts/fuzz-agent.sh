@@ -5,6 +5,7 @@
 #   scripts/fuzz-agent.sh --regress       replay the seeds and agent/tests/fuzz/crashes only (release gate)
 #   scripts/fuzz-agent.sh NAME...         only these harnesses (fuzz_offers, fuzz_trust_reply, ...)
 #
+# FUZZ_HUB_INPUT=1 builds the harnesses with the Rust library switched in, as the agent ships.
 # The working corpus lives in ${FUZZ_DIR:-/srv/scratch/ominull-fuzz} (replaceable). A crash
 # lands there as crash-*; copy it into agent/tests/fuzz/crashes/<harness>/ with the fix so
 # --regress keeps it fixed. Run through admission: st tools run --label "ominull agent fuzz" -- scripts/fuzz-agent.sh
@@ -53,9 +54,14 @@ failed=0
 for n in "${names[@]}"; do
     [ -f "${FUZZ_SRC}/${n}.c" ] || { echo "no harness ${n}" >&2; exit 2; }
     lib=""
-    [ "${n}" = fuzz_diff ] && lib="$(hubinput_lib)"
+    flag=""
+    [ "${n}" = fuzz_diff ] && lib="$(hubinput_lib) ${FUZZ_SRC}/rust_eh_stub.c"
+    if [ -n "${FUZZ_HUB_INPUT:-}" ] && [ "${n}" != fuzz_diff ]; then
+        lib="$(hubinput_lib) ${FUZZ_SRC}/rust_eh_stub.c"
+        flag="-DOMINULL_HUB_INPUT"
+    fi
     # shellcheck disable=SC2086
-    "${CC}" -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+    "${CC}" -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined ${flag} \
         -Wall -Wextra -I"${ROOT_DIR}/agent/include" "${FUZZ_SRC}/${n}.c" ${lib} -o "${WORK}/bin/${n}" ${libs[$n]}
     inputs=("${WORK}/seeds/${n}")
     [ -d "${FUZZ_SRC}/crashes/${n}" ] && inputs+=("${FUZZ_SRC}/crashes/${n}")

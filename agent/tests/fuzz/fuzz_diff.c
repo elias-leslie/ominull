@@ -3,9 +3,6 @@
 #include "fuzz_common.h"
 #include "hub_input_diff.h"
 
-/* Without LTO the prebuilt core still names this; panics abort, so it never runs. */
-void rust_eh_personality(void) {}
-
 int LLVMFuzzerInitialize(int* argc, char*** argv) {
     (void)argc; (void)argv;
     Fuzz_QuietStdout();

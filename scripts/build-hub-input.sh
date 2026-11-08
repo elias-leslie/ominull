@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds the agent's hub-input library (agent/hubinput) for Linux and Windows,
-# offline from its vendored, lock-pinned crates, into build/hubinput/<target>/.
+# build-hub-input.sh [TARGET...]: builds the agent's hub-input library
+# (agent/hubinput), for Linux and Windows unless targets are named, offline from
+# its vendored, lock-pinned crates, into build/hubinput/<target>/.
 # The Linux agent's container build reads the archive from there through /src.
 set -euo pipefail
 
@@ -22,7 +23,8 @@ if [ ! -d "${CRATE}/vendor" ]; then
     fi
 fi
 
-for target in x86_64-unknown-linux-gnu x86_64-pc-windows-gnu; do
+[ "$#" -gt 0 ] || set -- x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
+for target in "$@"; do
     (cd "${CRATE}" && \
         RUSTFLAGS="--remap-path-prefix=${ROOT_DIR}=/ominull --remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=/cargo" \
         CARGO_TARGET_DIR="${OUT}/target" \

@@ -88,7 +88,7 @@ if [ "${DO_HUB}" -eq 1 ]; then
         # Committed changes only: a rerun after a failed run must not count
         # the version bump that run left in the working tree.
         shipped="$(git -C "${ROOT_DIR}" diff --name-only "${last_sha}" HEAD -- agent packaging screen \
-            scripts/build.sh scripts/build-packages.sh scripts/build-linux-agent.sh scripts/build-bpf.sh \
+            scripts/build.sh scripts/build-packages.sh scripts/build-linux-agent.sh scripts/build-bpf.sh scripts/build-hub-input.sh \
             ':(exclude)*_test.go' ':(exclude)agent/tests' ':(exclude,glob)hub/**/testdata/**' ':(exclude)*.md')"
         if [ -z "${shipped}" ]; then
             echo "[-] Nothing the agents ship has changed since ${last_name}; nothing to release (a hub change: scripts/deploy-hub.sh)." >&2

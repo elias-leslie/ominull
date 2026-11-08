@@ -208,6 +208,67 @@ static void Ed25519_Tightening(void) {
     DIFF(!hi_ed25519_verify(sig, msg, sizeof(msg), pub), "S+L must be refused");
 }
 
+/* Points the two verifiers could read differently: small-order, non-canonical and
+ * off-curve encodings, as keys and as R, with S 0 and 1 (RFC 8032 cofactor cases,
+ * "Taming the many EdDSAs"). Neither is strict about them; both must agree. */
+static void Ed25519_Edges(void) {
+    static const uint8_t pts[][32] = {
+        {1},                                                                                                /* identity */
+        {0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},  /* order 2 */
+        {0},                                                                                                /* order 4 */
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80},
+        {0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2, 0xef, 0x98, 0xf0,
+         0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05},  /* order 8 */
+        {0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d, 0x10, 0x67, 0x0f,
+         0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77, 0x92, 0xac, 0x03, 0x7a},
+        {0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},  /* y = p + 1, non-canonical identity */
+        {0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},  /* y = p */
+        {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+        {2},                                                                                                /* off the curve */
+        {0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+         0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66},  /* the base point */
+    };
+    size_t n = sizeof(pts) / sizeof(pts[0]);
+    const uint8_t msg[] = "edge";
+    int accepted = 0;
+    for (size_t k = 0; k < n; k++) {
+        for (size_t r = 0; r < n; r++) {
+            for (uint8_t s = 0; s < 2; s++) {
+                uint8_t sig[64] = {0};
+                memcpy(sig, pts[r], 32);
+                sig[32] = s;
+                bool c = Ed25519_Verify(sig, msg, sizeof(msg), pts[k]);
+                bool rust = hi_ed25519_verify(sig, msg, sizeof(msg), pts[k]);
+                if (c != rust) fprintf(stderr, "Ed25519 edge key %d R %d S %d: C %d library %d\n", (int)k, (int)r, (int)s, c, rust);
+                DIFF(c == rust, "Ed25519 edge case");
+                accepted += c;
+            }
+        }
+    }
+    DIFF(accepted > 0, "no Ed25519 edge case verified, so the comparison proves nothing");
+}
+
+/* A rule made directly from the input, not only ones the parser already passed. */
+static void Rule_Edges(void) {
+    static const char* const services[] = {"", "s", "ssh", "a b", "svc-1_x"};
+    static const char* const dests[] = {"", "10.0.0.1", "10.0.0.0/24", "8.8.8.8", "::1", "2001:db8::/64", "nope"};
+    static const char* const protos[] = {"", "tcp", "udp", "TCP", "icmp"};
+    static const int ports[] = {-1, 0, 1, 443, 65535, 65536};
+    for (size_t a = 0; a < 5; a++) for (size_t b = 0; b < 7; b++) for (size_t c = 0; c < 5; c++) for (size_t d = 0; d < 6; d++) {
+        TrustRule r;
+        memset(&r, 0, sizeof(r));
+        snprintf(r.service, sizeof(r.service), "%s", services[a]);
+        snprintf(r.destination, sizeof(r.destination), "%s", dests[b]);
+        snprintf(r.protocol, sizeof(r.protocol), "%s", protos[c]);
+        r.port = ports[d];
+        DIFF(Trust_RuleValid(&r) == hi_trust_rule_valid(&r), "Trust_RuleValid on a crafted rule");
+    }
+}
+
 static size_t ReadAll(const char* dir, const char* name, uint8_t* out, size_t cap) {
     char path[1024];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
@@ -343,6 +404,8 @@ int main(int argc, char** argv) {
     unsigned long long mutations = 20000;
     Diff_Abi();
     Ed25519_Tightening();
+    Ed25519_Edges();
+    Rule_Edges();
     int a = 1;
     if (a + 1 < argc && strcmp(argv[a], "--mutations") == 0) {
         mutations = strtoull(argv[a + 1], NULL, 10);
