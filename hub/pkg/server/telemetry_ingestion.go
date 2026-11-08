@@ -384,6 +384,9 @@ func (s *Server) telemetryControlResponse(r *http.Request, tenantID, endpointID,
 	if s.ti != nil {
 		resp["threat_indicators"] = s.ti.GetActiveIndicators(128)
 	}
+	if blocks := s.agentSessionBlocks(endpointID); len(blocks) > 0 {
+		resp["agent_session_blocks"] = blocks
+	}
 	if target, outdated := s.pendingAgentUpdate(endpointID, reportedVersion); outdated {
 		if pkg, ok := updatePackageFor(capability); ok {
 			if desc, signed := s.agentUpdateDescriptor(r, target, pkg); signed {

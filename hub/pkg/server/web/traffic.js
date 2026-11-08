@@ -121,9 +121,31 @@
       out.push({ id: "i-alert", tone: open ? "crit" : "warn", tip, kind: "finding" });
     }
     if (c.blocked > 0) out.push({ id: "g-quarantine", tone: "crit", tip: plural(c.blocked, "flow", "flows") + " blocked", kind: "blocked" });
+    const v = c.verdict;
+    if (v && v.action !== "allow") {
+      const block = v.action === "block";
+      out.push({
+        id: block ? "g-quarantine" : "i-policy",
+        tone: !v.live ? "info" : block ? "crit" : "warn",
+        tip: "Agent rule " + v.rule + (v.live ? (block ? " blocks this" : " flags this") : (block ? " would block this" : " would flag this") + ", but it is not switched on here"),
+        kind: "policy",
+      });
+    }
     if (c.new && newKnown)
       out.push({ id: "i-plus", tone: "info", tip: "New: " + c.process + " on " + hostName(c) + " first reached this peer in this window", kind: "new" });
     return out;
+  }
+  /* The agent session behind a conversation, by name when the hub knows it. */
+  const sessionWindow = (p) => p.key.slice(p.key.indexOf(":") + 1);
+  const sessionLabel = (p) => p.name || (sessionWindow(p) ? p.tool + " " + sessionWindow(p) : p.tool + ", no Aico window");
+  function sessionTag(c) {
+    const list = c.sessions || [];
+    if (!list.length) {
+      if (!c.runtime) return null;
+      return el("small", { class: "tf-session tf-dim", title: "An agent runtime. This agent version doesn't say which session it belongs to", text: c.runtime });
+    }
+    const label = sessionLabel(list[0]) + (list.length > 1 ? " +" + (list.length - 1) : "");
+    return el("small", { class: "tf-session", title: "Agent session: " + list.map(sessionLabel).join(", "), text: label });
   }
   function markIcons(c, newKnown) {
     const m = marks(c, newKnown);
@@ -232,6 +254,8 @@
       flagged: chip("Flagged", "i-alert", toggleMark("flagged"), "Conversations with a finding in this window"),
       new: chip("New", "i-plus", toggleMark("new"), "A program first reached this peer from this host in this window"),
       blocked: chip("Blocked", "g-quarantine", toggleMark("blocked"), "Conversations with blocked flows"),
+      agent: chip("Agents", "i-terminal", toggleMark("agent"), "Conversations an agent session or runtime is behind"),
+      policy: chip("Agent rules", "i-policy", toggleMark("policy"), "Conversations an agent rule flags or blocks"),
       out: chip("Outbound", "i-arrow", toggleDir("out"), "This host opened the connection"),
       in: chip("Inbound", "i-arrow", toggleDir("in"), "The peer connected to this host"),
     };
@@ -242,14 +266,22 @@
       search.value = "";
       api.onFilter({ clear: true });
     } });
+    const sessionField = field("Agent session", [["", "All sessions"]], (v) => api.onFilter({ session: v, limit: 0 }), "tf-session-field");
+    sessionField.node.hidden = true;
+    const rulesBtn = el("button", { type: "button", class: "btn tg-button", title: "Agent rules: what agent sessions may reach", "aria-label": "Edit agent rules", onclick: () => api.openEgressPolicy() }, icon("i-policy"), el("span", { text: "Rules" }), el("span", { class: "tf-rules-mode" }));
+    rulesBtn.hidden = !api.canEditEgressPolicy();
     const filters = el(
       "div",
       { class: "tf-filters", role: "group", "aria-label": "Filters" },
       el("div", { class: "tg-set" }, chips.flagged.node, chips.new.node, chips.blocked.node),
       el("span", { class: "tg-sep" }),
       el("div", { class: "tg-set" }, chips.out.node, chips.in.node),
+      el("span", { class: "tg-sep" }),
+      el("div", { class: "tg-set" }, chips.agent.node, chips.policy.node),
       extra,
       el("span", { class: "tg-fill" }),
+      sessionField.node,
+      rulesBtn,
       sortField.node,
       clearBtn,
     );
@@ -343,7 +375,7 @@
       );
       if (f.measured_only)
         extra.append(el("button", { type: "button", class: "tg-chip tf-chip-x", "aria-pressed": "true", "aria-label": "Remove filter: flows with byte counts only", title: "Remove this filter", onclick: () => api.onFilter({ measured_only: false, limit: 0 }) }, el("span", { text: "With byte counts" }), icon("i-close")));
-      const active = [f.q, f.mark, f.dir, f.endpoint_id].filter(Boolean).length + extra.childElementCount;
+      const active = [f.q, f.mark, f.dir, f.endpoint_id, f.session].filter(Boolean).length + extra.childElementCount;
       clearBtn.hidden = !active;
       filterToggle.querySelector(".tf-toggle-n").textContent = active ? String(active) : "";
       filterToggle.setAttribute("aria-label", active ? "Filters, " + active + " active" : "Filters");
@@ -358,7 +390,7 @@
       const item = (iconId, text, tip, tone) =>
         el("span", { class: "tf-stat", "data-tone": tone || "", title: tip }, iconId ? icon(iconId) : null, el("span", { text }), el("span", { class: "tf-sr", text: " — " + tip }));
       const f = filter();
-      const narrowed = !!(cv && (f.q || f.mark || f.dir));
+      const narrowed = !!(cv && (f.q || f.mark || f.dir || f.session));
       if (narrowed) {
         summary.append(
           item(null, "↓ " + bytes(cv.matching_bytes_in), "Received by the conversations shown (flows with a byte counter)"),
@@ -497,11 +529,27 @@
       chips.flagged.set(c.flagged || 0, f.mark === "flagged", c.open ? "crit" : "warn");
       chips.new.set(cv.new_known ? c.new || 0 : null, f.mark === "new", "info", cv.new_known ? "" : "The hub's history starts " + clock(when(cv.profiles_from), true) + ", so it can't yet tell which peers are new in this window");
       chips.blocked.set(c.blocked || 0, f.mark === "blocked", "crit");
+      chips.agent.set(c.agent || 0, f.mark === "agent");
+      chips.policy.set(c.policy || 0, f.mark === "policy", "warn");
+      const sessions = cv.sessions || [];
+      const offered = [["", "All sessions"]].concat(sessions.map((p) => [p.key, sessionLabel(p)]));
+      if (f.session && !sessions.some((p) => p.key === f.session)) offered.push([f.session, f.session]);
+      const offeredSig = offered.map((o) => o.join("=")).join("|");
+      if (sessionField.select.dataset.sig !== offeredSig) {
+        sessionField.select.replaceChildren(...offered.map(([v, t]) => el("option", { value: v, text: t })));
+        sessionField.select.dataset.sig = offeredSig;
+      }
+      sessionField.select.value = f.session || "";
+      sessionField.node.hidden = offered.length < 2;
+      const enforcing = cv.egress_mode === "enforce";
+      rulesBtn.dataset.mode = enforcing ? "enforce" : "observe";
+      rulesBtn.title = enforcing ? "Agent rules are switched on: flag rules write findings, block rules hold on the named lab machines" : "Agent rules are only being observed: rows show what they would do";
+      rulesBtn.querySelector(".tf-rules-mode").textContent = enforcing ? "●" : "○";
       chips.out.set(c.out || 0, f.dir === "out");
       chips.in.set(c.in || 0, f.dir === "in");
       shown.textContent = (cv.matching > rows.length ? num(rows.length) + " of " : "") + plural(cv.matching || 0, "conversation", "conversations");
       if (!rows.length) {
-        const filtered = f.q || f.mark || f.dir || f.endpoint_id || extra.childElementCount;
+        const filtered = f.q || f.mark || f.dir || f.endpoint_id || f.session || extra.childElementCount;
         if (filtered) {
           listState.append(
             el("p", { role: "status", class: "tf-empty", text: "Nothing in this window matches these filters." }),
@@ -534,6 +582,7 @@
           el("strong", { text: hostName(conv) }),
           el("span", { class: "tf-dot", "aria-hidden": "true", text: " · " }),
           el("span", { text: conv.process }),
+          sessionTag(conv),
         );
         const peer = el(
           "span",
@@ -623,6 +672,16 @@
           : null,
       );
       fact("Service", el("span", { text: c.port + "/" + c.protocol + " · " + (c.direction === "in" ? "peer connected in" : "host connected out") }));
+      if ((c.sessions || []).length) {
+        fact("Agent sessions", el("ul", { class: "tf-sessions" }, ...c.sessions.map((p) => el("li", {},
+          el("button", { type: "button", class: "tf-link", text: sessionLabel(p), title: "Show only this session (" + p.key + (p.project ? ", " + p.project : "") + ")", onclick: () => api.onFilter({ session: p.key, limit: 0 }) }),
+          el("span", { class: "tf-dim", text: " " + plural(p.flows, "flow", "flows") + (p.measured_flows ? " · " + bytes(p.bytes_out) + " out" : "") }),
+          p.verdict ? el("span", { class: "tg-badge", "data-tone": p.verdict.action === "allow" ? "" : p.verdict.live ? (p.verdict.action === "block" ? "crit" : "warn") : "info", title: "Agent rule " + p.verdict.rule + (p.verdict.live ? "" : ": not switched on here"), text: p.verdict.action }) : null,
+        ))));
+      } else if (c.runtime) {
+        fact("Agent", el("span", { text: c.runtime }), el("span", { class: "tf-dim", title: "This agent version doesn't say which session it belongs to", text: " no session named" }));
+      }
+      if (c.verdict) fact("Agent rule", el("span", { text: c.verdict.rule + ": " + (c.verdict.live ? c.verdict.action : "would " + c.verdict.action) }));
       fact("Flows", el("span", { text: num(c.flows) + (c.blocked ? " · " + num(c.blocked) + " blocked" : "") }));
       fact("Data", c.measured_flows ? el("span", { text: bytes(c.bytes_in) + " in · " + bytes(c.bytes_out) + " out" + (c.measured_flows < c.flows ? " (counted for " + num(c.measured_flows) + " of " + num(c.flows) + " flows)" : "") }) : el("span", { class: "tf-dim", text: "Unknown: no byte counter" }));
       fact("Seen", timeEl(c.first_seen, true), el("span", { text: " – " }), timeEl(c.last_seen, true));

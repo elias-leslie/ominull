@@ -87,6 +87,7 @@ func (s *Store) initFlowSchema() error {
 		image_ref INTEGER NOT NULL,
 		command_ref INTEGER NOT NULL DEFAULT 0,
 		user_identity TEXT NOT NULL DEFAULT '',
+		agent_session TEXT NOT NULL DEFAULT '',
 		first_seen DATETIME NOT NULL,
 		last_seen DATETIME NOT NULL
 	);
@@ -199,6 +200,9 @@ func (s *Store) initFlowSchema() error {
 	if _, err := s.db.Exec("DROP TRIGGER IF EXISTS trg_events_rollups; DROP TABLE IF EXISTS topology_edges_cube"); err != nil {
 		return fmt.Errorf("retire topology cube: %w", err)
 	}
+	if err := s.addFlowAgentSession(); err != nil {
+		return fmt.Errorf("agent session column: %w", err)
+	}
 	if _, err := s.db.Exec(eventsViewSQL); err != nil {
 		return fmt.Errorf("events view: %w", err)
 	}
@@ -285,7 +289,8 @@ SELECT f.id AS id, e.tenant_id AS tenant_id, e.endpoint_id AS endpoint_id, f.tim
 		'last_at', CASE WHEN f.last_at IS NULL THEN NULL ELSE
 			strftime('%Y-%m-%dT%H:%M:%S', f.last_at / 1000000000, 'unixepoch') || printf('.%09dZ', f.last_at % 1000000000) END,
 		'lost', f.lost) AS observation_json,
-	f.samples AS samples, f.measured AS measured_samples, f.endpoint_ref AS endpoint_ref, f.process_ref AS process_ref
+	f.samples AS samples, f.measured AS measured_samples, f.endpoint_ref AS endpoint_ref, f.process_ref AS process_ref,
+	p.agent_session AS agent_session
 FROM flows f
 JOIN flow_endpoints e ON e.id = f.endpoint_ref
 JOIN flow_shapes s ON s.id = f.shape_ref
@@ -303,7 +308,7 @@ const eventsViewProcessSQL = `
 CREATE VIEW IF NOT EXISTS events_view_process AS
 SELECT p.id AS id, e.endpoint_id AS endpoint_id, e.tenant_id AS tenant_id, p.instance_id AS instance_id, p.pid AS pid,
 	p.parent_pid AS parent_pid, p.parent_instance_id AS parent_instance_id, i.path AS path, i.sha256 AS sha256,
-	i.signer AS signer, c.command_line AS command_line, p.user_identity AS user_identity
+	i.signer AS signer, c.command_line AS command_line, p.user_identity AS user_identity, p.agent_session AS agent_session
 FROM flow_processes p
 JOIN flow_endpoints e ON e.id = p.endpoint_ref
 JOIN flow_images i ON i.id = p.image_ref
@@ -330,7 +335,7 @@ BEGIN
 		AND instance_id = COALESCE(NEW.process_instance_id, '') AND pid = COALESCE(NEW.process_id, 0)
 		AND parent_pid = COALESCE(NEW.parent_pid, 0) AND parent_instance_id = COALESCE(NEW.parent_process_instance_id, '')
 		AND path = COALESCE(NEW.process_path, '') AND sha256 = COALESCE(NEW.executable_sha256, '') AND signer = COALESCE(NEW.executable_signer, '')
-		AND command_line = COALESCE(NEW.command_line, '') AND user_identity = COALESCE(NEW.user_identity, ''));
+		AND command_line = COALESCE(NEW.command_line, '') AND user_identity = COALESCE(NEW.user_identity, '') AND agent_session = '');
 	INSERT OR IGNORE INTO flow_shapes (layer, action, direction, attribution_status, obs_source, obs_timing, obs_byte_basis)
 	VALUES (COALESCE(NEW.layer, ''), COALESCE(NEW.action, ''), COALESCE(NEW.direction, ''), COALESCE(NEW.attribution_status, ''),
 		COALESCE(json_extract(NEW.observation_json, '$.source'), ''), COALESCE(json_extract(NEW.observation_json, '$.timing'), ''),
@@ -353,7 +358,7 @@ BEGIN
 			AND instance_id = COALESCE(NEW.process_instance_id, '') AND pid = COALESCE(NEW.process_id, 0)
 			AND parent_pid = COALESCE(NEW.parent_pid, 0) AND parent_instance_id = COALESCE(NEW.parent_process_instance_id, '')
 			AND path = COALESCE(NEW.process_path, '') AND sha256 = COALESCE(NEW.executable_sha256, '') AND signer = COALESCE(NEW.executable_signer, '')
-			AND command_line = COALESCE(NEW.command_line, '') AND user_identity = COALESCE(NEW.user_identity, '') ORDER BY id LIMIT 1),
+			AND command_line = COALESCE(NEW.command_line, '') AND user_identity = COALESCE(NEW.user_identity, '') AND agent_session = '' ORDER BY id LIMIT 1),
 		(SELECT id FROM flow_names WHERE name = COALESCE(NEW.domain, '')),
 		(SELECT id FROM flow_names WHERE name = COALESCE(NEW.sni, '')),
 		COALESCE(NEW.duration_ms, 0), NEW.observed_at,
@@ -387,6 +392,7 @@ type processKey struct {
 	pid, ppid              uint32
 	image                  int64
 	commandLine, userIdent string
+	session                string
 }
 
 type shapeKey struct {
@@ -482,8 +488,8 @@ var flowStatements = map[string]string{
 	"image": `INSERT INTO flow_images (path, sha256, signer, first_seen) VALUES (?, ?, ?, ?)
 		ON CONFLICT (path, sha256, signer) DO UPDATE SET path = excluded.path RETURNING id`,
 	"command": `INSERT INTO flow_commands (command_line) VALUES (?) ON CONFLICT (command_line) DO UPDATE SET command_line = excluded.command_line RETURNING id`,
-	"process": `INSERT INTO flow_processes (endpoint_ref, key_hash, instance_id, pid, parent_pid, parent_instance_id, image_ref, command_ref, user_identity, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	"process": `INSERT INTO flow_processes (endpoint_ref, key_hash, instance_id, pid, parent_pid, parent_instance_id, image_ref, command_ref, user_identity, agent_session, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (key_hash)
 		DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen), first_seen = MIN(first_seen, excluded.first_seen) RETURNING id`,
 	"shape": `INSERT INTO flow_shapes (layer, action, direction, attribution_status, obs_source, obs_timing, obs_byte_basis) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -643,7 +649,7 @@ func (b *flowBatch) processRef(k processKey, seen time.Time) (int64, error) {
 		return 0, err
 	}
 	at := flowTime(seen)
-	id, err := b.returningID("process", k.endpoint, processIdentityHash(k), k.instance, k.pid, k.ppid, k.parentInst, k.image, commandRef, k.userIdent, at, at)
+	id, err := b.returningID("process", k.endpoint, processIdentityHash(k), k.instance, k.pid, k.ppid, k.parentInst, k.image, commandRef, k.userIdent, k.session, at, at)
 	if err == nil {
 		b.processes[k] = processEntry{id: id, lastSeen: seen}
 	}
@@ -672,6 +678,11 @@ func processIdentityHash(k processKey) int64 {
 	field(k.parentInst)
 	field(k.commandLine)
 	field(k.userIdent)
+	// Only when there is one, so the rows of processes no session owns keep
+	// the hash they were stored under.
+	if k.session != "" {
+		field(k.session)
+	}
 	sum := h.Sum(nil)
 	return int64(binary.BigEndian.Uint64(sum[:8]))
 }
@@ -790,7 +801,7 @@ func (b *flowBatch) add(ev Event) error {
 	processRef, err := b.processRef(processKey{
 		endpoint: endpointRef, instance: ev.ProcessInstanceID, parentInst: ev.ParentProcessInstanceID,
 		pid: ev.ProcessID, ppid: ev.ParentPID, image: imageRef,
-		commandLine: ev.CommandLine, userIdent: ev.UserIdentity,
+		commandLine: ev.CommandLine, userIdent: ev.UserIdentity, session: AgentSessionOf(ev),
 	}, ev.Timestamp)
 	if err != nil {
 		return err

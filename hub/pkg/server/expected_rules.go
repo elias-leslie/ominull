@@ -159,6 +159,9 @@ func (s *Server) prepareRules(before, next storage.DetectionTuning) (storage.Det
 	if err := vendorRangesOwned(after); err != nil {
 		return storage.DetectionTuning{}, err
 	}
+	if err := s.egressBlockTargetsLab(before, after); err != nil {
+		return storage.DetectionTuning{}, err
+	}
 	return after, nil
 }
 

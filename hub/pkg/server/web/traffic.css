@@ -549,3 +549,28 @@ body[data-section="traffic"] #view {
     min-height: 24px;
   }
 }
+
+/* The agent session behind a conversation. */
+.tf-session {
+  display: block;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.tf-sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tf-sessions .tg-badge {
+  margin-left: 6px;
+}
+.tf-rules-mode {
+  margin-left: 4px;
+  opacity: 0.8;
+}
+.tg-button[data-mode="enforce"] .tf-rules-mode {
+  color: var(--warn, currentColor);
+}

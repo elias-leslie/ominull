@@ -328,7 +328,7 @@ func (s *Store) writeColdDay(w *coldWriter, from, to time.Time) (int64, int64, e
 
 	rows, err = s.db.Query(`
 		SELECT e.endpoint_id, p.instance_id, p.pid, p.parent_pid, p.parent_instance_id, i.path, i.sha256, i.signer,
-			c.command_line, p.user_identity, p.first_seen, p.last_seen
+			c.command_line, p.user_identity, p.agent_session, p.first_seen, p.last_seen
 		FROM flow_processes p
 		JOIN flow_endpoints e ON e.id = p.endpoint_ref
 		JOIN flow_images i ON i.id = p.image_ref
@@ -354,12 +354,13 @@ func (s *Store) writeColdDay(w *coldWriter, from, to time.Time) (int64, int64, e
 			Signer      string `json:"executable_signer,omitempty"`
 			CommandLine string `json:"command_line,omitempty"`
 			User        string `json:"user_identity,omitempty"`
+			Session     string `json:"agent_session,omitempty"`
 			First       string `json:"first_seen"`
 			Last        string `json:"last_seen"`
 		}
 		var first, last interface{}
 		if err := rows.Scan(&r.EndpointID, &r.Instance, &r.PID, &r.ParentPID, &r.ParentInst, &r.Path, &r.SHA256, &r.Signer,
-			&r.CommandLine, &r.User, &first, &last); err != nil {
+			&r.CommandLine, &r.User, &r.Session, &first, &last); err != nil {
 			return 0, 0, err
 		}
 		r.Type = "process"

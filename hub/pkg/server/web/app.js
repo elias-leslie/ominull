@@ -187,11 +187,11 @@
   var TRAFFIC_SCOPE = ["endpoint_id", "src_ip", "dst_ip", "process", "domain", "country", "protocol", "port", "direction", "action", "hash", "user", "attribution"];
   var TRAFFIC_CHOICES = {
     range: ["15m", "1h", "6h", "24h", "7d", "all"],
-    mark: ["flagged", "new", "blocked"],
+    mark: ["flagged", "new", "blocked", "agent", "policy"],
     dir: ["in", "out"],
     sort: ["volume", "recent", "flows"]
   };
-  var TRAFFIC_URL_KEYS = ["range", "tq", "mark", "dir", "sort", "measured_only"].concat(TRAFFIC_SCOPE);
+  var TRAFFIC_URL_KEYS = ["range", "tq", "mark", "dir", "sort", "measured_only", "session"].concat(TRAFFIC_SCOPE);
   var URL_KEYS = ["q", "f", "row", "route"].concat(TRAFFIC_URL_KEYS);
   var suppressHistory = false;
 
@@ -204,6 +204,7 @@
     if (tf.dir) u.dir = tf.dir;
     if (tf.sort) u.sort = tf.sort;
     if (tf.measured_only) u.measured_only = "1";
+    if (tf.session) u.session = tf.session;
   }
 
   /* An address can come from anywhere: a value the page has no choice for is
@@ -217,6 +218,7 @@
     TRAFFIC_SCOPE.forEach(function (k) { if (u[k]) tf[k] = u[k]; });
     if (u.tq) tf.q = u.tq;
     if (u.measured_only) tf.measured_only = true;
+    if (u.session) tf.session = u.session;
     var was = Object.assign({}, state.trafficFilter || { range: "1h" });
     delete was.limit;
     var sameKeys = function (a, b) {
@@ -971,6 +973,9 @@
      TrafficFlowsResult): the demo fleet's conversations, three of them carrying
      the demo findings, so every mark on the Traffic page has something to show. */
   var DEMO_TRAFFIC_RANGES = { "15m": 0.25, "1h": 1, "6h": 6, "24h": 24, "7d": 168, "all": 720 };
+  function demoSession(key, name, flows, out, verdict) {
+    return { key: key, tool: key.split(":")[0], name: name, project: "demo", flows: flows, measured_flows: flows, bytes_in: 0, bytes_out: out, blocked: 0, verdict: verdict || null };
+  }
   function demoTrafficRows() {
     var host = {};
     arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).forEach(function (e) { host[e.id] = e; });
@@ -980,7 +985,8 @@
       return { endpoint_id: ep, hostname: (host[ep] || {}).hostname || "", process: base, process_path: path, direction: dir,
         peer_ip: peer, peer_name: o.name || "", peer_host: o.peerHost || "", peer_endpoint: o.peerEp || "", country: o.country || "",
         port: port, protocol: proto, proto: proto === "UDP" ? 17 : 6, flows: flows, measured_flows: o.unmeasured ? 0 : flows, bytes_in: bin, bytes_out: bout,
-        blocked: o.blocked || 0, first_min: o.first || 1440, last_min: o.last || 1, new: !!o.isNew, findings: o.findings || null };
+        blocked: o.blocked || 0, first_min: o.first || 1440, last_min: o.last || 1, new: !!o.isNew, findings: o.findings || null,
+        runtime: o.runtime || "", sessions: o.sessions || null, verdict: o.verdict || null };
     }
     function finding(ids, worst, title, type, open, held) {
       return { count: ids.length, open: open, worst: worst, title: title, type: type, held_reason: held || "", ids: ids };
@@ -994,6 +1000,8 @@
         { country: "US", first: 1300, last: 96, findings: finding(["alert-bandwidth-04"], "MEDIUM", "Egress volume 14x baseline", "BANDWIDTH_SPIKE", 1) }),
       row("linux-branch-nvr", "/usr/bin/ffmpeg", "out", "198.51.100.77", 554, "TCP", 64, 210000, 38000000, { country: "DE", isNew: true, first: 180, last: 2 }),
       row("linux-dmz-web-01", "/usr/bin/curl", "out", "192.0.2.150", 80, "TCP", 3, 1200, 900, { country: "US", isNew: true, first: 22, last: 21, unmeasured: true }),
+      row("linux-dmz-web-01", "/usr/bin/curl", "out", "203.0.113.77", 443, "TCP", 18, 42000, 3100000, { name: "paste.example.net", country: "US", first: 90, last: 6,
+        sessions: [demoSession("claude:7f3a91c2", "Log cleanup", 18, 3100000, { action: "flag", rule: "unknown-uploads", live: false })], verdict: { action: "flag", rule: "unknown-uploads", live: false } }),
       row("win11-fin-11", "C:\\Program Files\\Backup\\agent.exe", "out", "203.0.113.90", 445, "TCP", 12, 0, 0, { country: "US", blocked: 12, first: 600, last: 30 }),
       row("linux-dmz-web-01", "/usr/sbin/nginx", "in", "203.0.113.14", 443, "TCP", 5210, 410000000, 2900000000, { country: "US" }),
       row("linux-dmz-web-01", "/usr/sbin/nginx", "in", "198.51.100.140", 443, "TCP", 2380, 160000000, 1100000000, { country: "GB" }),
@@ -1021,7 +1029,8 @@
     var needle = (q.get("q") || "").toLowerCase();
     var mark = q.get("mark") || "", dir = q.get("dir") || "";
     var limit = Number(q.get("limit")) || 300;
-    var counts = { all: 0, flagged: 0, open: 0, "new": 0, blocked: 0, out: 0, "in": 0 };
+    var counts = { all: 0, flagged: 0, open: 0, "new": 0, blocked: 0, out: 0, "in": 0, agent: 0, policy: 0 };
+    var totals = {};
     var rows = demoTrafficRows().filter(function (r) { return r.last_min <= w.hours * 60; }).map(function (r) {
       var first = Math.min(r.first_min, w.hours * 60);
       var c = Object.assign({}, r, {
@@ -1040,6 +1049,8 @@
       if (q.get("endpoint_id") && c.endpoint_id !== q.get("endpoint_id")) return false;
       if (q.get("dst_ip") && c.peer_ip !== q.get("dst_ip")) return false;
       if (q.get("port") && String(c.port) !== q.get("port")) return false;
+      arrayOf(c.sessions).forEach(function (p) { totals[p.key] = totals[p.key] || { key: p.key, tool: p.tool, name: p.name, project: p.project, rows: 0, flows: 0, bytes_out: 0 }; totals[p.key].rows++; totals[p.key].flows += p.flows; totals[p.key].bytes_out += p.bytes_out; });
+      if (q.get("session") && !arrayOf(c.sessions).some(function (p) { return p.key === q.get("session"); })) return false;
       return !needle || [c.endpoint_id, c.hostname, c.process, c.process_path, c.peer_ip, c.peer_name, c.peer_host, c.country, String(c.port)].some(function (v) { return String(v || "").toLowerCase().indexOf(needle) >= 0; });
     });
     var by = { volume: function (a, b) { return b.bytes_in + b.bytes_out - a.bytes_in - a.bytes_out; }, recent: function (a, b) { return Date.parse(b.last_seen) - Date.parse(a.last_seen); }, flows: function (a, b) { return b.flows - a.flows; } }[q.get("sort")];
@@ -1052,6 +1063,11 @@
       if (c["new"]) counts["new"]++;
       if (c.blocked) counts.blocked++;
       counts[c.direction]++;
+      var isAgent = !!(c.runtime || (c.sessions && c.sessions.length)), byRule = !!(c.verdict && c.verdict.action !== "allow");
+      if (isAgent) counts.agent++;
+      if (byRule) counts.policy++;
+      if (mark === "agent" && !isAgent) return;
+      if (mark === "policy" && !byRule) return;
       if (mark === "flagged" && !c.findings) return;
       if (mark === "new" && !c["new"]) return;
       if (mark === "blocked" && !c.blocked) return;
@@ -1066,7 +1082,8 @@
       new_known: true, profiles_from: new Date(w.end - 60 * 86400000).toISOString(),
       counts: counts, matching: matching, matching_flows: picked.reduce(function (t, c) { return t + c.flows; }, 0),
       matching_bytes_in: picked.reduce(function (t, c) { return t + c.bytes_in; }, 0), matching_bytes_out: picked.reduce(function (t, c) { return t + c.bytes_out; }, 0),
-      truncated: matching > shown.length, conversations: shown
+      truncated: matching > shown.length, conversations: shown,
+      sessions: Object.keys(totals).map(function (k) { return totals[k]; }), egress_mode: "observe"
     };
   }
 
@@ -4939,6 +4956,57 @@
   function updateTraffic() {
     if (trafficUI && state.section === "traffic") trafficUI.update({ overview: state.trafficOverview, conversations: state.trafficConversations, error: state.trafficError });
   }
+  /* Agent rules: first match wins, and the Traffic rows show at once what a
+     saved list would do. The hub refuses what a firewall could not hold. */
+  function openEgressPolicySheet() {
+    request("/api/v1/detection/tuning").then(function (res) {
+      var policy = ((res && res.tuning) || {}).agent_egress_policy || {};
+      var rows = h("div", { cls: "stack" });
+      var splitList = function (v) { return v.split(/[\s,]+/).filter(Boolean); };
+      function addRow(r) {
+        r = r || {};
+        var id = h("input", { type: "text", maxlength: "48", value: r.id || "", placeholder: "Rule name", "aria-label": "Rule name", title: "Lowercase letters, digits, dot, dash or underscore" });
+        var action = h("select", { "aria-label": "What the rule does" }, ["allow", "flag", "block"].map(function (a) { return h("option", { value: a, text: a[0].toUpperCase() + a.slice(1), selected: (r.action || "flag") === a }); }));
+        var runtime = h("input", { type: "text", maxlength: "32", value: r.runtime || "", placeholder: "Any agent", "aria-label": "Agent", title: "A runtime such as claude or codex; empty means any" });
+        var session = h("input", { type: "text", maxlength: "120", value: r.session || "", placeholder: "Any session", "aria-label": "Session", title: "A session key, a window id, or a pattern on the session's name such as Lane*" });
+        var where = h("input", { type: "text", value: arrayOf(r.domains).concat(arrayOf(r.cidrs)).join(", "), placeholder: "Anywhere", "aria-label": "Destinations", title: "Names (and everything under them) and addresses or ranges. A block rule names addresses only" });
+        var ports = h("input", { type: "text", value: arrayOf(r.ports).join(", "), placeholder: "Any port", "aria-label": "Ports" });
+        var row = h("div", { cls: "uf uf-wrap uf-g1" }, id, action, runtime, session, where, ports,
+          h("button", { cls: "btn mini", type: "button", text: "Up", "aria-label": "Move this rule up", on: { click: function () { if (row.previousSibling) { rows.insertBefore(row, row.previousSibling); sheetEl._dirty = true; } } } }),
+          h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove this rule", on: { click: function () { row.parentNode.removeChild(row); sheetEl._dirty = true; } } }));
+        row.readRule = function () {
+          var dest = splitList(where.value);
+          var isAddr = function (d) { return /^[0-9.]+(\/\d+)?$/.test(d) || d.indexOf(":") >= 0; };
+          return {
+            id: id.value.trim(), action: action.value, runtime: runtime.value.trim(), session: session.value.trim(),
+            domains: dest.filter(function (d) { return !isAddr(d); }), cidrs: dest.filter(isAddr),
+            ports: splitList(ports.value).map(Number)
+          };
+        };
+        rows.appendChild(row);
+      }
+      arrayOf(policy.rules).forEach(addRow);
+      if (!arrayOf(policy.rules).length) addRow();
+      var mode = h("select", { "aria-label": "How the rules apply" },
+        h("option", { value: "observe", text: "Observe: rows show what the rules would do", selected: policy.mode !== "enforce" }),
+        h("option", { value: "enforce", text: "Enforce: flag rules write a finding, block rules hold", selected: policy.mode === "enforce" }));
+      var machines = h("input", { type: "text", value: arrayOf(policy.block_endpoints).join(", "), placeholder: "No machine", "aria-label": "Lab machines that hold block rules", title: "Endpoint ids of lab machines. Blocks are only held on lab machines" });
+      var save = h("button", { cls: "btn btn-primary", type: "button", text: "Save", on: { click: function () {
+        var rules = Array.prototype.map.call(rows.children, function (r) { return r.readRule(); }).filter(function (r) { return r.id || r.domains.length || r.cidrs.length || r.ports.length || r.session || r.runtime; });
+        request("/api/v1/detection/tuning", "POST", { agent_egress_policy: { mode: mode.value, block_endpoints: splitList(machines.value), rules: rules } }).then(function () {
+          closeSheet(); toast("Agent rules saved", "ok"); refresh();
+        }, function (e) { toast((e && e.message) || "Could not save", "crit"); });
+      } } });
+      openSheet("Agent rules", h("div", { cls: "stack" },
+        h("label", { cls: "uf uf-g1" }, h("span", { text: "Applies" }), mode),
+        h("label", { cls: "uf uf-g1" }, h("span", { text: "Block rules hold on" }), machines),
+        rows,
+        h("button", { cls: "btn mini", type: "button", text: "Add a rule", on: { click: function () { addRow(); sheetEl._dirty = true; } } })),
+        [save, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })], "sheet-wide");
+    }, function (e) {
+      toast((e && e.message) || "Could not read the agent rules", "crit");
+    });
+  }
   function renderTraffic() {
     if (!window.OminullTraffic) {
       clear($("view"));
@@ -4956,6 +5024,8 @@
         filter: function () { return state.trafficFilter || { range: "1h" }; },
         hosts: function () { return arrayOf(state.endpoints).filter(function (e) { return e.status !== "retired"; }).map(function (e) { return { id: e.id, name: e.hostname || e.id }; }).sort(function (a, b) { return a.name.localeCompare(b.name); }); },
         onFilter: trafficFilterPatch,
+        openEgressPolicy: openEgressPolicySheet,
+        canEditEgressPolicy: function () { return IS_ADMIN && !READ_ONLY; },
         retry: function () { Object.keys(resources).forEach(function (key) { resources[key].retryAt = 0; }); refresh(); },
         openHost: function (endpointId) {
           var a = state.assets.find(function (x) { return x.endpoint && x.endpoint.id === endpointId; });
@@ -11185,6 +11255,7 @@
     if (tf.q) qs += "&q=" + encodeURIComponent(tf.q);
     if (tf.mark) qs += "&mark=" + encodeURIComponent(tf.mark);
     if (tf.dir) qs += "&dir=" + encodeURIComponent(tf.dir);
+    if (tf.session) qs += "&session=" + encodeURIComponent(tf.session);
     if (tf.sort) qs += "&sort=" + encodeURIComponent(tf.sort);
     if (tf.limit) qs += "&limit=" + encodeURIComponent(tf.limit);
     return qs;

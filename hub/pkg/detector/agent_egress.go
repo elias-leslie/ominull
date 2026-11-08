@@ -415,3 +415,51 @@ func (e *Engine) checkNewPlace(ev storage.Event, geo threatintel.GeoRecord, endp
 		ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
 	})
 }
+
+// checkAgentEgressPolicy writes the finding a flag rule asks for, once the policy
+// enforces. It is record class: kept and counted, never asked about. While the
+// policy only observes, the Traffic page shows what it would do and nothing is
+// written; a block rule's work is the block, also shown there.
+func (e *Engine) checkAgentEgressPolicy(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
+	procName string, now time.Time) {
+	policy := cfg.AgentEgressPolicy
+	if policy.Mode != storage.EgressEnforce || len(policy.Rules) == 0 || ev.Direction != "OUTBOUND" {
+		return
+	}
+	if int(ev.SrcPort) > 0 && int(ev.SrcPort) < cfg.EphemeralPortFrom && int(ev.DstPort) >= cfg.EphemeralPortFrom {
+		return // a listener answering a client, not this agent reaching out
+	}
+	session := storage.AgentSessionOf(ev)
+	runtime := storage.AgentSessionTool(session)
+	if runtime == "" {
+		runtime = cfg.AgentRuntimeOf(ev.ProcessPath)
+	}
+	if runtime == "" {
+		return
+	}
+	name := ""
+	if session != "" {
+		name = e.store.AgentSessionName(session)
+	}
+	v := policy.Evaluate(storage.EgressSubject{EndpointID: ev.EndpointID, Runtime: runtime, Session: session, Name: name,
+		Domain: ev.Domain, SNI: ev.SNI, IP: ev.DstIP, Port: int(ev.DstPort)})
+	if v == nil || v.Action != storage.EgressFlag {
+		return
+	}
+	key := fmt.Sprintf("egresspolicy:%s:%s:%s:%s:%d", ev.EndpointID, session, v.Rule, ev.DstIP, ev.DstPort)
+	if e.shouldSuppressAlert(key, agentDNSCooldown) {
+		return
+	}
+	who := firstNonEmpty(name, session, runtime)
+	dest := firstNonEmpty(ev.SNI, ev.Domain, ev.DstIP)
+	evidence, _ := json.Marshal(map[string]any{"egress_rule": v.Rule, "egress_action": v.Action, "agent_session": session, "agent_session_name": name})
+	e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
+		ID: uuid.New().String(), TenantID: ev.TenantID, EndpointID: ev.EndpointID, Hostname: endpoint.Hostname,
+		AnomalyType: "AGENT_EGRESS_POLICY", Technique: "T1567", Severity: "LOW",
+		Title:       fmt.Sprintf("%s reached %s (rule %s)", who, dest, v.Rule),
+		Description: fmt.Sprintf("%s, run by %s, connected to %s:%d. The agent egress rule %s says %s.", procName, who, ev.DstIP, ev.DstPort, v.Rule, v.Action),
+		Details:     fmt.Sprintf("Session: %s | Rule: %s (%s) | Process: %s | Target: %s:%d | Name: %s", firstNonEmpty(session, "-"), v.Rule, v.Action, ev.ProcessPath, ev.DstIP, ev.DstPort, firstNonEmpty(ev.SNI, ev.Domain, "-")),
+		Evidence:    string(evidence),
+		ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
+	})
+}

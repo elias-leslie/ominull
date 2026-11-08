@@ -316,6 +316,7 @@ func (s *Store) collectFlowDictionaries(cutoff, now time.Time) error {
 		stmt string
 		args []interface{}
 	}{
+		{"DELETE FROM agent_sessions WHERE last_seen < ? AND widget NOT IN (SELECT substr(agent_session, instr(agent_session, ':') + 1) FROM flow_processes)", []interface{}{flowTime(cutoff)}},
 		{"DELETE FROM flow_processes WHERE last_seen < ? AND id NOT IN (SELECT process_ref FROM flows UNION SELECT process_ref FROM flow_local_hourly)", []interface{}{flowTime(cutoff)}},
 		{"DELETE FROM flow_images WHERE id NOT IN (SELECT image_ref FROM flow_processes)", nil},
 		{"DELETE FROM flow_commands WHERE id != 0 AND id NOT IN (SELECT command_ref FROM flow_processes)", nil},

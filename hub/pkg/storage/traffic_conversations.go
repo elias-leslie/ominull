@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"database/sql"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,7 +29,8 @@ type TrafficConversation struct {
 	ProcessPath   string                `json:"process_path"`
 	Direction     string                `json:"direction"` // "out": this host opened it; "in": the peer reached a service here
 	PeerIP        string                `json:"peer_ip"`
-	PeerName      string                `json:"peer_name,omitempty"`     // TLS server name or reported domain
+	PeerName      string                `json:"peer_name,omitempty"` // TLS server name or reported domain
+	names         []string              // this row's flows with no session: the names they reached
 	PeerHost      string                `json:"peer_host,omitempty"`     // the asset name when the peer is a known host
 	PeerEndpoint  string                `json:"peer_endpoint,omitempty"` // the peer's own agent, when it has one
 	Country       string                `json:"country,omitempty"`
@@ -45,7 +47,14 @@ type TrafficConversation struct {
 	New           bool                  `json:"new"`
 	KnownSince    *time.Time            `json:"known_since,omitempty"`
 	Findings      *ConversationFindings `json:"findings,omitempty"`
-	key           conversationKey
+	// Runtime is the agent runtime this program is ("" for any other program).
+	Runtime string `json:"runtime,omitempty"`
+	// Sessions are the agent sessions behind the row, busiest first.
+	Sessions []ConversationSession `json:"sessions,omitempty"`
+	// Verdict is what the agent egress policy says about the row, the worst
+	// of its sessions'; empty when no rule speaks to it.
+	Verdict *EgressVerdict `json:"verdict,omitempty"`
+	key     conversationKey
 }
 
 // ConversationFindings summarises the findings raised about a conversation in
@@ -73,6 +82,8 @@ type TrafficConversationCounts struct {
 	Blocked      int `json:"blocked"`
 	Out          int `json:"out"`
 	In           int `json:"in"`
+	Agent        int `json:"agent"`  // rows an agent session or runtime is behind
+	Policy       int `json:"policy"` // rows the agent egress policy would flag or block
 }
 
 // TrafficConversations is the conversations answer for one window.
@@ -92,13 +103,19 @@ type TrafficConversations struct {
 	MatchingBytesOut int64                 `json:"matching_bytes_out"`
 	Truncated        bool                  `json:"truncated"`
 	Conversations    []TrafficConversation `json:"conversations"`
+	// Sessions are the agent sessions seen in the window, whatever the search
+	// and marks leave, so a filter can offer them. EgressMode is the policy's.
+	Sessions   []SessionTotal `json:"sessions,omitempty"`
+	EgressMode string         `json:"egress_mode"`
 }
 
 // ConversationQuery narrows the folded set: Search matches host, program,
-// peer, name and port; Mark is "flagged", "new" or "blocked"; Direction is
-// "in" or "out".
+// peer, name, port and session; Mark is "flagged", "new", "blocked", "agent"
+// or "policy"; Direction is "in" or "out"; Session keeps what one agent session
+// did, with the row's counts its own.
 type ConversationQuery struct {
 	Search    string
+	Session   string
 	Mark      string
 	Direction string
 	Limit     int
@@ -150,11 +167,26 @@ func (s *Store) QueryTrafficConversations(filter TrafficFilter, q ConversationQu
 	out := meta
 	out.Conversations = []TrafficConversation{}
 	needle := strings.ToLower(strings.TrimSpace(q.Search))
+	tuning := s.GetDetectionTuning()
+	out.EgressMode = tuning.AgentEgressPolicy.Mode
 	for _, c := range rows {
+		if q.Session != "" {
+			var kept bool
+			if c, kept = c.onlySession(q.Session); !kept {
+				continue
+			}
+		}
+		c = c.judged(tuning)
 		if needle != "" && !c.matches(needle) {
 			continue
 		}
 		out.Counts.All++
+		if c.Runtime != "" || len(c.Sessions) > 0 {
+			out.Counts.Agent++
+		}
+		if c.Verdict != nil && c.Verdict.Action != EgressAllow {
+			out.Counts.Policy++
+		}
 		if c.Findings != nil {
 			out.Counts.Flagged++
 			if c.Findings.Open > 0 {
@@ -184,6 +216,14 @@ func (s *Store) QueryTrafficConversations(filter TrafficFilter, q ConversationQu
 			}
 		case "blocked":
 			if c.Blocked == 0 {
+				continue
+			}
+		case "agent":
+			if c.Runtime == "" && len(c.Sessions) == 0 {
+				continue
+			}
+		case "policy":
+			if c.Verdict == nil || c.Verdict.Action == EgressAllow {
 				continue
 			}
 		}
@@ -226,6 +266,11 @@ func sortConversations(rows []TrafficConversation, by string) {
 func (c TrafficConversation) matches(needle string) bool {
 	for _, v := range []string{c.EndpointID, c.Hostname, c.Process, c.ProcessPath, c.PeerIP, c.PeerName, c.PeerHost, c.Country, strconv.Itoa(c.Port)} {
 		if strings.Contains(strings.ToLower(v), needle) {
+			return true
+		}
+	}
+	for _, p := range c.Sessions {
+		if strings.Contains(strings.ToLower(p.Key), needle) || strings.Contains(strings.ToLower(p.Name), needle) {
 			return true
 		}
 	}
@@ -280,9 +325,11 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 		COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
 		COALESCE(SUM(CASE WHEN action = 'BLOCK' THEN samples ELSE 0 END), 0),
 		MAX(COALESCE(NULLIF(sni, ''), domain, '')), MAX(country),
-		MIN(timestamp), MAX(timestamp)
+		MIN(timestamp), MAX(timestamp), agent_session,
+		GROUP_CONCAT(DISTINCT NULLIF(domain, '')), GROUP_CONCAT(DISTINCT NULLIF(sni, '')),
+		SUM(CASE WHEN COALESCE(sni, '') = '' AND COALESCE(domain, '') = '' THEN 1 ELSE 0 END)
 		FROM events` + whereClause + `
-		GROUP BY endpoint_id, process_path, dir, peer, svc, protocol`
+		GROUP BY endpoint_id, process_path, dir, peer, svc, protocol, agent_session`
 	qargs := append([]interface{}{eph, eph, eph, eph}, args...)
 
 	// No store lock: WAL reads don't block writers, and every read here is SQL
@@ -295,12 +342,16 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 		return nil, meta, err
 	}
 	var out []TrafficConversation
+	rowAt := map[conversationKey]int{}
 	for rs.Next() {
 		var c TrafficConversation
 		var proto int
 		var first, last interface{}
+		var session string
+		var domains, snis sql.NullString
+		var unnamed int64
 		if err := rs.Scan(&c.EndpointID, &c.ProcessPath, &c.Direction, &c.PeerIP, &c.Port, &proto,
-			&c.Flows, &c.MeasuredFlows, &c.BytesIn, &c.BytesOut, &c.Blocked, &c.PeerName, &c.Country, &first, &last); err != nil {
+			&c.Flows, &c.MeasuredFlows, &c.BytesIn, &c.BytesOut, &c.Blocked, &c.PeerName, &c.Country, &first, &last, &session, &domains, &snis, &unnamed); err != nil {
 			rs.Close()
 			return nil, meta, err
 		}
@@ -319,10 +370,26 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 			t := c.LastSeen
 			meta.LatestFlow = &t
 		}
+		// One row per conversation, whichever sessions held it.
+		if session != "" {
+			share := sessionShare(c, session)
+			share.names = conversationNames(domains, snis, unnamed)
+			c.Sessions = []ConversationSession{share}
+		} else {
+			c.names = conversationNames(domains, snis, unnamed)
+		}
+		if i, seen := rowAt[c.key]; seen {
+			out[i].absorb(c)
+			continue
+		}
+		rowAt[c.key] = len(out)
 		out = append(out, c)
 	}
 	rs.Close()
 	if err := rs.Err(); err != nil {
+		return nil, meta, err
+	}
+	if err := s.nameConversationSessions(out, &meta); err != nil {
 		return nil, meta, err
 	}
 

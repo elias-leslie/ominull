@@ -321,3 +321,72 @@ func TestARuntimeVendorRangeComesFromThePolicy(t *testing.T) {
 		t.Fatal("a maker removed from the policy still exempted its flows")
 	}
 }
+
+func egressPolicyFindings(t *testing.T, store *storage.Store) []storage.AnomalyAlert {
+	t.Helper()
+	alerts, err := store.ListAnomalyAlertsBetween("default", time.Now().Add(-time.Hour), time.Now().Add(time.Hour), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []storage.AnomalyAlert
+	for _, a := range alerts {
+		if a.AnomalyType == "AGENT_EGRESS_POLICY" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// Observing writes nothing. Enforcing, a flag rule writes one record-class
+// finding per session, rule and destination: it is held, so it never pages or
+// asks. Allow rules and sessions no rule covers write nothing.
+func TestAgentEgressPolicyFindings(t *testing.T) {
+	engine, store := noiseEngine(t)
+	cfg := store.GetDetectionTuning()
+	cfg.AgentEgressPolicy = storage.AgentEgressPolicy{Mode: storage.EgressObserve, Rules: []storage.AgentEgressRule{
+		{ID: "model-api", Action: storage.EgressAllow, Domains: []string{"anthropic.com"}},
+		{ID: "paste", Action: storage.EgressFlag, Domains: []string{"paste.example"}},
+	}}
+	if _, err := store.SaveDetectionTuning(cfg, "test"); err != nil {
+		t.Fatal(err)
+	}
+	engine.InvalidateTuning()
+	now := time.Now().UTC()
+	flagged := agentEvent("linux-70", "/usr/bin/curl", "paste.example", "203.0.113.5", 443, 10, now)
+	flagged.AgentSession = "claude:ab12cd34"
+	engine.Evaluate(flagged)
+	if got := egressPolicyFindings(t, store); len(got) != 0 {
+		t.Fatalf("observing wrote findings: %+v", got)
+	}
+
+	cfg.AgentEgressPolicy.Mode = storage.EgressEnforce
+	if _, err := store.SaveDetectionTuning(cfg, "test"); err != nil {
+		t.Fatal(err)
+	}
+	engine.InvalidateTuning()
+	if _, err := store.RecordAgentSessions([]storage.AgentSession{{Window: "ab12cd34", Name: "Lane 3g"}}, now); err != nil {
+		t.Fatal(err)
+	}
+	engine.Evaluate(flagged)
+	engine.Evaluate(flagged)
+	allowed := agentEvent("linux-70", claudePath, "api.anthropic.com", "160.79.104.10", 443, 10, now)
+	allowed.AgentSession = "claude:ab12cd34"
+	engine.Evaluate(allowed)
+	notAgent := agentEvent("linux-70", "/usr/bin/curl", "paste.example", "203.0.113.5", 443, 10, now)
+	engine.Evaluate(notAgent)
+	served := agentEvent("linux-70", "/usr/bin/python3", "paste.example", "203.0.113.6", 45000, 10, now)
+	served.AgentSession, served.SrcPort = "claude:ab12cd34", 8080
+	engine.Evaluate(served)
+
+	got := egressPolicyFindings(t, store)
+	if len(got) != 1 {
+		t.Fatalf("want one finding, got %+v", got)
+	}
+	a := got[0]
+	if storage.AlertClass(a) != storage.ClassRecord || a.HeldReason == "" {
+		t.Fatalf("a policy finding must be recorded and held, never a page: class %s held %q", storage.AlertClass(a), a.HeldReason)
+	}
+	if !strings.Contains(a.Title, "Lane 3g") || !strings.Contains(a.Title, "paste.example") || !strings.Contains(a.Evidence, "claude:ab12cd34") {
+		t.Fatalf("names the session and the place: %+v", a)
+	}
+}

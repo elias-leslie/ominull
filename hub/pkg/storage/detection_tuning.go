@@ -78,7 +78,9 @@ type DetectionTuning struct {
 	AgentRuntimes      []AgentRuntime `json:"agent_runtimes"`
 	AgentBaselineDays  int            `json:"agent_baseline_days"`
 	AgentUploadFloorMB int            `json:"agent_upload_floor_mb"`
-	AgentUploadFactor  int            `json:"agent_upload_factor"`
+	// AgentEgressPolicy says what each agent session may reach (agent_egress_policy.go).
+	AgentEgressPolicy AgentEgressPolicy `json:"agent_egress_policy"`
+	AgentUploadFactor int               `json:"agent_upload_factor"`
 
 	// AgentHeavyEndpoints and AgentHeavyRoles name the endpoints (by id) and
 	// role tags where AI agents run programs and open connections all day.
@@ -381,6 +383,9 @@ func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 	if err != nil {
 		return t, err
 	}
+	if err := t.AgentEgressPolicy.valid(); err != nil {
+		return t, fmt.Errorf("%w: %v", ErrInvalidDetectionTuning, err)
+	}
 	return t, nil
 }
 
@@ -455,6 +460,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AgentHeavyEndpoints = tidyList(t.AgentHeavyEndpoints)
 	t.AgentHeavyRoles = tidyList(t.AgentHeavyRoles)
 	t.AgentRuntimes = tidyAgentRuntimes(t.AgentRuntimes)
+	t.AgentEgressPolicy = t.AgentEgressPolicy.tidy()
 	t.AgentBaselineDays = clampInt(t.AgentBaselineDays, 1, 90, 7)
 	t.AgentUploadFloorMB = clampInt(t.AgentUploadFloorMB, 1, 100000, 100)
 	t.AgentUploadFactor = clampInt(t.AgentUploadFactor, 2, 100, 5)

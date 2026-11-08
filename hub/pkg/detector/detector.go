@@ -466,6 +466,7 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 
 	// Agent runtimes are judged against their own baselines.
 	e.checkAgentEgress(ev, geo, endpoint, cfg, procName, isInteractiveShell, warming, expect, now)
+	e.checkAgentEgressPolicy(ev, geo, endpoint, cfg, procName, now)
 
 	// 3b. Bulk egress to a cloud storage service (MITRE DET0570)
 	//

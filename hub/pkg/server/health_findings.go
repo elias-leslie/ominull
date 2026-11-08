@@ -257,7 +257,7 @@ func (s *Server) digestFinding(now time.Time) (feedFinding, error) {
 }
 
 // agentEgressTypes are the findings of the per-runtime agent egress detector.
-var agentEgressTypes = []string{"AGENT_NEW_DESTINATION", "AGENT_UPLOAD_VOLUME", "AGENT_DNS_BYPASS"}
+var agentEgressTypes = []string{"AGENT_NEW_DESTINATION", "AGENT_UPLOAD_VOLUME", "AGENT_DNS_BYPASS", "AGENT_EGRESS_POLICY"}
 
 // agentEgressFinding is the digest of the agent runtimes' recorded findings
 // (a page among them is in the alert list).
@@ -346,6 +346,7 @@ var ruleNames = map[string]string{
 	"DECOY_TOUCH":           "decoy touch",
 	"NEW_PLACE_UPLOAD":      "upload to a new place",
 	"AGENT_UPLOAD_VOLUME":   "agent upload volume",
+	"AGENT_EGRESS_POLICY":   "agent egress policy",
 	"C2_BEACONING":          "beacon",
 	"LAB_ESCAPE":            "lab escape",
 	"SENSITIVE_PORT_EGRESS": "sensitive port out",

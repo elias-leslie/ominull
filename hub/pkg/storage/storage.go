@@ -129,6 +129,9 @@ type Event struct {
 	// sessions ("agent:claude:<aico widget>") or services
 	// ("service:nightshift:<unit>"). Finding evidence only; flows do not keep it.
 	Actor string `json:"actor,omitempty"`
+	// AgentSession is the agent session behind the process, itself included:
+	// "<tool>:<window>" (AgentSessionOf reads it). Flows keep it.
+	AgentSession string `json:"agent_session,omitempty"`
 }
 
 type CommProfile struct {
@@ -710,6 +713,9 @@ func (s *Store) initSchema() error {
 		return err
 	}
 	if err := s.initAnomalyResolutionSchema(); err != nil {
+		return err
+	}
+	if err := s.initAgentSessionSchema(); err != nil {
 		return err
 	}
 	if err := s.initAgentEgressSchema(); err != nil {

@@ -197,6 +197,8 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 		return page("bulk upload to a place this device never reached before")
 	case "LAB_ESCAPE":
 		return page("a lab host reached outside the lab")
+	case "AGENT_EGRESS_POLICY":
+		return record("the agent egress policy flags this; it is kept for the record and never asks")
 	case "AGENT_NEW_DESTINATION":
 		if ev.Upload != nil || agentSentTitle.MatchString(a.Title) {
 			return page("bulk upload to a destination the runtime never reached before")

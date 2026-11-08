@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -79,6 +80,17 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 				req.ExpectedRules = nil
 			case "agent_runtimes":
 				req.AgentRuntimes = nil
+			case "agent_egress_policy":
+				var nested map[string]json.RawMessage
+				_ = json.Unmarshal(keys[k], &nested)
+				for n := range nested {
+					switch strings.ToLower(n) {
+					case "rules":
+						req.AgentEgressPolicy.Rules = nil
+					case "block_endpoints":
+						req.AgentEgressPolicy.BlockEndpoints = nil
+					}
+				}
 			}
 		}
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -209,6 +221,15 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	}
 	listDelta("expected rules", rules(before), rules(after))
 	listDelta("agent runtimes", runtimes(before), runtimes(after))
+	listDelta("agent egress rules", before.AgentEgressPolicy.Summaries(), after.AgentEgressPolicy.Summaries())
+	// The first match wins, so a reorder alone is a change.
+	if a, b := before.AgentEgressPolicy.Summaries(), after.AgentEgressPolicy.Summaries(); !slices.Equal(a, b) {
+		if sa, sb := slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)); slices.Equal(sa, sb) {
+			parts = append(parts, "agent egress rules reordered")
+		}
+	}
+	listDelta("agent egress block endpoints", before.AgentEgressPolicy.BlockEndpoints, after.AgentEgressPolicy.BlockEndpoints)
+	add("agent egress mode", before.AgentEgressPolicy.Mode, after.AgentEgressPolicy.Mode)
 	listDelta("agent-heavy endpoints", before.AgentHeavyEndpoints, after.AgentHeavyEndpoints)
 	listDelta("agent-heavy roles", before.AgentHeavyRoles, after.AgentHeavyRoles)
 	add("agent-heavy when a runtime is seen", before.AgentHeavyObserved, after.AgentHeavyObserved)

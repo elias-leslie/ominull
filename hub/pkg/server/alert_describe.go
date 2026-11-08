@@ -294,6 +294,8 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		out.What = fmt.Sprintf("The OmniNull agent on %s reported an impossible transfer rate, a counter glitch left out of the figures (nothing to do)", host)
 	case "AGENT_UPLOAD_VOLUME":
 		out.What = fmt.Sprintf("%s on %s uploaded much more than in an ordinary hour", who, host)
+	case "AGENT_EGRESS_POLICY":
+		out.What = fmt.Sprintf("%s on %s reached %s, which an agent egress rule flags", who, host, destPhrase(firstName(ev.SNI, ev.Domain), a.DstIP, a.DstPort, ev.Owner))
 	case "AGENT_DNS_BYPASS":
 		out.What = fmt.Sprintf("%s on %s connected straight to %s, so any name lookups it made skipped the router", who, host,
 			resolverPhrase(firstName(ev.SNI, ev.Domain), a.DstIP, a.DstPort))
