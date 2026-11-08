@@ -13,7 +13,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-FILES = ["scripts/pve/install.sh", "scripts/pve/ominull-hub-install", "scripts/st_extension/pve_backup_dispatch.py",
+FILES = ["scripts/pve/install.sh", "scripts/st_extension/pve_backup_dispatch.py",
          "scripts/st_extension/pve_observe_dispatch.py", "agent/include/release_key.h"]
 
 FAKE_SSH = r'''#!/usr/bin/env python3
@@ -27,12 +27,11 @@ if "-G" in args:
 def sandbox(argv, env=None):
     real_etc = ["passwd", "group", "ssl", "alternatives", "ld.so.cache"]
     cmd = ["bwrap", "--unshare-user", "--uid", "0", "--gid", "0", "--bind", "/", "/", "--dev", "/dev",
-           "--tmpfs", "/etc"]
+           "--bind", str(pve / "etc"), "/etc"]
     for name in real_etc:
         if os.path.exists("/etc/" + name):
             cmd += ["--ro-bind", "/etc/" + name, "/etc/" + name]
-    for target, source in (("/etc/ominull-hub-install", "etc-hub"), ("/etc/ominull-backup", "etc-backup"),
-                           ("/usr/local/sbin", "sbin"), ("/var/lib", "varlib"), ("/root", "root"), ("/usr/local/bin", "bin")):
+    for target, source in (("/usr/local/sbin", "sbin"), ("/var/lib", "varlib"), ("/root", "root"), ("/usr/local/bin", "bin")):
         cmd += ["--bind", str(pve / source), target]
     cmd += ["--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin", "--setenv", "HOME", "/root"]
     for key, value in (env or {}).items():
@@ -76,7 +75,7 @@ class InstallTests(unittest.TestCase):
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run([*git, "commit", "-q", "-m", "fixture"], check=True)
         self.pve = self.dir / "pve"
-        for name in ("etc-hub", "etc-backup", "sbin", "varlib/vz/dump", "root/.ssh", "bin"):
+        for name in ("etc/ominull-backup", "sbin", "varlib/vz/dump", "root/.ssh", "bin"):
             (self.pve / name).mkdir(parents=True)
         self.keys = self.pve / "root/.ssh/authorized_keys"
         self.keys.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOwnerOwnerOwnerOwnerOwnerOwnerOwnerOwnerOwn owner\n")
@@ -101,139 +100,90 @@ class InstallTests(unittest.TestCase):
         return subprocess.run(["bash", str(self.repo / "scripts/pve/install.sh"), *args], env=self.env,
                               capture_output=True, text=True, timeout=120, check=False)
 
-    def test_installs_three_forced_keys_and_each_refuses_a_shell(self):
+    def test_installs_two_forced_keys_and_each_refuses_a_shell(self):
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("backup key answers: guest", result.stdout)
         self.assertIn("observe key answers: package", result.stdout)
-        self.assertIn("hub-install key answers: version", result.stdout)
+        self.assertNotIn("hub-install", result.stdout)
         self.assertIn("every key refuses other commands", result.stdout)
         self.assertIn("no backup recipient yet", result.stdout)
         lines = self.keys.read_text().splitlines()
         self.assertEqual(lines[0].split()[-1], "owner")
-        self.assertEqual([line.split()[-1] for line in lines[1:]], ["ominull-backup", "ominull-observe", "ominull-hub-install"])
-        for line, command in zip(lines[1:], ("ominull-backup-dispatch", "ominull-observe-dispatch", "ominull-hub-install")):
+        self.assertEqual([line.split()[-1] for line in lines[1:]], ["ominull-backup", "ominull-observe"])
+        for line, command in zip(lines[1:], ("ominull-backup-dispatch", "ominull-observe-dispatch")):
             self.assertTrue(line.startswith('restrict,from="198.51.100.128",command="/usr/local/sbin/' + command + '" ssh-ed25519 '))
-        for name in ("ominull-backup-dispatch", "ominull-observe-dispatch", "ominull-hub-install"):
+        for name in ("ominull-backup-dispatch", "ominull-observe-dispatch"):
             self.assertTrue(os.access(self.pve / "sbin" / name, os.X_OK))
-        for role in ("backup", "observe", "hub-install"):
+        self.assertEqual(sorted(path.name for path in (self.pve / "sbin").iterdir()),
+                         ["ominull-backup-dispatch", "ominull-observe-dispatch"])
+        for role in ("backup", "observe"):
             key = self.dir / "keys" / (role + ".ed25519")
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.dir / "keys" / "hub-install.ed25519").exists())
         self.assertEqual((self.dir / "keys").stat().st_mode & 0o777, 0o700)
         self.assertIn("declare --host pve --what keys", self.declared.read_text())
 
-    def test_rerun_keeps_keys_and_pin_and_repin_only_on_request(self):
+    def test_rerun_changes_nothing_and_declares_nothing(self):
         self.assertEqual(self.install().returncode, 0)
-        before = self.keys.read_text()
+        before = self.keys.read_bytes()
         self.declared.unlink()
-        pin = self.pve / "etc-hub/release-public.pem"
-        # Stands in for the pin a rotation release moved.
-        private = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"],
-                                 capture_output=True, check=True).stdout
-        pin.write_bytes(subprocess.run(["openssl", "ec", "-pubout"], input=private, capture_output=True, check=True).stdout)
-        moved = pin.read_text()
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("release pin kept", result.stdout)
-        self.assertEqual(self.keys.read_text(), before)
+        self.assertEqual(self.keys.read_bytes(), before)
+        self.assertNotIn("AUTH\t", result.stdout)
+        self.assertNotIn("retired", result.stdout)
         self.assertFalse(self.declared.exists())
-        self.assertEqual(pin.read_text(), moved)
-        result = self.install("--repin-release-key")
-        self.assertIn("release pin written", result.stdout)
-        self.assertNotEqual(pin.read_text(), moved)
-        original = pin.read_bytes()
-        # A rotation commit pins a new key; --release-key-ref keeps the outgoing one that signs the rotation release.
-        header = self.repo / "agent/include/release_key.h"
-        # A fresh key's first base64 line stands in for the rotated key (any fixed line may become the real one).
-        fresh = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"], capture_output=True, check=True).stdout
-        fresh_pem = subprocess.run(["openssl", "ec", "-pubout"], input=fresh, capture_output=True, check=True).stdout.decode()
-        header.write_text(header.read_text().replace(original.decode().splitlines()[1], fresh_pem.splitlines()[1]))
-        git = ["git", "-C", str(self.repo), "-c", "user.name=fixture", "-c", "user.email=fixture@invalid"]
-        subprocess.run([*git, "commit", "-q", "-am", "rotation"], check=True)
-        result = self.install("--repin-release-key", "--release-key-ref", "HEAD~1")
+
+    def test_old_hub_install_role_is_retired_and_other_lines_are_kept(self):
+        self.assertEqual(self.install().returncode, 0)
+        installed = self.keys.read_text().splitlines()
+        old = {"hub": 'restrict,from="198.51.100.128",command="/usr/local/sbin/ominull-hub-install" ssh-ed25519 '
+                      + "A" * 68 + " ominull-hub-install",
+               "extra": 'restrict,from="198.51.100.128",command="/usr/local/sbin/ominull-hub-install" ssh-ed25519 '
+                        + "B" * 68 + " ominull-hub-install-extra"}
+        # Unrelated lines, including one that merely mentions hub-install.
+        unrelated = ['command="/bin/true" ssh-ed25519 ' + "C" * 68 + " ominull-hub-install-notes ",
+                     "# comment  with  spacing", "ssh-ed25519 " + "D" * 68 + " other"]
+        fixture = [installed[0], old["hub"], installed[1], unrelated[0], old["extra"], installed[2], *unrelated[1:]]
+        self.keys.write_text("\n".join(fixture) + "\n")
+        (self.pve / "sbin/ominull-hub-install").write_text("#!/bin/sh\n")
+        (self.pve / "etc/ominull-hub-install").mkdir()
+        (self.pve / "etc/ominull-hub-install/release-public.pem").write_text("pin\n")
+        (self.pve / "varlib/ominull-hub-install").mkdir()
+        (self.pve / "varlib/ominull-hub-install/work").write_text("x\n")
+        (self.pve / "varlib/keep-me").write_text("unrelated\n")
+        self.declared.unlink()
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("retired the hub-install key", result.stdout)
+        expected = [line for line in fixture if line not in old.values()]
+        self.assertEqual(self.keys.read_bytes(), ("\n".join(expected) + "\n").encode())
+        self.assertFalse((self.pve / "sbin/ominull-hub-install").exists())
+        self.assertFalse((self.pve / "etc/ominull-hub-install").exists())
+        self.assertFalse((self.pve / "varlib/ominull-hub-install").exists())
+        self.assertEqual((self.pve / "varlib/keep-me").read_text(), "unrelated\n")
+        self.assertIn("declare --host pve --what keys", self.declared.read_text())
+        # Retiring is done: a rerun finds nothing to remove.
+        self.declared.unlink()
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(pin.read_bytes(), original)
-        self.assertEqual(self.install("--release-key-ref", "no-such-ref").returncode, 128)
+        self.assertNotIn("retired", result.stdout)
+        self.assertEqual(self.keys.read_bytes(), ("\n".join(expected) + "\n").encode())
+        self.assertFalse(self.declared.exists())
 
     def test_recipient_is_installed_and_bad_input_installs_nothing(self):
         recipient = subprocess.run(["age-keygen"], capture_output=True, text=True, check=True).stdout
         public = next(line.split(": ")[1] for line in recipient.splitlines() if line.startswith("# public key: "))
         result = self.install("--recipient", public)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.pve / "etc-backup/recipient").read_text().strip(), public)
+        self.assertEqual((self.pve / "etc/ominull-backup/recipient").read_text().strip(), public)
         for bad in ("age1short", public + ";id", "AGE1" + public[4:]):
             with self.subTest(bad=bad):
                 self.assertEqual(self.install("--recipient", bad).returncode, 2)
 
-    def extra_key(self, name="agent"):
-        key = self.dir / (name + ".ed25519")
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", str(key)], check=True)
-        return key.with_suffix(".ed25519.pub")
-
-    def test_extra_hub_key_restricts_access_and_reruns_preserve_both_hub_keys(self):
-        result = self.install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        owner_lines = self.keys.read_text().splitlines()
-        public = self.extra_key()
-        # A supplied comment is not trusted as an authorized_keys marker.
-        public.write_text(" ".join(public.read_text().split()[:2]) + " agent key with spaces\n")
-        result = self.install("--hub-install-extra-pubkey", str(public))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        expected = (owner_lines[-1].split(" ssh-ed25519 ")[0] + " " +
-                    " ".join(public.read_text().split()[:2]) + " ominull-hub-install-extra")
-        installed = self.keys.read_text()
-        self.assertEqual(installed.splitlines(), [*owner_lines, expected])
-        # The same fixture sshd checks the extra key's forced command, not just its line format.
-        for command, status in (("version", 0), ("id", 1)):
-            result = subprocess.run(["ssh", "-i", str(public.with_suffix("")), "root@192.0.2.39", command],
-                                    env=self.env, capture_output=True, text=True, timeout=30, check=False)
-            self.assertEqual(result.returncode, status, result.stderr)
-        for args in (("--hub-install-extra-pubkey", str(public)), ()):
-            result = self.install(*args)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self.keys.read_text(), installed)
-            self.assertNotIn("AUTH\t", result.stdout)
-        # Keep the extra line even when a normal key needs refreshing without the flag.
-        self.keys.write_text("\n".join(line for line in installed.splitlines()
-                                       if not line.endswith(" ominull-backup")) + "\n")
-        result = self.install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertCountEqual(self.keys.read_text().splitlines(), installed.splitlines())
-        # A different supplied key replaces the one extra slot and keeps the owner's keys.
-        replacement = self.extra_key("replacement")
-        replacement.write_text(" ".join(replacement.read_text().split()[:2]))  # No comment or final newline.
-        result = self.install("--hub-install-extra-pubkey", str(replacement))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        lines = self.keys.read_text().splitlines()
-        self.assertEqual(lines[:-1], owner_lines)
-        self.assertTrue(lines[-1].endswith(" ominull-hub-install-extra"))
-        self.assertIn(" ".join(replacement.read_text().split()[:2]), lines[-1])
-        self.assertNotIn(expected, lines)
-        # Removing the marked line is persistent when the flag is omitted.
-        self.keys.write_text("\n".join(owner_lines) + "\n")
-        result = self.install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.keys.read_text().splitlines(), owner_lines)
-
-    def test_extra_hub_key_rejects_invalid_files_before_installing_anything(self):
-        public = self.extra_key()
-        valid = public.read_text()
-        for bad in ("", valid + valid, valid + "\n", 'command="id" ' + valid,
-                    valid.replace("ssh-ed25519", "ssh-rsa"), "ssh-ed25519 " + "A" * 68 + "\n",
-                    valid.rstrip("\n") + "\x00hidden\n"):
-            with self.subTest(bad=bad):
-                public.write_text(bad)
-                result = self.install("--hub-install-extra-pubkey", str(public))
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn("--hub-install-extra-pubkey", result.stderr)
-                self.assertNotIn("ominull-", self.keys.read_text())
-                self.assertEqual(list((self.pve / "sbin").iterdir()), [])
-        public.unlink()
-        result = self.install("--hub-install-extra-pubkey", str(public))
-        self.assertEqual(result.returncode, 2, result.stderr)
-
     def test_uncommitted_dispatcher_is_refused(self):
-        with (self.repo / "scripts/pve/ominull-hub-install").open("a") as file:
+        with (self.repo / "scripts/st_extension/pve_observe_dispatch.py").open("a") as file:
             file.write("# local edit\n")
         result = self.install()
         self.assertNotEqual(result.returncode, 0)

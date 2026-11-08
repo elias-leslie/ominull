@@ -82,8 +82,7 @@ signing_pubkey() {
 # Routine mode (OMINULL_SIGNING_ROUTINE=1, the owner's session signing): the
 # signer's routine key must be one the pinned release key listed on the hub
 # (GET /api/v1/trust/routine-keys). That signed list goes beside the packages
-# as dist/routine-keys.json, which the hub installer on Proxmox reads; agents
-# get it from the hub.
+# as dist/routine-keys.json; agents get it from the hub.
 routine_list() {
     # OMINULL_ROUTINE_LIST: a saved copy of that GET (offline checks and tests).
     if [ -n "${OMINULL_ROUTINE_LIST:-}" ]; then cat "${OMINULL_ROUTINE_LIST}"; return; fi

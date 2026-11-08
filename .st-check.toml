@@ -119,7 +119,7 @@ id = "pve-dispatch"
 kind = "test"
 coverage = "full"
 cwd = "scripts/pve"
-argv = ["python3", "-m", "unittest", "-v", "test_hub_install", "test_install"]
+argv = ["python3", "-m", "unittest", "-v", "test_install"]
 [native.stages.evidence]
 format = "text"
 source = "combined"

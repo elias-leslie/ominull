@@ -1,47 +1,28 @@
 #!/usr/bin/env bash
 # Install or refresh OmniNull's forced-command keys on the Proxmox host (idempotent).
 #
-#   sudo scripts/pve/install.sh [--recipient age1...] [--repin-release-key] [--release-key-ref REF]
-#       [--hub-install-extra-pubkey FILE]
+#   sudo scripts/pve/install.sh [--recipient age1...]
 #   scripts/pve/install.sh ...      as the owner: same install
 #       either way a changed authorized_keys is declared to host-steward (aico declare --host pve --what keys)
 #
 # Layout:  PVE host     /usr/local/sbin/ominull-backup-dispatch    (scripts/st_extension/pve_backup_dispatch.py)
 #                       /usr/local/sbin/ominull-observe-dispatch   (scripts/st_extension/pve_observe_dispatch.py)
-#                       /usr/local/sbin/ominull-hub-install        (scripts/pve/ominull-hub-install)
-#                       /etc/ominull-hub-install/release-public.pem  the key every hub package must be signed with
-#                       /var/lib/ominull-hub-install               (root 0700 work directory)
 #                       /etc/ominull-backup/recipient              offline age recipient, public half only (--recipient)
-#          workstation  <key dir>/{backup,observe,hub-install}.ed25519 (no passphrase; each bound to one dispatcher,
-#                       from the workstation address only), used through the aliases ominull-backup, ominull-observe
-#                       and ominull-hub-install in ~/.ssh/config
+#          workstation  <key dir>/{backup,observe}.ed25519 (no passphrase; each bound to one dispatcher, from the
+#                       workstation address only), used through the aliases ominull-backup and ominull-observe
 #
 # The owner's PVE ssh alias runs the one install session. Only the committed dispatchers (git HEAD) are installed.
-# The release pin is written from the committed agent/include/release_key.h only when PVE has none yet (or with
-# --repin-release-key, for recovery): afterwards ominull-hub-install moves it itself when a signed rotation release
-# is installed, so re-running this after the rotation commit cannot strand that release. A first install after the
-# rotation commit but before its release must pin the outgoing key: --release-key-ref <commit before the rotation>.
+# The same session retires the old hub-install key: its authorized_keys lines (" ominull-hub-install" and
+# " ominull-hub-install-extra"), /usr/local/sbin/ominull-hub-install, /etc/ominull-hub-install and
+# /var/lib/ominull-hub-install. The hub now deploys through scripts/deploy-hub.sh.
 # The backup dispatcher refuses every backup under its key until a recipient is installed: set backup_ssh_alias in
 # scripts/st_extension/production.local.json only after this ran with --recipient.
-#
-# --hub-install-extra-pubkey accepts one ssh-ed25519 .pub line for the agent user's own key. It gets the same
-# restrict, from= and forced command as the owner's hub-install key; the owner key is kept. Repeating the flag
-# replaces the extra key; omitting it keeps the previous extra key. To remove it, the owner removes only the line
-# ending " ominull-hub-install-extra" from /root/.ssh/authorized_keys on PVE through the approved admin path.
-# The agent creates its own key (ssh-keygen -t ed25519 -f ~/.ssh/ominull-hub-install.ed25519), supplies only its .pub
-# for this install, and sets Host ominull-hub-install in ~agent/.ssh/config with HostName <PVE host>, User root,
-# IdentityFile ~/.ssh/ominull-hub-install.ed25519, IdentitiesOnly yes and IdentityAgent none (see docs/PACKAGING.md).
-# With the release environment configured, the agent releases without taps (release.sh reads the admin key itself):
-#   OMINULL_SIGNING_ROUTINE=1 scripts/release.sh ...
 set -euo pipefail
-recipient=""; repin=0; key_ref=HEAD; extra_pubkey=""
+recipient=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --recipient) recipient="${2:?--recipient needs the age1... public key}"; shift 2 ;;
-    --repin-release-key) repin=1; shift ;;
-    --release-key-ref) key_ref="${2:?--release-key-ref needs a commit}"; shift 2 ;;
-    --hub-install-extra-pubkey) extra_pubkey="${2:?--hub-install-extra-pubkey needs a .pub file}"; shift 2 ;;
-    *) echo "usage: install.sh [--recipient age1...] [--repin-release-key] [--release-key-ref REF] [--hub-install-extra-pubkey FILE]" >&2; exit 2 ;;
+    *) echo "usage: install.sh [--recipient age1...]" >&2; exit 2 ;;
   esac
 done
 [ -z "$recipient" ] || [[ $recipient =~ ^age1[0-9a-z]{58}$ ]] || { echo "--recipient must be one age1... public key" >&2; exit 2; }
@@ -59,36 +40,10 @@ KEYDIR="$(as_admin sh -c 'printf %s "${OMINULL_PVE_KEY_DIR:-${XDG_STATE_HOME:-$H
 [[ $FROM =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "OMINULL_PVE_FROM must be one IPv4 address" >&2; exit 1; }
 # One public ed25519 key with no options: anything else would add a key without restrict, from= and command=.
 KEY_RE='^(ssh-ed25519 [A-Za-z0-9+/]{68})( [^[:cntrl:]]*)?$'
-extra_public=""
-if [ -n "$extra_pubkey" ]; then
-  # Read bytes before bash can discard NULs or trailing blank lines. Check the SSH wire type and key length too.
-  if ! extra_public="$(python3 -I - "$extra_pubkey" <<'PY'
-import base64
-from pathlib import Path
-import re
-import sys
-
-try:
-    match = re.fullmatch(rb'(ssh-ed25519 ([A-Za-z0-9+/]{68}))( [^\x00-\x1f\x7f]*)?\n?', Path(sys.argv[1]).read_bytes())
-    if match is None:
-        raise ValueError("not one public key line")
-    blob = base64.b64decode(match[2], validate=True)
-    if len(blob) != 51 or not blob.startswith(b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20'):
-        raise ValueError("not an ed25519 wire key")
-    print(match[1].decode('ascii'))
-except (OSError, ValueError):
-    sys.exit(2)
-PY
-)"; then
-    echo "--hub-install-extra-pubkey must contain exactly one ssh-ed25519 public key line" >&2; exit 2;
-  fi
-fi
 # Each role: its forced command on PVE and the committed file installed there.
-ROLES=(backup observe hub-install)
-declare -A COMMAND=([backup]=/usr/local/sbin/ominull-backup-dispatch [observe]=/usr/local/sbin/ominull-observe-dispatch
-  [hub-install]=/usr/local/sbin/ominull-hub-install)
-declare -A SOURCE=([backup]=scripts/st_extension/pve_backup_dispatch.py [observe]=scripts/st_extension/pve_observe_dispatch.py
-  [hub-install]=scripts/pve/ominull-hub-install)
+ROLES=(backup observe)
+declare -A COMMAND=([backup]=/usr/local/sbin/ominull-backup-dispatch [observe]=/usr/local/sbin/ominull-observe-dispatch)
+declare -A SOURCE=([backup]=scripts/st_extension/pve_backup_dispatch.py [observe]=scripts/st_extension/pve_observe_dispatch.py)
 
 work="$(mktemp -d)"; chmod 700 "$work"  # Root's own when run as root: nothing an agent can swap between show and install.
 trap 'rm -rf "$work"' EXIT
@@ -104,12 +59,6 @@ for role in "${ROLES[@]}"; do
   as_admin git -C "$ROOT" show "$head:${SOURCE[$role]}" > "$work/$role"
   echo "Dispatcher ${COMMAND[$role]}: ${SOURCE[$role]} at $head, sha256 $(sha256 "$work/$role")"
 done
-key_commit="$(as_admin git -C "$ROOT" rev-parse --verify "$key_ref^{commit}")"
-as_admin git -C "$ROOT" show "$key_commit:agent/include/release_key.h" |
-  sed -n '/^[[:space:]]*"-----BEGIN PUBLIC KEY-----/,/^[[:space:]]*"-----END PUBLIC KEY-----/p' |
-  sed -E 's/^[[:space:]]*"//; s/\\n".*$//' > "$work/release-public.pem"
-openssl pkey -pubin -noout -in "$work/release-public.pem" 2>/dev/null || { echo "release_key.h at $key_commit holds no public key" >&2; exit 1; }
-echo "Release key pinned at $key_commit: sha256 $(sha256 "$work/release-public.pem") (written only if PVE has none$([ "$repin" = 1 ] && echo '; --repin-release-key: overwritten'))"
 
 as_admin install -d -m 0700 "$KEYDIR"
 declare -A LINE
@@ -127,38 +76,22 @@ for role in "${ROLES[@]}"; do
   [[ $public =~ $KEY_RE ]] || { echo "$private does not hold exactly one ed25519 key; nothing installed" >&2; exit 1; }
   LINE[$role]="restrict,from=\"$FROM\",command=\"${COMMAND[$role]}\" ${BASH_REMATCH[1]} ominull-$role"
 done
-extra_line=""
-if [ -n "$extra_public" ]; then
-  extra_line="restrict,from=\"$FROM\",command=\"${COMMAND[hub-install]}\" $extra_public ominull-hub-install-extra"
-fi
-
 b64() { base64 -w0 < "$1"; }
 # One session: ssh joins the remote arguments with spaces for the remote shell to re-split, so the files and key
 # lines travel base64-encoded and the recipient carries a prefix (an empty argument would vanish and shift the rest).
-as_admin ssh "$PVE" bash -s -- "$(b64 "$work/backup")" "$(b64 "$work/observe")" "$(b64 "$work/hub-install")" \
-  "$(b64 "$work/release-public.pem")" "$repin" "r$recipient" \
+as_admin ssh "$PVE" bash -s -- "$(b64 "$work/backup")" "$(b64 "$work/observe")" "r$recipient" \
   "$(printf '%s' "${LINE[backup]}" | base64 -w0)" "$(printf '%s' "${LINE[observe]}" | base64 -w0)" \
-  "$(printf '%s' "${LINE[hub-install]}" | base64 -w0)" \
-  "e$(printf '%s' "$extra_line" | base64 -w0)" > "$work/pve-install.out" <<'REMOTE'
+  > "$work/pve-install.out" <<'REMOTE'
 set -euo pipefail
 tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-declare -A command=([backup]=/usr/local/sbin/ominull-backup-dispatch [observe]=/usr/local/sbin/ominull-observe-dispatch
-  [hub-install]=/usr/local/sbin/ominull-hub-install)
-roles=(backup observe hub-install)
-declare -A line=([backup]="$(printf '%s' "$7" | base64 -d)" [observe]="$(printf '%s' "$8" | base64 -d)"
-  [hub-install]="$(printf '%s' "$9" | base64 -d)")
+declare -A command=([backup]=/usr/local/sbin/ominull-backup-dispatch [observe]=/usr/local/sbin/ominull-observe-dispatch)
+roles=(backup observe)
+declare -A line=([backup]="$(printf '%s' "$4" | base64 -d)" [observe]="$(printf '%s' "$5" | base64 -d)")
 for role in "${roles[@]}"; do
   re='^restrict,from="[0-9.]+",command="'"${command[$role]}"'" ssh-ed25519 [A-Za-z0-9+/]{68} ominull-'"$role"'$'
   [[ ${line[$role]} =~ $re ]] || { echo "refusing a malformed ominull-$role key line; nothing installed" >&2; exit 1; }
 done
-extra_line="$(printf '%s' "${10#e}" | base64 -d)"
-if [ -n "$extra_line" ]; then
-  re='^restrict,from="[0-9.]+",command="/usr/local/sbin/ominull-hub-install" ssh-ed25519 [A-Za-z0-9+/]{68} ominull-hub-install-extra$'
-  [[ $extra_line =~ $re && ${extra_line%% ssh-ed25519 *} = "${line[hub-install]%% ssh-ed25519 *}" ]] || {
-    echo "refusing a malformed extra hub-install key line; nothing installed" >&2; exit 1;
-  }
-fi
-recipient="${6#r}"
+recipient="${3#r}"
 if [ -n "$recipient" ]; then
   [[ $recipient =~ ^age1[0-9a-z]{58}$ ]] || { echo "refusing a malformed recipient; nothing installed" >&2; exit 1; }
   command -v age >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends age >/dev/null
@@ -171,17 +104,7 @@ for role in "${roles[@]}"; do
   install -m 0755 -o root -g root "$tmp" "${command[$role]}"
   i=$((i + 1))
 done
-install -d -m 0755 -o root -g root /etc/ominull-hub-install /etc/ominull-backup
-install -d -m 0700 -o root -g root /var/lib/ominull-hub-install
-pin=/etc/ominull-hub-install/release-public.pem
-if [ ! -e "$pin" ] || [ "$5" = 1 ]; then
-  printf '%s' "$4" | base64 -d > "$tmp"
-  openssl pkey -pubin -noout -in "$tmp"
-  install -m 0644 -o root -g root "$tmp" "$pin"
-  echo "release pin written: $(sha256sum < "$pin" | cut -c1-64)"
-else
-  echo "release pin kept: $(sha256sum < "$pin" | cut -c1-64)"
-fi
+install -d -m 0755 -o root -g root /etc/ominull-backup
 if [ -n "$recipient" ]; then
   printf '%s\n' "$recipient" > "$tmp"
   install -m 0644 -o root -g root "$tmp" /etc/ominull-backup/recipient
@@ -201,18 +124,25 @@ auth_paths="/root/.ssh/authorized_keys /etc/pve/priv/authorized_keys"
 declare -A before
 for f in $auth_paths; do before[$f]=$(sig "$f"); done
 ak=/root/.ssh/authorized_keys
-changed=0
-for role in "${roles[@]}"; do grep -qxF "${line[$role]}" "$ak" || changed=1; done
-if [ -n "$extra_line" ]; then grep -qxF "$extra_line" "$ak" || changed=1; fi
-if [ "$changed" = 1 ]; then
-  remove=(-e ' ominull-backup$' -e ' ominull-observe$' -e ' ominull-hub-install$')
-  # Replace only when supplied. Without the flag an existing extra authorization stays byte for byte.
-  if [ -n "$extra_line" ]; then remove+=(-e ' ominull-hub-install-extra$'); fi
-  grep -v "${remove[@]}" "$ak" > "$tmp" || true
-  for role in "${roles[@]}"; do printf '%s\n' "${line[$role]}" >> "$tmp"; done
-  if [ -n "$extra_line" ]; then printf '%s\n' "$extra_line" >> "$tmp"; fi
+retired_re=' ominull-hub-install(-extra)?$'
+missing=0; stale=0
+for role in "${roles[@]}"; do grep -qxF "${line[$role]}" "$ak" || missing=1; done
+grep -Eq "$retired_re" "$ak" && stale=1
+if [ "$missing" = 1 ] || [ "$stale" = 1 ]; then
+  remove=(-e "$retired_re")
+  # The backup and observe lines are replaced only when one is missing or different; otherwise they stay in place.
+  if [ "$missing" = 1 ]; then remove+=(-e ' ominull-backup$' -e ' ominull-observe$'); fi
+  grep -Ev "${remove[@]}" "$ak" > "$tmp" || true
+  if [ "$missing" = 1 ]; then for role in "${roles[@]}"; do printf '%s\n' "${line[$role]}" >> "$tmp"; done; fi
   cat "$tmp" > "$ak"
 fi
+# The retired hub-install role: its dispatcher, pin and work directory (only these paths).
+retired=()
+[ "$stale" = 1 ] && retired+=("authorized_keys lines")
+for path in /usr/local/sbin/ominull-hub-install /etc/ominull-hub-install /var/lib/ominull-hub-install; do
+  if [ -e "$path" ] || [ -L "$path" ]; then rm -rf -- "$path"; retired+=("$path"); fi
+done
+if [ "${#retired[@]}" -gt 0 ]; then echo "retired the hub-install key: ${retired[*]}"; fi
 for f in $auth_paths; do
   after=$(sig "$f")
   [ "$after" = "${before[$f]}" ] || printf 'AUTH\t%s\t%s\t%s\n' "$f" "${before[$f]}" "$after"
@@ -240,7 +170,6 @@ check() {
 answers() { if check "$@" > /dev/null; then echo "$1 key answers: $2"; else echo "the $1 key does not answer $2" >&2; exit 1; fi; }
 answers backup guest 00000000000000000000000000000000 install-check "$node"
 answers observe package
-answers hub-install version
 for role in "${ROLES[@]}"; do
   if check "$role" id 2>/dev/null; then
     echo "the $role key ran a shell command; remove its line from $PVE:/root/.ssh/authorized_keys" >&2; exit 1
