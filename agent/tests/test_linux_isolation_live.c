@@ -117,9 +117,38 @@ static int OpenedDuringRebuilds(const char *ip, unsigned port,
             return 1;                                                          \
         }                                                                      \
     } while (0)
+static int HubNameAnswers(const char *hosts, const char *ip) {
+    FILE *f = fopen(hosts, "w");
+    CHECK(f);
+    fprintf(f, "%s hub.rig.invalid\n", ip);
+    fclose(f);
+    return 0;
+}
+static int FollowsAMovedHub(const char *oldIP, const char *newIP, const char *hosts) {
+    LINUX_AGENT_CONFIG config;
+    memset(&config, 0, sizeof(config));
+    strcpy(config.hub_url, "https://hub.rig.invalid:9003");
+    CHECK(HubNameAnswers(hosts, oldIP) == 0);
+    CHECK(OminullResolveHub(config.hub_url, &appliedHubTargets));
+    char empty[1][64] = {{0}};
+    CHECK(EnforcementBuild("iptables", true, &appliedHubTargets, empty, 0, empty, 0, empty, 0, NULL, 0));
+    known = appliedIsolated = true;
+    CHECK(ConnectPeer(oldIP, 9003) && !ConnectPeer(newIP, 9003));
+    FollowHubAddress(&config);          /* the same answer changes nothing */
+    CHECK(ConnectPeer(oldIP, 9003) && !ConnectPeer(newIP, 9003));
+    CHECK(HubNameAnswers(hosts, newIP) == 0);
+    FollowHubAddress(&config);
+    CHECK(!strcmp(appliedHubTargets.addresses[0], newIP));
+    CHECK(ConnectPeer(newIP, 9003) && !ConnectPeer(oldIP, 9003));
+    CHECK(!ConnectPeer(newIP, 9004));
+    known = appliedIsolated = false;
+    memset(&appliedHubTargets, 0, sizeof(appliedHubTargets));
+    Cleanup();
+    return 0;
+}
 int main(int argc, char **argv) {
     struct stat current, initial;
-    CHECK((argc == 3 || argc == 4) && geteuid() == 0);
+    CHECK((argc == 3 || argc == 4 || argc == 5) && geteuid() == 0);
     CHECK(stat("/proc/self/ns/net", &current) == 0 &&
           stat("/proc/1/ns/net", &initial) == 0 &&
           current.st_ino != initial.st_ino);
@@ -143,6 +172,11 @@ int main(int argc, char **argv) {
     CHECK(ConnectPeer(argv[1], 9003) && ConnectPeer(argv[2], 9003));
     CHECK(!ConnectPeer(argv[1], 9004) && ConnectPeer(argv[2], 9004));
     puts("Exact dual-stack hub ports and IPv6 neighbor rediscovery passed");
+    if (argc == 5) {
+        /* argv[4] is the file mounted over this namespace's /etc/hosts. */
+        CHECK(FollowsAMovedHub(argv[1], argv[3], argv[4]) == 0);
+        puts("An isolated host's hub hole follows the hub's new address and only that");
+    }
     EnforcementBuild("ip6tables", true, &hub, allowed, 1, allowed, 1, empty, 0,
                      NULL, 0);
     CHECK(ConnectPeer(argv[2], 9003) && !ConnectPeer(argv[2], 9004));

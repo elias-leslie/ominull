@@ -48,4 +48,8 @@ while True:
         s.accept()[0].close()
 ' &
 sleep 0.5
-sudo -n ip netns exec "$A" build/test_linux_isolation_live 10.0.0.2 2001:db8::2 10.0.0.3
+# The rig's own hosts file stands in for DNS, mounted only inside this one process's
+# mount namespace; the host's file is untouched.
+HOSTS="$(mktemp "${ROOT_DIR}/build/rig-hosts.XXXXXX")" # not /tmp: root may not reopen another user's file there
+sudo -n ip netns exec "$A" sh -c 'mount --bind "$1" /etc/hosts && exec build/test_linux_isolation_live 10.0.0.2 2001:db8::2 10.0.0.3 "$1"' sh "$HOSTS"
+rm -f "$HOSTS"

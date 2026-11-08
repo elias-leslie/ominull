@@ -850,6 +850,32 @@ static void AdoptIsolationInForce(void) {
     if (inForce) appliedIsolated = true;
 }
 
+/* FollowHubAddress: a hub that moved can't say so to an isolated host, whose hole still
+ * points at the old address, so the host would wait for the dead-man timer to release
+ * it. While the hub isn't answering, its name is looked up again and the hole follows
+ * the answer: the hub's TCP port only, and the same lookup every apply already trusts.
+ * Needs rules this run built: after a restart the lists aren't known. */
+static void FollowHubAddress(const AGENT_CONFIG *config) {
+    if (!known || !appliedIsolated || !engineReady || appliedHubTargets.count == 0) return;
+    OMINULL_HUB_TARGETS current = {0};
+    if (!ResolveHubTargets(config, &current) || OminullHubTargetsSame(&current, &appliedHubTargets)) return;
+    const char *blocked[MAX_BLOCKED_PEERS];
+    for (int i = 0; i < appliedPeerCount; i++) blocked[i] = appliedPeers[i];
+    const char *allowed[MAX_BLOCKED_PEERS];
+    for (int i = 0; i < appliedAllowCount; i++) allowed[i] = appliedAllow[i];
+    DWORD status = Wfp_ApplyState(&current, 1, blocked, appliedPeerCount, allowed, appliedAllowCount,
+                                  appliedBaseline, appliedBaselineCount, 0);
+    if (status != ERROR_SUCCESS) {
+        printf("[-] The hub's address changed to %s but the filtering engine refused the change (0x%08lx); "
+               "trying again next beat.\n", current.addresses[0], (unsigned long)status);
+        return;
+    }
+    printf("[!] Isolated, and the hub isn't answering at its old address: it now resolves to %s, "
+           "so its hole moved there.\n", current.addresses[0]);
+    fflush(stdout);
+    appliedHubTargets = current;
+}
+
 static void HubContact(bool accepted) {
     static int missed = 0;
 
@@ -979,6 +1005,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             g_TCPDrops += lostTcp;
             batchCount = 0;
             lastFlush = now;
+            if (!accepted) FollowHubAddress(config);
             HubContact(accepted);
 
             Service_AdoptDeviceCredential(config, reply);

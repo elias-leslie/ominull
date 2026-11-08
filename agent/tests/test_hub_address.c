@@ -61,6 +61,19 @@ int main(void) {
     assert(targets.count == 2 && targets.port == 9443);
     assert(!strcmp(targets.addresses[0], "203.0.113.9") &&
            !strcmp(targets.addresses[1], "2001:db8::2"));
+    OMINULL_HUB_TARGETS other = targets;
+    assert(OminullHubTargetsSame(&targets, &other));
+    strcpy(other.addresses[0], targets.addresses[1]);
+    strcpy(other.addresses[1], targets.addresses[0]);
+    assert(OminullHubTargetsSame(&targets, &other));
+    strcpy(other.addresses[0], "203.0.113.10");
+    assert(!OminullHubTargetsSame(&targets, &other));
+    other = targets;
+    other.port = 443;
+    assert(!OminullHubTargetsSame(&targets, &other));
+    other = targets;
+    other.count = 1;
+    assert(!OminullHubTargetsSame(&targets, &other));
     answers = 17;
     assert(!OminullResolveHub("https://hub.example:9443", &targets) &&
            !targets.count);

@@ -209,12 +209,69 @@ static void Permits(const char *path, OMINULL_HUB_TARGETS *hub) {
     assert(strstr(ReadCommands(path), "-s fe80::/10 --sport 547"));
     ResetCommands(path);
 }
+/* An isolated host follows a hub that moved, keeping everything else it enforces. */
+static void FollowsAMovedHub(const char *path) {
+    LINUX_AGENT_CONFIG config;
+    memset(&config, 0, sizeof(config));
+    strcpy(config.hub_url, "https://198.51.100.9:443");
+    memset(&appliedHubTargets, 0, sizeof(appliedHubTargets));
+    strcpy(appliedHubTargets.addresses[0], "198.51.100.8");
+    appliedHubTargets.count = 1;
+    appliedHubTargets.port = 443;
+    strcpy(appliedPeers[0], "203.0.113.77");
+    appliedPeerCount = 1;
+    strcpy(appliedAllow[0], "198.51.100.5");
+    appliedAllowCount = 1;
+    appliedThreatCount = appliedBaselineCount = 0;
+
+    known = false;
+    appliedIsolated = true;
+    ResetCommands(path);
+    FollowHubAddress(&config);
+    assert(!ReadCommands(path)[0] && !strcmp(appliedHubTargets.addresses[0], "198.51.100.8"));
+    known = true;
+    appliedIsolated = false;
+    FollowHubAddress(&config);
+    assert(!ReadCommands(path)[0]);
+    appliedIsolated = true;
+
+    /* Refused: the hole stays recorded where it was and the next beat tries again. */
+    g_ForgetApplied = false;
+    assert(setenv("OMINULL_FIXTURE_FAIL", "-j DROP$", 1) == 0);
+    FollowHubAddress(&config);
+    unsetenv("OMINULL_FIXTURE_FAIL");
+    assert(!strcmp(appliedHubTargets.addresses[0], "198.51.100.8") && g_ForgetApplied);
+    g_ForgetApplied = false;
+
+    ResetCommands(path);
+    FollowHubAddress(&config);
+    const char *data = ReadCommands(path);
+    assert(strstr(data, "-d 198.51.100.9 -p tcp --dport 443 -j RETURN"));
+    assert(!strstr(data, "198.51.100.8"));
+    assert(strstr(data, "-d 203.0.113.77 -j DROP") && strstr(data, "-d 198.51.100.5 -j RETURN"));
+    assert(strstr(data, "-A OMINULL_ISO_OUT_N -j DROP"));
+    assert(!strcmp(appliedHubTargets.addresses[0], "198.51.100.9") && appliedIsolated);
+
+    ResetCommands(path);
+    FollowHubAddress(&config);
+    assert(!ReadCommands(path)[0]);
+    strcpy(config.hub_url, "ftp://host");
+    FollowHubAddress(&config);
+    assert(!ReadCommands(path)[0] && !strcmp(appliedHubTargets.addresses[0], "198.51.100.9"));
+
+    known = false;
+    appliedIsolated = false;
+    appliedPeerCount = appliedAllowCount = 0;
+    memset(&appliedHubTargets, 0, sizeof(appliedHubTargets));
+    g_PermitsMissing = g_PermitsRetry = false;
+}
 int main(void) {
     char path[] = "/tmp/ominull-pinhole-XXXXXX";
     int fd = mkstemp(path);
     assert(fd >= 0);
     close(fd);
     assert(setenv("OMINULL_FIXTURE_COMMANDS", path, 1) == 0);
+    FollowsAMovedHub(path);
     char addresses[1][64] = {{0}};
     OMINULL_HUB_TARGETS hub = {0};
     strcpy(hub.addresses[0], "2001:db8::9");

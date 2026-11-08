@@ -106,6 +106,21 @@ static inline bool OminullUnscopedPolicyIP(const char *s) {
            !(v6.s6_addr[0] == 0xfe && (v6.s6_addr[1] & 0xc0) == 0x80);
 }
 
+/* The same port and the same addresses, in whatever order the resolver gave them. */
+static inline bool OminullHubTargetsSame(const OMINULL_HUB_TARGETS *a,
+                                         const OMINULL_HUB_TARGETS *b) {
+    if (a->port != b->port || a->count != b->count)
+        return false;
+    for (size_t i = 0; i < a->count; i++) {
+        bool found = false;
+        for (size_t j = 0; j < b->count && !found; j++)
+            found = !strcmp(a->addresses[i], b->addresses[j]);
+        if (!found)
+            return false;
+    }
+    return true;
+}
+
 static inline bool OminullResolveHub(const char *url,
                                      OMINULL_HUB_TARGETS *targets) {
     memset(targets, 0, sizeof(*targets));
