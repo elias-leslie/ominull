@@ -58,6 +58,7 @@ type Server struct {
 	publicURLAt      time.Time
 	agentHubURL      string
 	agentVersion     string
+	build            string // git commit the hub binary was built from (scripts/deploy-hub.sh)
 	httpServer       *http.Server
 	tlsServer        *http.Server
 	tlsOpts          TLSOptions
@@ -630,7 +631,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if heldAdminKey {
 		embeddedKey = s.adminKey
 	}
-	doc, nonce := consoleDocument(embeddedKey, s.agentVersion, viewer)
+	doc, nonce := consoleDocument(embeddedKey, s.hubVersion(), viewer)
 	setConsoleSecurityHeaders(w, nonce)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -643,7 +644,7 @@ func (s *Server) consoleGateFor(w http.ResponseWriter) []byte {
 	nonce := newCSPNonce()
 	setConsoleSecurityHeaders(w, nonce)
 	issuer, _ := s.store.GetSetting("oidc.issuer")
-	return consoleGateDocument(strings.TrimSpace(issuer) != "", nonce, s.agentVersion)
+	return consoleGateDocument(strings.TrimSpace(issuer) != "", nonce, s.hubVersion())
 }
 
 // consoleSessionCookie carries a short-lived signed assertion that this browser
@@ -1249,6 +1250,21 @@ func compareVersions(a, b string) int {
 	return 0
 }
 
+// SetBuild records the git commit this hub binary was built from. A hub
+// deploys on its own (build, copy, restart) while the agent release stays the
+// same, so the console's asset version and the deploy check need it.
+func (s *Server) SetBuild(build string) { s.build = strings.TrimSpace(build) }
+
+// hubVersion names what this hub serves: the agent release it offers, plus
+// the build when known, so every hub deploy changes the console's asset
+// version and service worker cache.
+func (s *Server) hubVersion() string {
+	if s.build == "" {
+		return s.agentVersion
+	}
+	return s.agentVersion + "-" + s.build
+}
+
 // desiredAgentVersion resolves the fleet-wide target agent version: the operator-set
 // value if newer, otherwise the version bundled with this hub build.
 func (s *Server) desiredAgentVersion() string {
@@ -1739,6 +1755,7 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"staged_rollouts":   rollouts,
 		"latest_version":    latest,
+		"hub_build":         s.build,
 		"endpoints":         observed,
 		"outdated":          outdated,
 		"retired":           retired,

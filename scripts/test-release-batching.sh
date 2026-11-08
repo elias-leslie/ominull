@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# release.sh batches hub releases: none when nothing shipped changed since the
-# last "Release" commit, and goes out whenever something shipped changed.
+# release.sh batches agent releases: none when nothing the agents ship changed
+# since the last "Release" commit (a hub change deploys alone through
+# scripts/deploy-hub.sh), and goes out whenever something shipped changed.
 # Runs release.sh in a scratch repository; a run that passes the guard goes on
-# and stops at whatever the scratch repository lacks (the deploy hook).
+# and stops at whatever the scratch repository lacks (scripts/version.sh).
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
@@ -33,7 +34,7 @@ expect() {
         failures=$((failures + 1))
     fi
 }
-passed="Deploy hook is missing"
+passed="version.sh"
 expect_not_batched() {
     local out
     out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
@@ -44,7 +45,7 @@ expect_not_batched() {
     fi
 }
 
-expect "Nothing the hub or agents ship has changed since Release 1.0.0; nothing to release."
+expect "Nothing the agents ship has changed since Release 1.0.0; nothing to release (a hub change: scripts/deploy-hub.sh)."
 echo 'int y;' >> agent/tests/t.c
 echo 'package pkg // test' > hub/pkg/a_test.go
 mkdir -p hub/pkg/x/testdata && echo '{}' > hub/pkg/x/testdata/f.json
@@ -54,7 +55,10 @@ expect_not_batched --agents-only # rolling agents is not a hub release
 echo '// changed' >> hub/pkg/a.go
 expect "nothing to release" # only committed changes count
 git add -A && git commit -qm "hub change"
-expect "${passed}" # a hub change goes out at once, however recent the last release
+expect "nothing to release" # a hub change deploys on its own (scripts/deploy-hub.sh)
+echo 'int z;' > agent/a.c
+git add -A && git commit -qm "agent change"
+expect "${passed}" # an agent change goes out at once, however recent the last release
 git add -A
 GIT_COMMITTER_DATE="$(date -d "-2 days" -R)" git commit -q --allow-empty -m "Release 1.0.1: older"
 expect "nothing to release"

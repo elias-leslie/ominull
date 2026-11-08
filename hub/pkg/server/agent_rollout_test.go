@@ -368,3 +368,37 @@ func TestUpdateStatusListsRetiredReleases(t *testing.T) {
 		t.Fatalf("retired releases not listed: %v", got)
 	}
 }
+
+// A hub deploys on its own (scripts/deploy-hub.sh), so it reports the build
+// it runs and keys the console's asset version on it: the agent release it
+// offers does not change with every hub deploy.
+func TestUpdateStatusReportsHubBuildAndConsoleVersionFollowsIt(t *testing.T) {
+	t.Parallel()
+	s, db := setupTestServer(t)
+	defer db.Close()
+	s.agentVersion = "1.2.0"
+	if s.hubVersion() != "1.2.0" {
+		t.Fatalf("without a build the console version is the agent release, got %q", s.hubVersion())
+	}
+	s.SetBuild(" 0123abcd4567 ")
+	r := httptest.NewRequest("GET", "/api/v1/agents/update-status", nil)
+	r.Header.Set("X-API-Key", "mock_admin_token")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	var body struct {
+		Latest string `json:"latest_version"`
+		Build  string `json:"hub_build"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Latest != "1.2.0" || body.Build != "0123abcd4567" {
+		t.Fatalf("update-status = %s", w.Body.String())
+	}
+	if s.hubVersion() != "1.2.0-0123abcd4567" {
+		t.Fatalf("console version = %q", s.hubVersion())
+	}
+	if asset, ok := s.consoleAssetFor("sw.js"); ok && !strings.Contains(string(asset.body), "1.2.0-0123abcd4567") {
+		t.Fatal("the service worker cache name does not follow the hub build")
+	}
+}

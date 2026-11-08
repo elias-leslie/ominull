@@ -2,19 +2,18 @@
 # Canonical Ominull release workflow.
 #
 # The order is part of the update contract: build and sign the native artifacts,
-# install the hub package, then ask the running hub to roll the retained fleet.
-# Every endpoint release is a signed native package. The hub package is
-# installed first, then the retained Linux and Windows agents self-update.
+# deploy the hub (scripts/deploy-hub.sh: build, copy, restart), publish the agent
+# packages on it (scripts/publish-agents.sh), then ask the running hub to roll the
+# retained fleet. Every endpoint release is a signed native package. A hub-only
+# change needs none of this: scripts/deploy-hub.sh alone puts it live.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Unset OMINULL_HUB_URL / OMINULL_ADMIN_KEY come from the owner's production
 # config and the hub's own key file (scripts/lib/hub-admin-key.sh).
 . "${ROOT_DIR}/scripts/lib/hub-admin-key.sh"
-case "${1:-}" in -h|--help) ;; *) hub_admin_key_from_config || exit 1 ;; esac
+case " $* " in *" -h "*|*" --help "*|*" --hub-only "*) ;; *) hub_admin_key_from_config || exit 1 ;; esac
 HUB_URL="${OMINULL_HUB_URL:-}"
-# The hub reaches Proxmox only through the hub-install key (scripts/deploy-hub.sh).
-DEPLOY_CMD="${OMINULL_DEPLOY_CMD:-${ROOT_DIR}/scripts/deploy-hub.sh}"
 
 VERSION=""
 SKIP_TESTS=0
@@ -38,7 +37,7 @@ Options:
   --canary IDS     comma-separated endpoint IDs; one request, the hub rolls these,
                    then the rest once they are healthy (halts if not)
   --skip-tests     skip local quality tests (never skips signing or live checks)
-  --hub-only       build, sign, install hub, and publish artifacts; do not roll agents
+  --hub-only       deploy the hub only (runs scripts/deploy-hub.sh: no version, no signing)
   --agents-only    skip build/deploy; roll agents against an already-live hub
   --no-wait        queue the update and return without claiming convergence
 EOF
@@ -56,20 +55,25 @@ while [ "$#" -gt 0 ]; do
         *) echo "[-] Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+if [ "${DO_AGENTS}" -eq 0 ]; then
+    exec "${ROOT_DIR}/scripts/deploy-hub.sh"
+fi
+
 if [ "${DO_HUB}" -eq 1 ]; then
     # The last release is the last "Release X.Y.Z" commit. What ships is the
-    # hub, the agents and their packaging; tests and docs change no bytes.
+    # agents and their packaging; tests and docs change no bytes, and a hub
+    # change deploys on its own (scripts/deploy-hub.sh).
     last_release="$(git -C "${ROOT_DIR}" log -1 --format='%H %ct %s' --grep='^Release [0-9]' 2>/dev/null || true)"
     if [ -n "${last_release}" ]; then
         read -r last_sha _ last_subject <<<"${last_release}"
         last_name="$(printf '%s' "${last_subject}" | cut -d' ' -f1-2 | sed -E 's/[.:]+$//')"
         # Committed changes only: a rerun after a failed run must not count
         # the version bump that run left in the working tree.
-        shipped="$(git -C "${ROOT_DIR}" diff --name-only "${last_sha}" HEAD -- hub agent packaging screen \
+        shipped="$(git -C "${ROOT_DIR}" diff --name-only "${last_sha}" HEAD -- agent packaging screen \
             scripts/build.sh scripts/build-packages.sh scripts/build-linux-agent.sh scripts/build-bpf.sh \
             ':(exclude)*_test.go' ':(exclude)agent/tests' ':(exclude,glob)hub/**/testdata/**' ':(exclude)*.md')"
         if [ -z "${shipped}" ]; then
-            echo "[-] Nothing the hub or agents ship has changed since ${last_name}; nothing to release." >&2
+            echo "[-] Nothing the agents ship has changed since ${last_name}; nothing to release (a hub change: scripts/deploy-hub.sh)." >&2
             exit 1
         fi
     fi
@@ -78,21 +82,6 @@ fi
 if [ "${OMINULL_SIGNING_ROUTINE:-0}" = 1 ] && [ -z "${CANARY_IDS}" ]; then
     CANARY_IDS="${ROUTINE_CANARIES}"
     echo "[*] Routine-signed release: canaries first (${CANARY_IDS})."
-fi
-
-if [ "${DO_HUB}" -eq 1 ]; then
-    [ -x "${DEPLOY_CMD}" ] || {
-        echo "[-] Deploy hook is missing or not executable: ${DEPLOY_CMD}" >&2
-        exit 1
-    }
-    # Before anything is built or signed: a hub-install key that does not answer
-    # would leave a signed release with nowhere to go.
-    # It needs OMINULL_HUB_URL, OMINULL_ADMIN_KEY (read from the hub when unset) and the hub CA, --hub-only included.
-    if [ -z "${OMINULL_DEPLOY_CMD:-}" ] && ! "${DEPLOY_CMD}" --check; then
-        echo "[-] Nothing was built or signed. Until root has installed the hub-install key" >&2
-        echo "    (scripts/pve/install.sh), deploy the old way: OMINULL_DEPLOY_CMD=scripts/deploy_remote.sh" >&2
-        exit 1
-    fi
 fi
 
 if [ -n "${VERSION}" ]; then
@@ -122,7 +111,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
     bash "${ROOT_DIR}/scripts/test-release-batching.sh"
     bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" "${ROOT_DIR}/scripts/sign-trust-bundle.sh" \
-        "${ROOT_DIR}/scripts/deploy-hub.sh" "${ROOT_DIR}/scripts/pve/install.sh" "${ROOT_DIR}/scripts/lib/hub-admin-key.sh" \
+        "${ROOT_DIR}/scripts/deploy-hub.sh" "${ROOT_DIR}/scripts/publish-agents.sh" "${ROOT_DIR}/scripts/pve/install.sh" "${ROOT_DIR}/scripts/lib/hub-admin-key.sh" \
         "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
         "${ROOT_DIR}/scripts/retire-hub-host-agent.sh" \
         "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
@@ -189,11 +178,9 @@ if [ "${DO_HUB}" -eq 1 ]; then
     echo "[*] Verifying native package lifecycle in an isolated root."
     OMINULL_RELEASE_VERSION="${VERSION}" \
         "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
-    echo "[*] Installing hub package first and publishing signed endpoint packages."
-    OMINULL_RELEASE_VERSION="${VERSION}" \
-        "${DEPLOY_CMD}"
-    echo "[*] Syncing the hub's package library with the released packages."
-    "${ROOT_DIR}/scripts/sync-package-library.sh"
+    echo "[*] Deploying the hub first, then publishing the signed endpoint packages on it."
+    "${ROOT_DIR}/scripts/deploy-hub.sh"
+    "${ROOT_DIR}/scripts/publish-agents.sh" "${VERSION}"
     # A workstation copy of ominullctl left from an older release misread
     # newer command lines (agents update took a second id as the version), so
     # an existing copy on the operator's PATH is refreshed with this build.

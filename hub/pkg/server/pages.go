@@ -67,7 +67,7 @@ func (s *Server) pageViewer(r *http.Request) (accessOperator, bool) {
 func (s *Server) servePage(w http.ResponseWriter, r *http.Request, name string, data pageData) {
 	pageOnce.Do(loadPages)
 	data.Nonce = newCSPNonce()
-	data.Version = s.agentVersion
+	data.Version = s.hubVersion()
 	var buf bytes.Buffer
 	if err := pageTemplates[name].Execute(&buf, data); err != nil {
 		log.Printf("[!] console page %s: %v", name, err)

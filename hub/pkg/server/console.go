@@ -336,7 +336,7 @@ func (s *Server) consoleAssetFor(name string) (consoleAsset, bool) {
 	if !bytes.Contains(asset.body, []byte(hubVersionPlaceholder)) {
 		return asset, true
 	}
-	body := bytes.ReplaceAll(asset.body, []byte(hubVersionPlaceholder), []byte(jsStringEscape(s.agentVersion)))
+	body := bytes.ReplaceAll(asset.body, []byte(hubVersionPlaceholder), []byte(jsStringEscape(s.hubVersion())))
 	sum := sha256.Sum256(body)
 	return consoleAsset{
 		body:        body,

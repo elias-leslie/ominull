@@ -36,6 +36,10 @@ const (
 	defaultAgentVersion = "1.8.116"
 )
 
+// version is the git commit the binary was built from, set by
+// scripts/deploy-hub.sh (-ldflags "-X main.version=<commit>").
+var version string
+
 func main() {
 	configPath := findConfigArg(os.Args[1:])
 	if configPath != "" {
@@ -188,6 +192,10 @@ func main() {
 		int(retention.FlowRollups.Hours()/24), int(retention.AnomalyCounts.Hours()/24))
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
+	srv.SetBuild(version)
+	if version != "" {
+		log.Printf("[*] Hub build %s, offering agent %s", version, resolvedAgentVersion)
+	}
 	srv.SetTerminalLimits(terminal.Limits{MaxDuration: *terminalMaxDuration, IdleTimeout: *terminalIdleTimeout, PerEndpoint: *terminalPerEndpoint, PerTenant: *terminalPerTenant})
 	srv.SetTLS(server.TLSOptions{
 		Listen:      *tlsListen,
