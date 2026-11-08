@@ -144,7 +144,7 @@ An administrator enrolls a Linux host directly with `scripts/enroll-linux-host.s
 [--monitor-only REASON] -- RUN...`, where RUN runs a command as root on the host (`ssh HOST sudo -n`, or
 `ssh root@davion-gem pct exec ID --`); it needs `OMINULL_HUB_URL` and `OMINULL_ADMIN_KEY`. Agent VMs use role
 `agent`; a host the hub must never isolate also gets `--monitor-only`. Aico's Status row `ominull.fleet.coverage`
-(`scripts/fleet_coverage.py`, user timer from `scripts/install-fleet-coverage.sh` on the workstation, every 15
+(`scripts/fleet_coverage.py`, Aico routine `ominull-fleet-coverage` from `scripts/install-fleet-coverage.sh` on the workstation, every 15
 minutes) names the fleet machines in Aico Status that have no enrolled agent.
 
 ## Package lifecycle and updates
