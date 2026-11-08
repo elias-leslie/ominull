@@ -981,7 +981,7 @@
       var base = path.split(/[\\/]/).pop();
       return { endpoint_id: ep, hostname: (host[ep] || {}).hostname || "", process: base, process_path: path, direction: dir,
         peer_ip: peer, peer_name: o.name || "", peer_host: o.peerHost || "", peer_endpoint: o.peerEp || "", country: o.country || "",
-        port: port, protocol: proto, flows: flows, measured_flows: o.unmeasured ? 0 : flows, bytes_in: bin, bytes_out: bout,
+        port: port, protocol: proto, proto: proto === "UDP" ? 17 : 6, flows: flows, measured_flows: o.unmeasured ? 0 : flows, bytes_in: bin, bytes_out: bout,
         blocked: o.blocked || 0, first_min: o.first || 1440, last_min: o.last || 1, new: !!o.isNew, findings: o.findings || null };
     }
     function finding(ids, worst, title, type, open, held) {
@@ -1040,8 +1040,12 @@
       return c;
     }).filter(function (c) {
       if (q.get("endpoint_id") && c.endpoint_id !== q.get("endpoint_id")) return false;
+      if (q.get("dst_ip") && c.peer_ip !== q.get("dst_ip")) return false;
+      if (q.get("port") && String(c.port) !== q.get("port")) return false;
       return !needle || [c.endpoint_id, c.hostname, c.process, c.process_path, c.peer_ip, c.peer_name, c.peer_host, c.country, String(c.port)].some(function (v) { return String(v || "").toLowerCase().indexOf(needle) >= 0; });
     });
+    var by = { volume: function (a, b) { return b.bytes_in + b.bytes_out - a.bytes_in - a.bytes_out; }, recent: function (a, b) { return Date.parse(b.last_seen) - Date.parse(a.last_seen); }, flows: function (a, b) { return b.flows - a.flows; } }[q.get("sort")];
+    if (by) rows.sort(by);
     var shown = [], matching = 0;
     rows.forEach(function (c) {
       counts.all++;
@@ -1066,7 +1070,9 @@
 
   function demoTrafficOverview(q) {
     var w = demoTrafficWindow(q);
-    var conv = demoTrafficConversations(new URLSearchParams("range=" + (q.get("range") || "1h") + (q.get("endpoint_id") ? "&endpoint_id=" + q.get("endpoint_id") : ""))).conversations;
+    var scope = new URLSearchParams({ range: q.get("range") || "1h" });
+    ["endpoint_id", "dst_ip", "port"].forEach(function (k) { if (q.get(k)) scope.set(k, q.get(k)); });
+    var conv = demoTrafficConversations(scope).conversations;
     var stepMin = { 0.25: 0.5, 1: 1, 6: 5, 24: 15, 168: 120, 720: 1440 }[w.hours] || 1;
     var n = Math.round(w.hours * 60 / stepMin) + 1;
     var tot = { bytes_in: 0, bytes_out: 0, flow_count: 0, block_count: 0 };
@@ -1114,8 +1120,7 @@
       if (q.get("endpoint_id") && c.endpoint_id !== q.get("endpoint_id")) return;
       if (q.get("dst_ip") && c.peer_ip !== q.get("dst_ip")) return;
       if (q.get("process") && c.process !== q.get("process") && c.process_path !== q.get("process")) return;
-      if (q.get("peer") && c.peer_ip !== q.get("peer")) return;
-      if (q.get("protocol") && c.protocol !== q.get("protocol")) return;
+      if (q.get("protocol") && String(c.proto) !== q.get("protocol")) return;
       if (q.get("port") && String(c.port) !== q.get("port")) return;
       var local = (arrayOf(DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.id === c.endpoint_id; })[0] || {}).ip || "10.0.4.2";
       if (q.get("src_ip") && q.get("src_ip") !== local) return;
@@ -4888,10 +4893,16 @@
     state.trafficFilter = tf;
     /* A new scope shows as loading rather than as the old scope's rows under
        the new filter; "Show more" keeps the rows it extends. */
-    if (!(Object.keys(patch).length === 1 && patch.limit)) { state.trafficConversations = null; if (patch.range || patch.endpoint_id !== undefined || patch.clear || patch.peer !== undefined) state.trafficOverview = null; }
+    if (!(Object.keys(patch).length === 1 && patch.limit)) {
+      state.trafficConversations = null;
+      if (patch.clear || patch.range || TRAFFIC_SCOPE.some(function (k) { return patch[k] !== undefined; })) state.trafficOverview = null;
+    }
     state.trafficError = "";
     renderBody();
     refresh();
+  }
+  function updateTraffic() {
+    if (trafficUI && state.section === "traffic") trafficUI.update({ overview: state.trafficOverview, conversations: state.trafficConversations, error: state.trafficError });
   }
   function renderTraffic() {
     if (!window.OminullTraffic) {
@@ -4916,7 +4927,8 @@
           if (a) openRoute(a.key); else toast("No host record for " + endpointId + ".");
         },
         openFindings: function (c) {
-          var held = c.findings && c.findings.held_reason;
+          /* An open finding is on the main list whatever the worst one's hold. */
+          var held = c.findings && !c.findings.open && c.findings.held_reason;
           state.alertsFilter = { page: 1, limit: 50, endpoint_id: c.endpoint_id, search: c.peer_ip, hunt: held === "hunt", held: !!held && held !== "hunt" };
           go("alerts");
         },
@@ -4932,7 +4944,7 @@
         }
       });
     }
-    trafficUI.update({ overview: state.trafficOverview, conversations: state.trafficConversations, error: state.trafficError });
+    updateTraffic();
   }
 
   /* ------------------------------------------------------------- sheet */
@@ -11150,6 +11162,7 @@
     var refocus = focused && focused !== document.body && view.contains(focused) ? focused : null;
     var focusTitle = refocus && refocus.getAttribute("title");
     var focusLabel = refocus && refocus.getAttribute("aria-label");
+    var focusKey = refocus && refocus.getAttribute("data-key");
     var selStart = null, selEnd = null;
     if (refocus && typeof refocus.selectionStart === "number") {
       try { selStart = refocus.selectionStart; selEnd = refocus.selectionEnd; } catch (e) { selStart = null; }
@@ -11179,6 +11192,8 @@
 
     if (!state.demo) {
       var failed = Object.keys(resources).filter(function (key) { return resources[key].error && resources[key].updated; });
+      /* Topology and Traffic keep their DOM between renders. */
+      Array.prototype.slice.call(view.children).forEach(function (n) { if (n.classList.contains("pending")) n.remove(); });
       if (failed.length) view.prepend(h("div", {cls:"pending", role:"status"},
         h("span", {text:failed.map(function (key) { return key.split("?")[0].replace("/api/v1/", "") + ": " + resources[key].error.message + " (last success " + new Date(resources[key].updated).toLocaleString() + ")"; }).join(" · ")}),
         h("button", {cls:"btn", type:"button", text:"Retry delayed data", on:{click:function () { failed.forEach(function (key) { resources[key].retryAt=0; }); refresh(); }}})));
@@ -11196,6 +11211,7 @@
 
     if (refocus && !view.contains(refocus)) {
       refocus = Array.prototype.find.call(view.querySelectorAll("button, input, a"), function (el) {
+        if (focusKey) return el.getAttribute("data-key") === focusKey;
         return focusTitle ? el.getAttribute("title") === focusTitle : focusLabel && el.getAttribute("aria-label") === focusLabel;
       });
     }
@@ -11284,7 +11300,7 @@
 
   /* The window and scope the summary and the conversations share; the
      conversation list adds its own search, mark, direction and page size. */
-  var TRAFFIC_SCOPE = ["endpoint_id", "src_ip", "dst_ip", "peer", "process", "domain", "country", "protocol", "port", "direction", "action", "hash", "user", "attribution"];
+  var TRAFFIC_SCOPE = ["endpoint_id", "src_ip", "dst_ip", "process", "domain", "country", "protocol", "port", "direction", "action", "hash", "user", "attribution"];
   function trafficQuery() {
     var tf = state.trafficFilter || { range: "1h" };
     var qs = "?range=" + encodeURIComponent(tf.range || "1h");
@@ -11298,6 +11314,7 @@
     if (tf.q) qs += "&q=" + encodeURIComponent(tf.q);
     if (tf.mark) qs += "&mark=" + encodeURIComponent(tf.mark);
     if (tf.dir) qs += "&dir=" + encodeURIComponent(tf.dir);
+    if (tf.sort) qs += "&sort=" + encodeURIComponent(tf.sort);
     if (tf.limit) qs += "&limit=" + encodeURIComponent(tf.limit);
     return qs;
   }
@@ -11464,10 +11481,12 @@
     }
     if (state.section === "traffic") {
       var qs = trafficQuery(), cqs = trafficConversationQuery();
-      jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { if (qs === trafficQuery()) state.trafficOverview = d || null; }));
+      /* refresh() skips its render while a control has focus, and the search
+         box and the dropdowns keep it, so the answers paint here. */
+      jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { if (qs === trafficQuery()) { state.trafficOverview = d || null; updateTraffic(); } }));
       jobs.push(request("/api/v1/traffic/conversations" + cqs).then(function (d) {
-        if (cqs === trafficConversationQuery()) { state.trafficConversations = d || null; state.trafficError = ""; }
-      }, function (e) { if (cqs === trafficConversationQuery()) state.trafficError = (e && e.message) || "request failed"; }));
+        if (cqs === trafficConversationQuery()) { state.trafficConversations = d || null; state.trafficError = ""; updateTraffic(); }
+      }, function (e) { if (cqs === trafficConversationQuery()) { state.trafficError = (e && e.message) || "request failed"; updateTraffic(); } }));
     }
     if (state.section === "topology") jobs.push(loadTopology());
 

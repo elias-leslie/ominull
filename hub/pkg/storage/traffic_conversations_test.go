@@ -142,26 +142,139 @@ func TestTrafficConversationsFoldAndMark(t *testing.T) {
 	}
 }
 
-// The peer filter finds a conversation's flows whichever end the peer is on.
-func TestTrafficFlowsPeerFilter(t *testing.T) {
+// Agents report this host's end as the source whichever way the packet went.
+// A datagram received is usually the answer to this host's own query, so it
+// joins the outbound row; one received on a service port is a client reaching
+// the service, and the peer is that client, never this host.
+func TestTrafficConversationsInboundUsesTheAgentLayout(t *testing.T) {
 	store := conversationStore(t)
 	now := time.Now().UTC()
-	in := convEvent(now.Add(-3*time.Minute), "/usr/sbin/sshd", "10.0.0.5", 50200, "10.0.0.10", 22, "PERMIT")
-	in.Direction = "INBOUND"
+	udp := func(at time.Duration, path string, sport int, dst string, dport int, dir string) Event {
+		e := convEvent(now.Add(at), path, "10.0.0.10", sport, dst, dport, "PERMIT")
+		e.Protocol, e.Direction = 17, dir
+		return e
+	}
 	batch := []Event{
-		convEvent(now.Add(-5*time.Minute), "/usr/sbin/sshd", "10.0.0.10", 22, "10.0.0.5", 50123, "PERMIT"),
-		in,
-		convEvent(now.Add(-2*time.Minute), "/usr/bin/curl", "10.0.0.10", 50001, "192.0.2.1", 443, "PERMIT"),
+		// systemd-resolved asks 10.0.0.1 and hears back.
+		udp(-5*time.Minute, "/usr/lib/resolved", 45000, "10.0.0.1", 53, "OUTBOUND"),
+		udp(-5*time.Minute, "/usr/lib/resolved", 45000, "10.0.0.1", 53, "INBOUND"),
+		// dnsmasq answers two sockets of one client.
+		udp(-4*time.Minute, "/usr/sbin/dnsmasq", 53, "10.0.0.7", 51000, "INBOUND"),
+		udp(-3*time.Minute, "/usr/sbin/dnsmasq", 53, "10.0.0.7", 51001, "INBOUND"),
 	}
 	if err := store.InsertTelemetryBatch(batch, "web-01", ""); err != nil {
 		t.Fatalf("InsertTelemetryBatch: %v", err)
 	}
-	res, err := store.QueryTrafficFlows(TrafficFilter{TenantID: "default", Range: "1h", Peer: "10.0.0.5", Limit: 10})
+	res, err := store.QueryTrafficConversations(TrafficFilter{TenantID: "default", Range: "1h"}, ConversationQuery{})
 	if err != nil {
-		t.Fatalf("QueryTrafficFlows: %v", err)
+		t.Fatalf("QueryTrafficConversations: %v", err)
 	}
-	if res.Total != 2 {
-		t.Fatalf("peer 10.0.0.5 is the destination of one flow and the source of another: %+v", res)
+	if len(res.Conversations) != 2 {
+		t.Fatalf("want one row each for resolved and dnsmasq: %+v", res.Conversations)
+	}
+	resolved := findConversation(t, res.Conversations, "resolved", "10.0.0.1")
+	if resolved.Direction != "out" || resolved.Port != 53 || resolved.Flows != 2 {
+		t.Fatalf("query and answer are one outbound row on 53: %+v", resolved)
+	}
+	dnsmasq := findConversation(t, res.Conversations, "dnsmasq", "10.0.0.7")
+	if dnsmasq.Direction != "in" || dnsmasq.Port != 53 || dnsmasq.Flows != 2 || dnsmasq.Proto != 17 {
+		t.Fatalf("the client reaching the service is one inbound row on 53: %+v", dnsmasq)
+	}
+}
+
+// A finding's port tells which row it is about: the service port of an outbound
+// row, a client port of a served one.
+func TestTrafficConversationFindingsMatchThePort(t *testing.T) {
+	store := conversationStore(t)
+	now := time.Now().UTC()
+	batch := []Event{
+		convEvent(now.Add(-5*time.Minute), "/usr/sbin/nginx", "10.0.0.10", 443, "10.0.0.5", 50123, "PERMIT"),
+		convEvent(now.Add(-5*time.Minute), "/usr/sbin/nginx", "10.0.0.10", 50200, "10.0.0.5", 8080, "PERMIT"),
+	}
+	if err := store.InsertTelemetryBatch(batch, "web-01", ""); err != nil {
+		t.Fatalf("InsertTelemetryBatch: %v", err)
+	}
+	finding := AnomalyAlert{ID: "f-out", TenantID: "default", EndpointID: "ep-1", AnomalyType: "UNUSUAL_PORT", Severity: "HIGH", Title: "Out",
+		ProcessPath: "/usr/sbin/nginx", DstIP: "10.0.0.5", DstPort: 8080, Timestamp: now.Add(-4 * time.Minute)}
+	if err := store.CreateAnomalyAlert(finding); err != nil {
+		t.Fatalf("CreateAnomalyAlert: %v", err)
+	}
+	res, err := store.QueryTrafficConversations(TrafficFilter{TenantID: "default", Range: "1h"}, ConversationQuery{})
+	if err != nil {
+		t.Fatalf("QueryTrafficConversations: %v", err)
+	}
+	for _, c := range res.Conversations {
+		if flagged := c.Findings != nil; flagged != (c.Direction == "out") {
+			t.Errorf("only the outbound row to 8080 carries the finding: %+v %+v", c, c.Findings)
+		}
+	}
+	finding.ID, finding.DstPort = "f-in", 50123
+	if err := store.CreateAnomalyAlert(finding); err != nil {
+		t.Fatalf("CreateAnomalyAlert: %v", err)
+	}
+	store.trafficConv = conversationCache{}
+	if res, err = store.QueryTrafficConversations(TrafficFilter{TenantID: "default", Range: "1h"}, ConversationQuery{Direction: "in"}); err != nil {
+		t.Fatalf("QueryTrafficConversations: %v", err)
+	}
+	if len(res.Conversations) != 1 || res.Conversations[0].Findings == nil || res.Conversations[0].Findings.IDs[0] != "f-in" {
+		t.Fatalf("a finding on the client's port is about the served row: %+v", res.Conversations)
+	}
+}
+
+// The order is applied before the cut, and a limit over the cap is the cap.
+func TestTrafficConversationsSortAndLimit(t *testing.T) {
+	store := conversationStore(t)
+	now := time.Now().UTC()
+	loud := convEvent(now.Add(-30*time.Minute), "/usr/bin/rsync", "10.0.0.10", 50001, "192.0.2.1", 443, "PERMIT")
+	loud.BytesIn = 1 << 30
+	recent := convEvent(now.Add(-1*time.Minute), "/usr/bin/curl", "10.0.0.10", 50002, "192.0.2.2", 443, "PERMIT")
+	blocked := convEvent(now.Add(-20*time.Minute), "/usr/bin/nc", "10.0.0.10", 50003, "192.0.2.3", 445, "BLOCK")
+	if err := store.InsertTelemetryBatch([]Event{loud, recent, blocked}, "web-01", ""); err != nil {
+		t.Fatalf("InsertTelemetryBatch: %v", err)
+	}
+	for by, want := range map[string]string{"": "nc", "volume": "rsync", "recent": "curl"} {
+		res, err := store.QueryTrafficConversations(TrafficFilter{TenantID: "default", Range: "1h"}, ConversationQuery{Sort: by, Limit: 1})
+		if err != nil {
+			t.Fatalf("%q: %v", by, err)
+		}
+		if len(res.Conversations) != 1 || res.Conversations[0].Process != want || res.Matching != 3 || !res.Truncated {
+			t.Errorf("sort %q: want %s first of 3, got %+v", by, want, res)
+		}
+	}
+	res, err := store.QueryTrafficConversations(TrafficFilter{TenantID: "default", Range: "1h"}, ConversationQuery{Limit: MaxConversations + 200})
+	if err != nil {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if len(res.Conversations) != 3 {
+		t.Fatalf("a limit over the cap must not shrink the list: %d rows", len(res.Conversations))
+	}
+}
+
+// A host enrolled inside the window has no history before it: its peers are
+// not new even though the fleet's history reaches back.
+func TestTrafficConversationsNewIsPerHost(t *testing.T) {
+	store := conversationStore(t)
+	now := time.Now().UTC()
+	if err := store.InsertTelemetryBatch([]Event{convEvent(now.Add(-48*time.Hour), "/usr/bin/curl", "10.0.0.10", 50001, "192.0.2.1", 443, "PERMIT")}, "web-01", ""); err != nil {
+		t.Fatalf("InsertTelemetryBatch: %v", err)
+	}
+	veteran := convEvent(now.Add(-5*time.Minute), "/usr/bin/python3", "10.0.0.10", 50002, "192.0.2.9", 443, "PERMIT")
+	newcomer := convEvent(now.Add(-5*time.Minute), "/usr/bin/python3", "10.0.0.20", 50003, "192.0.2.9", 443, "PERMIT")
+	newcomer.EndpointID = "ep-2"
+	if err := store.InsertTelemetryBatch([]Event{veteran, newcomer}, "web-01", ""); err != nil {
+		t.Fatalf("InsertTelemetryBatch: %v", err)
+	}
+	res, err := store.QueryTrafficConversations(TrafficFilter{TenantID: "default", Range: "1h"}, ConversationQuery{})
+	if err != nil {
+		t.Fatalf("QueryTrafficConversations: %v", err)
+	}
+	if !res.NewKnown {
+		t.Fatalf("the fleet's history reaches back: %+v", res)
+	}
+	for _, c := range res.Conversations {
+		if want := c.EndpointID == "ep-1"; c.New != want {
+			t.Errorf("%s: new=%v, want %v", c.EndpointID, c.New, want)
+		}
 	}
 }
 

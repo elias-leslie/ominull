@@ -304,13 +304,27 @@
   assert(document.querySelector('.tf-workspace').dataset.panel==='open' && panel.contains(document.activeElement),'Details did not open and take focus');
   assert([...panel.querySelectorAll('button')].some(b=>/Open finding/.test(b.textContent)),'No way from a flagged conversation to its finding');
   assert(!/\bnull\b|undefined/.test(panel.textContent),'Panel prints null or undefined');
+  const key=opener.dataset.key;
+  [...panel.querySelectorAll('.tf-flow')][0]?.click(); await wait();
+  if(document.querySelector('.sheet')){
+   document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); await wait();
+   assert(!document.querySelector('.sheet') && document.querySelector('.tf-workspace').dataset.panel==='open','Escape on a sheet closed the details too');
+  }
+  await a.refresh(); await wait();
   document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); await wait();
   assert(document.querySelector('.tf-workspace').dataset.panel!=='open','Escape did not close the details');
-  assert(document.activeElement && document.activeElement.classList.contains('tf-open'),'Focus did not return to the row');
+  assert(document.activeElement && document.activeElement.dataset.key===key,'Focus did not return to its own row after a poll');
+  const second=rows()[1].querySelector('.tf-open'); const secondKey=second.dataset.key; second.focus();
+  await a.refresh(); await wait();
+  assert(document.activeElement && document.activeElement.dataset.key===secondKey,'A poll moved focus to another row');
   [...document.querySelectorAll('.tf-filters .btn')].find(b=>b.textContent==='Clear filters').click();
   for(let i=0;i<100 && a.state.trafficFilter.mark;i++) await wait();
   assert(!a.state.trafficFilter.mark,'Clear filters left the mark on');
-  a.state.trafficFilter=saved; a.state.section='assets'; a.render();
+  const box=document.querySelector('.tf-search'); box.focus(); box.value='nginx'; box.dispatchEvent(new Event('input',{bubbles:true}));
+  for(let i=0;i<100 && !(rows().length && rows().every(r=>/nginx/.test(r.textContent)));i++) await wait();
+  assert(document.activeElement===box,'Search lost focus');
+  assert(rows().length && rows().every(r=>/nginx/.test(r.textContent)),'The list did not follow the search while the box had focus');
+  box.value=''; a.state.trafficFilter=saved; a.state.section='assets'; a.render();
  });
  await check('a gated-looking action completes on the first request', async () => {
   const original=window.fetch;a.state.demo=false;const calls=[];

@@ -34,6 +34,7 @@ type TrafficConversation struct {
 	Country       string                `json:"country,omitempty"`
 	Port          int                   `json:"port"`
 	Protocol      string                `json:"protocol"`
+	Proto         int                   `json:"proto"` // the protocol number, for filters
 	Flows         int64                 `json:"flows"`
 	MeasuredFlows int64                 `json:"measured_flows"`
 	BytesIn       int64                 `json:"bytes_in"`
@@ -95,6 +96,9 @@ type ConversationQuery struct {
 	Mark      string
 	Direction string
 	Limit     int
+	// Sort orders the matching rows before the cut: "" (needs a look first),
+	// "volume", "recent" or "flows".
+	Sort string
 	// EphemeralPortFrom is the tuning line between service and client ports.
 	EphemeralPortFrom int
 }
@@ -120,8 +124,11 @@ func (s *Store) QueryTrafficConversations(filter TrafficFilter, q ConversationQu
 	if q.EphemeralPortFrom <= 0 {
 		q.EphemeralPortFrom = 32768
 	}
-	if q.Limit <= 0 || q.Limit > 1000 {
+	if q.Limit <= 0 {
 		q.Limit = 300
+	}
+	if q.Limit > MaxConversations {
+		q.Limit = MaxConversations
 	}
 	now := time.Now().UTC()
 	cacheKey := filter.CacheKey() + "|" + strconv.Itoa(q.EphemeralPortFrom)
@@ -176,13 +183,34 @@ func (s *Store) QueryTrafficConversations(filter TrafficFilter, q ConversationQu
 		if q.Direction != "" && c.Direction != q.Direction {
 			continue
 		}
-		out.Matching++
-		if len(out.Conversations) < q.Limit {
-			out.Conversations = append(out.Conversations, c)
-		}
+		out.Conversations = append(out.Conversations, c)
+	}
+	out.Matching = len(out.Conversations)
+	sortConversations(out.Conversations, q.Sort)
+	if len(out.Conversations) > q.Limit {
+		out.Conversations = out.Conversations[:q.Limit]
 	}
 	out.Truncated = out.Matching > len(out.Conversations)
 	return &out, nil
+}
+
+// MaxConversations is the most rows one answer carries.
+const MaxConversations = 1000
+
+// sortConversations reorders rows that are already in needs-a-look order.
+func sortConversations(rows []TrafficConversation, by string) {
+	var less func(a, b TrafficConversation) bool
+	switch by {
+	case "volume":
+		less = func(a, b TrafficConversation) bool { return a.BytesIn+a.BytesOut > b.BytesIn+b.BytesOut }
+	case "recent":
+		less = func(a, b TrafficConversation) bool { return a.LastSeen.After(b.LastSeen) }
+	case "flows":
+		less = func(a, b TrafficConversation) bool { return a.Flows > b.Flows }
+	default:
+		return
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return less(rows[i], rows[j]) })
 }
 
 func (c TrafficConversation) matches(needle string) bool {
@@ -227,12 +255,16 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 		}
 	}
 
-	// served: a listener's reply, folded as the peer reaching the service.
-	served := "(direction = 'OUTBOUND' AND src_port > 0 AND src_port < ? AND dst_port >= ?)"
+	// Agents report every flow with this host's end as the source, whichever
+	// way the packet went (an INBOUND row is a datagram received, mostly the
+	// answer to this host's own query), so the peer is always the
+	// destination. A flow is served - the peer reached a service here - when
+	// this host's port is a service port and the peer's is a client port.
+	served := "(src_port > 0 AND src_port < ? AND dst_port >= ?)"
 	query := `SELECT endpoint_id, process_path,
-		CASE WHEN direction = 'INBOUND' OR ` + served + ` THEN 'in' ELSE 'out' END AS dir,
-		CASE WHEN direction = 'INBOUND' THEN src_ip ELSE dst_ip END AS peer,
-		CASE WHEN direction = 'INBOUND' THEN dst_port WHEN ` + served + ` THEN src_port ELSE dst_port END AS svc,
+		CASE WHEN ` + served + ` THEN 'in' ELSE 'out' END AS dir,
+		dst_ip AS peer,
+		CASE WHEN ` + served + ` THEN src_port ELSE dst_port END AS svc,
 		protocol,
 		COALESCE(SUM(samples), 0), COALESCE(SUM(measured_samples), 0),
 		COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
@@ -262,6 +294,7 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 			return nil, meta, err
 		}
 		c.Protocol = ProtocolName(proto)
+		c.Proto = proto
 		c.FirstSeen, c.LastSeen = scanTime(first), scanTime(last)
 		c.Process = processBase(c.ProcessPath)
 		c.Hostname = hostOf[c.EndpointID]
@@ -287,19 +320,36 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 	// is new when that first time falls inside the window - but only if the
 	// profiles reach back before the window, otherwise "new" would mean "the
 	// hub was not recording yet".
-	var profilesFrom interface{}
-	pq := "SELECT MIN(first_seen) FROM comm_profiles"
+	// A host enrolled inside the window has no history before it either, so
+	// the check is per host as well as fleet-wide.
 	var pargs []interface{}
+	pq := "SELECT endpoint_id, MIN(first_seen) FROM comm_profiles"
 	if filter.TenantID != "" {
 		pq += " WHERE tenant_id = ?"
 		pargs = append(pargs, filter.TenantID)
 	}
-	if err := s.db.QueryRow(pq, pargs...).Scan(&profilesFrom); err == nil {
-		if t := scanTime(profilesFrom); !t.IsZero() {
-			meta.ProfilesFrom = &t
-			meta.NewKnown = t.Before(start)
+	hostFrom := map[string]time.Time{}
+	prs, err := s.db.Query(pq+" GROUP BY endpoint_id", pargs...)
+	if err != nil {
+		return nil, meta, err
+	}
+	for prs.Next() {
+		var ep string
+		var t interface{}
+		if err := prs.Scan(&ep, &t); err != nil {
+			prs.Close()
+			return nil, meta, err
+		}
+		if ft := scanTime(t); !ft.IsZero() {
+			hostFrom[ep] = ft
+			if meta.ProfilesFrom == nil || ft.Before(*meta.ProfilesFrom) {
+				f := ft
+				meta.ProfilesFrom = &f
+			}
 		}
 	}
+	prs.Close()
+	meta.NewKnown = meta.ProfilesFrom != nil && meta.ProfilesFrom.Before(start)
 	if len(out) > 0 {
 		firstSeen := map[[3]string]time.Time{}
 		fq := "SELECT endpoint_id, process_path, dst_ip, MIN(first_seen) FROM comm_profiles"
@@ -307,7 +357,7 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 			fq += " WHERE tenant_id = ?"
 		}
 		fq += " GROUP BY endpoint_id, process_path, dst_ip"
-		prs, err := s.db.Query(fq, pargs...)
+		prs, err = s.db.Query(fq, pargs...)
 		if err != nil {
 			return nil, meta, err
 		}
@@ -329,13 +379,14 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 			}
 			known := t
 			c.KnownSince = &known
-			c.New = meta.NewKnown && !t.Before(start)
+			from, ok := hostFrom[c.EndpointID]
+			c.New = ok && from.Before(start) && !t.Before(start)
 		}
 	}
 
 	// Findings about the conversation: same host and peer, the same program
-	// when the finding names one, and the same service port for an outbound
-	// one (a served flow's finding carries the client's port).
+	// when the finding names one, and the port the finding's flow would carry:
+	// the service port for an outbound row, a client port for a served one.
 	byPair := map[[2]string][]int{}
 	for i := range out {
 		k := [2]string{out[i].EndpointID, out[i].PeerIP}
@@ -350,8 +401,13 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 			if a.ProcessPath != "" && c.ProcessPath != "" && !samePath(a.ProcessPath, c.ProcessPath) {
 				continue
 			}
-			if c.Direction == "out" && a.DstPort != 0 && int(a.DstPort) != c.Port {
-				continue
+			if a.DstPort != 0 {
+				if c.Direction == "out" && int(a.DstPort) != c.Port {
+					continue
+				}
+				if c.Direction == "in" && int(a.DstPort) < eph {
+					continue
+				}
 			}
 			addFinding(c, a)
 		}

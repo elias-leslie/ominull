@@ -17,10 +17,10 @@
     ["all", "Last 30 days"],
   ];
   const PAGE = 300;
+  const MAX_ROWS = 1000; // storage.MaxConversations
   const FILTER_LABELS = {
-    src_ip: "From",
-    dst_ip: "To",
-    peer: "Peer",
+    src_ip: "Host address",
+    dst_ip: "Peer",
     process: "Program",
     domain: "Name",
     country: "Country",
@@ -154,7 +154,6 @@
     let data = { overview: null, conversations: null, error: "", loading: true };
     let selected = null; // the conversation object shown in the panel
     let selectedKey = "";
-    let sort = "look";
     let flowsReq = 0;
     let lastFocus = null;
 
@@ -187,10 +186,7 @@
         ["recent", "Most recent"],
         ["flows", "Most flows"],
       ],
-      (v) => {
-        sort = v;
-        renderList();
-      },
+      (v) => api.onFilter({ sort: v === "look" ? "" : v, limit: 0 }),
     );
     const filterToggle = el("button", {
       type: "button",
@@ -304,7 +300,9 @@
       e.preventDefault();
       closePanel();
     }
-    document.addEventListener("keydown", onKey);
+    // Capture: the console's own Escape handler removes a sheet or host view
+    // first, and this must still see it open.
+    document.addEventListener("keydown", onKey, true);
 
     /* Arrow keys move between rows; Enter or Space on a row's button opens it. */
     tbody.addEventListener("keydown", (e) => {
@@ -330,7 +328,7 @@
         hostField.select.dataset.sig = sig;
       }
       hostField.select.value = f.endpoint_id || "";
-      sortField.select.value = sort;
+      sortField.select.value = f.sort || "look";
       put(extra,
         ...Object.keys(FILTER_LABELS)
           .filter((k) => f[k])
@@ -338,7 +336,7 @@
             const v = k === "hash" ? String(f[k]).slice(0, 12) + "…" : String(f[k]);
             return el(
               "button",
-              { type: "button", class: "tg-chip tf-chip-x", "aria-pressed": "true", title: "Remove this filter", "aria-label": "Remove filter " + FILTER_LABELS[k] + " " + f[k], onclick: () => api.onFilter({ [k]: "", limit: 0 }) },
+              { type: "button", class: "tg-chip tf-chip-x", "aria-pressed": "true", title: "Remove filter " + FILTER_LABELS[k] + " " + f[k], onclick: () => api.onFilter({ [k]: "", limit: 0 }) },
               el("span", { text: FILTER_LABELS[k] + " " + v }),
               icon("i-close"),
             );
@@ -465,14 +463,6 @@
       );
     }
 
-    function sorted(rows) {
-      const r = rows.slice();
-      if (sort === "volume") r.sort((a, b) => b.bytes_in + b.bytes_out - (a.bytes_in + a.bytes_out));
-      else if (sort === "recent") r.sort((a, b) => (when(b.last_seen) || 0) - (when(a.last_seen) || 0));
-      else if (sort === "flows") r.sort((a, b) => b.flows - a.flows);
-      return r;
-    }
-
     function renderList() {
       const cv = data.conversations;
       const f = filter();
@@ -490,7 +480,7 @@
         } else listState.append(el("p", { role: "status", class: "tf-empty", text: "Loading traffic…" }));
         return;
       }
-      const rows = sorted(cv.conversations || []);
+      const rows = cv.conversations || [];
       table.hidden = !rows.length;
       const c = cv.counts || {};
       chips.flagged.set(c.flagged || 0, f.mark === "flagged", c.open ? "crit" : "warn");
@@ -564,8 +554,8 @@
       if (cv.truncated) {
         more.hidden = false;
         put(more,
-          el("span", { text: plural(cv.matching - rows.length, "more conversation", "more conversations") + " not shown" }),
-          el("button", { type: "button", class: "btn tg-button", text: "Show more", onclick: () => api.onFilter({ limit: rows.length + PAGE }) }),
+          el("span", { text: plural(cv.matching - rows.length, "more conversation", "more conversations") + " not shown" + (rows.length >= MAX_ROWS ? ": search or filter to reach them" : "") }),
+          rows.length < MAX_ROWS ? el("button", { type: "button", class: "btn tg-button", text: "Show more", onclick: () => api.onFilter({ limit: rows.length + PAGE }) }) : null,
         );
       }
     }
@@ -585,6 +575,9 @@
       panel.focus({ preventScroll: true });
     }
     function closePanel() {
+      // A poll may have rebuilt the row since it opened the panel.
+      const row = Array.from(tbody.querySelectorAll(".tf-open")).find((b) => b.dataset.key === selectedKey);
+      if (row) lastFocus = row;
       selected = null;
       selectedKey = "";
       ws.dataset.panel = "";
@@ -653,7 +646,7 @@
         { class: "tf-actions" },
         el("button", { type: "button", class: "btn tg-button", onclick: () => api.openHost(c.endpoint_id) }, icon("i-external"), el("span", { text: "Open host" })),
         el("button", { type: "button", class: "btn tg-button", onclick: () => api.showTopology(c) }, icon("i-topology"), el("span", { text: "Show in Topology" })),
-        el("button", { type: "button", class: "btn tg-button", onclick: () => api.onFilter({ peer: c.peer_ip, limit: 0 }) }, icon("i-search"), el("span", { text: "All traffic with " + c.peer_ip })),
+        el("button", { type: "button", class: "btn tg-button", onclick: () => api.onFilter({ dst_ip: c.peer_ip, limit: 0 }) }, icon("i-search"), el("span", { text: "All traffic with " + c.peer_ip })),
         el("button", { type: "button", class: "btn tg-button", onclick: () => api.copy(c.peer_ip) }, icon("i-copy"), el("span", { text: "Copy peer address" })),
       );
 
@@ -667,7 +660,7 @@
     function loadFlows(c, box) {
       const id = ++flowsReq;
       const f = filter();
-      const qs = new URLSearchParams({ range: f.range || "1h", endpoint_id: c.endpoint_id, peer: c.peer_ip, port: String(c.port), protocol: c.protocol, limit: "8" });
+      const qs = new URLSearchParams({ range: f.range || "1h", endpoint_id: c.endpoint_id, dst_ip: c.peer_ip, port: String(c.port), protocol: String(c.proto), limit: "8" });
       if (c.process_path) qs.set("process", c.process_path);
       api
         .request("/api/v1/traffic/flows?" + qs.toString())
@@ -725,7 +718,7 @@
     return {
       update,
       destroy() {
-        document.removeEventListener("keydown", onKey);
+        document.removeEventListener("keydown", onKey, true);
         clearTimeout(searchTimer);
         ws.remove();
       },

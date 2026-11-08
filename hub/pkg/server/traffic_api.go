@@ -85,7 +85,6 @@ func parseTrafficFilter(s *Server, r *http.Request) storage.TrafficFilter {
 		EndpointID:        strings.TrimSpace(q.Get("endpoint_id")),
 		SrcIP:             strings.TrimSpace(q.Get("src_ip")),
 		DstIP:             strings.TrimSpace(q.Get("dst_ip")),
-		Peer:              strings.TrimSpace(q.Get("peer")),
 		Process:           strings.TrimSpace(q.Get("process")),
 		Domain:            strings.TrimSpace(q.Get("domain")),
 		Country:           strings.TrimSpace(q.Get("country")),
@@ -133,6 +132,7 @@ func (s *Server) handleTrafficConversations(w http.ResponseWriter, r *http.Reque
 		Search:            strings.TrimSpace(q.Get("q")),
 		Mark:              strings.TrimSpace(q.Get("mark")),
 		Direction:         strings.TrimSpace(q.Get("dir")),
+		Sort:              strings.TrimSpace(q.Get("sort")),
 		EphemeralPortFrom: s.store.GetDetectionTuning().EphemeralPortFrom,
 	}
 	if l, err := strconv.Atoi(q.Get("limit")); err == nil {
