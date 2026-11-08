@@ -8,6 +8,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - Trust fabric: IP and CIDR rules enforced end to end, including older agents that refuse ranges (plan: docs/TRUST_FABRIC.md)
 - Trust fabric: FQDN rules with hub-side resolution, and close the blanket DNS egress
 ## Later
+- Console and posture small gaps: a direct link to a machine with no agent doesn't paint until a list is open; a non-admin login tied to a tenant with no asset rows sees an empty list; the posture collector script has only been checked live, with no automated test
 - Evaluate BloodHound CE and OpenGraph, then build the AI weak-point finder
 - Household: back up the router and repair the approved parental, DNS and Ominull config; then IoT segmentation and DNS filtering (vault proposal direction-2026-10)
 - Phase 2: AI-agent egress policy with agent-session attribution, and data inventory contract v4 (vault proposal direction-2026-10)
