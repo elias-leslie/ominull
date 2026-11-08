@@ -4,7 +4,6 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 ## Now
 ## Next
 - M8 rest: confirm the abuse.ch ThreatFox and URLhaus feeds load once the owner puts an abuse.ch Auth-Key in /etc/ominull/abusech.key on the hub (asked in Aico); decoys, decoy names and planted credentials are live (plan: docs/audit-2026-11-06.md)
-- M7 rest: cut the remaining docs to the README, project-guide.md, the threat model and one release runbook as M6 and M10-M12 remove what they describe (code cites HOST_AUTHORITY, REMOTE_SCREEN, RESPONSE_SUPERVISOR, MAINTENANCE_PACKAGES and TRUST_FABRIC; memory cites MAINTENANCE_PACKAGES). M7 done so far: Nightshift routes, page budget note, legacy settings keys, shared-key agent login, docs/history, docs/evidence and five stale design docs (plan: docs/audit-2026-11-06.md)
 - M10, M12: Remote-admin kept everywhere (tidy only), Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
 - Rust static library for hub-input parsing and signature verification (C ABI, both platforms) after the grant fix
 - Trust fabric: IP and CIDR rules enforced end to end, including older agents that refuse ranges (plan: docs/TRUST_FABRIC.md)

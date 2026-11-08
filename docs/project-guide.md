@@ -11,8 +11,15 @@ native packages, authenticated REST heartbeats, unique per-device credentials,
 and optional matching client certificates.
 
 Agents report TCP counter observations and passive UDP socket observations.
-[Collection semantics and build requirements](../docs/UDP_OBSERVATION.md) describe
-timing, process attribution, byte units, and coverage limits.
+
+Linux observes UDP with an embedded libbpf program: addresses, ports, direction,
+payload bytes, process and time, never payload content. It needs readable kernel BTF
+and permission to attach BPF, and otherwise reports `unavailable`. It sees its own
+network namespace, not every container on a host. Windows reads the
+Microsoft-Windows-Kernel-Network ETW provider; an unknown event layout counts as loss,
+and IPv6 link-local observations are dropped and counted, since ETW gives no interface
+scope. An accepted send is not proof of delivery, and neither platform claims every
+offload or alternative kernel I/O path.
 
 Supported products:
 
@@ -65,7 +72,10 @@ The wizard saves validated package configuration and walks through:
 After saving a changed listener or certificate configuration, restart the one
 hub service. The permanent `/status` page runs the same bounded checks and
 can reopen diagnostics without reopening first-run setup. A configured upgrade
-does not silently create a new setup token or reset setup state.
+does not silently create a new setup token or reset setup state. When OIDC or
+Cloudflare is down, `sudo ominullctl setup-status` and `sudo ominullctl setup-token
+--rotate` still work locally; a fresh token opens a recovery session and is audited,
+but clears nothing.
 
 The package service reads `/etc/ominull/hub.env`. Normal installation needs no
 manual edits. Its important paths and defaults are:
@@ -108,7 +118,36 @@ only after every retained endpoint presents one.
 Native OIDC uses HTTPS discovery, authorization-code flow, state, nonce, PKCE,
 issuer/audience checks, and stable issuer-plus-subject identity binding. Public
 certificates are obtained and installed by the operator; Ominull does not alter
-router or DNS state. See [`docs/OIDC.md`](../docs/OIDC.md).
+router or DNS state. The hub maps `(issuer, subject)` to an explicit operator row; an
+email claim alone never grants a role. The client secret is a root-only
+`oidc-client.secret` beside the environment file and is never returned.
+
+For Cloudflare, the agent hostname must answer an unauthenticated probe with the hub's
+bounded JSON, not an Access login page; the wizard checks this. Access assertions count
+only for the configured team, audience and issuer, with valid time claims and a mapped
+operator. The hub validates the signed JWT and does not trust an email header. If the
+provider cannot keep the console and agent routes separate, use LAN mode.
+
+The console listener (`:8443`) sends HSTS and never asks for a client certificate, so
+operators stay clear of the agent listener's client-certificate rules on `:9443`. Serve it
+with `OMINULL_CONSOLE_TLS_CERT` and `OMINULL_CONSOLE_TLS_KEY`, or with a leaf from the hub
+CA for `OMINULL_CONSOLE_HOSTNAME`; for that one, export the root with `sudo ominullctl
+console export-ca --out ca.crt` and add it to each operator machine's trust store.
+
+Agents pin the hub CA in self-issued mode and use the operating system's trust with an
+operator certificate or Cloudflare. The first CA fetch is trust-on-first-use and must use a
+channel the operator trusts; afterwards an agent refuses a missing CA, unknown issuer, wrong
+name, expired certificate or untrusted peer, with no cleartext fallback unless
+`allow_plaintext` is set. Neither platform follows redirects to another host.
+
+Client certificates last a year and renew over the agent's heartbeat. Within
+`agent_cert_renew_days` of expiry (default 60) the hub puts a new certificate and key in the
+reply, at most every `agent_cert_offer_cooldown_minutes` (default 60), until the agent presents
+it. The agent proves it against the hub on a fresh connection first and otherwise keeps the
+one it has. `POST /api/v1/endpoints/cert-renewal` with `{"endpoint_id"}` asks for a renewal now;
+`GET` lists each endpoint's certificate. A Linux agent whose certificate expired while it was
+off cannot reconnect and needs re-enrolment. Renewal is not revocation: answer a leaked key by
+re-enrolling the endpoint. The `ominull.agents.certificate` health finding names what needs doing.
 
 ## Enroll Linux and Windows agents
 
@@ -483,8 +522,10 @@ Resolving findings through
 omitted), also on a finding already acknowledged; the tuning-covered path records `benign` by method `tuning`. A plain
 acknowledgement (single, batch, acknowledge-all, marking expected) records no verdict.
 
-See [Topology workspace](../docs/TOPOLOGY_WORKSPACE.md) for grouping, selection, pins
-and the limits of observed domain/process evidence.
+Topology keeps machine identity, addresses and observed communication apart: traffic-only
+addresses stay separate nodes and a matching name never merges hosts. Arrows keep the
+recorded source and destination and do not prove which side started a session. Counts are
+observations, which can include several reporters, not sessions.
 
 ## Aico push
 
@@ -581,20 +622,13 @@ Official protocol and provider references:
 - [Debian maintainer scripts](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html)
 - [Windows service installation](https://learn.microsoft.com/en-us/windows/win32/services/service-programs)
 
-See [`docs/AGENT_TLS.md`](../docs/AGENT_TLS.md),
-[`docs/AGENT_SELFUPDATE.md`](../docs/AGENT_SELFUPDATE.md),
-[`docs/TRUST_FABRIC.md`](../docs/TRUST_FABRIC.md),
-[`docs/SETUP.md`](../docs/SETUP.md), and
-[`docs/CLOUDFLARE.md`](../docs/CLOUDFLARE.md).
+See [`docs/RELEASE.md`](../docs/RELEASE.md) for the release runbook and
+[`docs/TRUST_FABRIC.md`](../docs/TRUST_FABRIC.md) for the trust fabric.
 
 Maintenance packages (Windows updates, cleanup, privacy, debloat, performance
 and a standards check, run as authorized script jobs with a Maintenance card on
 the asset view) are described in
 [`docs/MAINTENANCE_PACKAGES.md`](../docs/MAINTENANCE_PACKAGES.md).
-
-Finished plans (forensics and response, the v1.8.1 hardening, the DNS and DHCP
-incident) are kept in [`docs/history/`](../docs/history/README.md). They do not
-describe current release behavior.
 
 ## License
 

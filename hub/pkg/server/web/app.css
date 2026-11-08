@@ -3993,7 +3993,7 @@ tfoot {
 
 /* ------------------------------------------------ console UX: shared patterns
    Page tools (needs-you on the left, page actions on the right), help on
-   demand behind a "?", and folded reference lists. See docs/CONSOLE_UX.md. */
+   demand behind a "?", and folded reference lists. */
 .page-tools {
   display: flex;
   flex-wrap: wrap;

@@ -12,7 +12,7 @@ Ominull is an endpoint telemetry, detection, and containment hub for operators m
   eBPF CO-RE program ([`agent/linux/bpf/udp.bpf.c`](agent/linux/bpf/udp.bpf.c))
   through libbpf to observe UDP sends and receives with process identity, and
   samples TCP socket counters. The Windows agent consumes kernel network ETW
-  events for UDP and reads TCP counters. [Collection semantics](docs/UDP_OBSERVATION.md)
+  events for UDP and reads TCP counters. [Collection limits](docs/project-guide.md)
   documents byte units, timing and coverage limits. Flow telemetry is not packet
   capture.
 - **Host isolation on Linux and Windows.** Linux applies iptables/ip6tables
@@ -24,12 +24,12 @@ Ominull is an endpoint telemetry, detection, and containment hub for operators m
 - **Per-device identity.** Enrollment issues each endpoint a unique credential
   and a client certificate from the hub's own CA; a presented certificate must
   name the same endpoint as the credential. See [trust fabric](docs/TRUST_FABRIC.md)
-  and [agent TLS](docs/AGENT_TLS.md).
+  and the [project guide](docs/project-guide.md).
 - **Signature-verified packages.** Native `.deb` and `.msi` packages carry a
   SHA-256 digest and a detached ECDSA P-256 signature. Bootstrap and the Windows
   self-update check it against the release key before the package manager runs;
   Linux machines get their updates from the operator's script, which checks it
-  first. See [self-update](docs/AGENT_SELFUPDATE.md).
+  first. See [the release runbook](docs/RELEASE.md).
 - **Detection.** Per-process transfer sizes are scored with a modified z-score
   (median and median absolute deviation, which tolerate heavy-tailed traffic
   better than mean and standard deviation), alongside threat-intelligence
@@ -62,7 +62,7 @@ Observation records are bounded evidence, not packet capture or proof of complet
 
 ## Getting started
 
-Use a Debian-family Linux hub host and the verified signed package matching the intended release. Follow [hub setup](docs/SETUP.md) for the package installation command, then obtain the local first-run token:
+Use a Debian-family Linux hub host and the verified signed package matching the intended release. Follow the [project guide](docs/project-guide.md) for the package installation command, then obtain the local first-run token:
 
 ```bash
 sudo ominullctl setup-token
@@ -83,12 +83,12 @@ scripts/version.sh check
 (cd hub && go test -race ./... && go vet ./...)
 ```
 
-Package lifecycle, signing, canary convergence, and runtime acceptance require their respective release checks. Some historical records under `docs/` mention `st`, the author's private workspace tool; the commands above are the public equivalents. The [project guide](docs/project-guide.md#build-test-and-release) preserves build/test/release commands. Production deployment requires its own authorization and credentials.
+Package lifecycle, signing, canary convergence, and runtime acceptance require their respective release checks. Some records mention `st`, the author's private workspace tool; the commands above are the public equivalents. The [project guide](docs/project-guide.md#build-test-and-release) preserves build/test/release commands. Production deployment requires its own authorization and credentials.
 
 ## Documentation
 
 - [Project guide](docs/project-guide.md): installation, identity, enrollment, package lifecycle, CLI/API, and release workflow.
-- [Hub setup](docs/SETUP.md), [collection semantics](docs/UDP_OBSERVATION.md), and [topology workspace](docs/TOPOLOGY_WORKSPACE.md).
-- [Agent TLS](docs/AGENT_TLS.md), [self-update](docs/AGENT_SELFUPDATE.md), and [trust fabric](docs/TRUST_FABRIC.md).
-- [Router collection](scripts/router/README.md), [OIDC](docs/OIDC.md), [Cloudflare](docs/CLOUDFLARE.md), and [license](LICENSE).
+- [Release runbook](docs/RELEASE.md) and [threat model](docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md).
+- [Trust fabric](docs/TRUST_FABRIC.md), [maintenance packages](docs/MAINTENANCE_PACKAGES.md), [remote screen](docs/REMOTE_SCREEN.md), [host authority](docs/HOST_AUTHORITY.md) and [script supervisor](docs/RESPONSE_SUPERVISOR.md).
+- [Router collection](scripts/router/README.md) and [license](LICENSE).
 - [Security policy](SECURITY.md), including how to report a vulnerability.
