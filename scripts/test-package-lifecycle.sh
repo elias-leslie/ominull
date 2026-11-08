@@ -79,6 +79,9 @@ grep -q 'DisplayName' "${msi_tables}/Registry.idt"
 grep -q 'DisplayVersion' "${msi_tables}/Registry.idt"
 grep -q 'uninstall' "${msi_tables}/CustomAction.idt"
 grep -q 'NOT REINSTALL' "${msi_tables}/InstallExecuteSequence.idt"
+# Runs as the machine, inside the install script, and a failed start can't fail the install.
+grep -qE $'^StartIfEnrolled\t3186\tCMDEXE\t.*agent\\.conf.*sc\\.exe start ominulld' "${msi_tables}/CustomAction.idt"
+grep -qE $'^StartIfEnrolled\tNOT REMOVE="ALL"\t' "${msi_tables}/InstallExecuteSequence.idt"
 echo "[+] MSI ${VERSION}: files, service registration, recovery action, and no driver payload verified."
 
 make_versioned_deb() {

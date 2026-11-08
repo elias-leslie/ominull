@@ -13,4 +13,4 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - Phase 3: measured agent move from C to Go, portable Go collector (Windows first), labeled Neri-lab drill harness, time-boxed Velociraptor benchmark
 - Phase 4: business line with paid certs, licensing, multi-tenant and macOS
 - Umbrella direction: a lean sensor-and-response fleet (vault proposal direction-2026-10)
-- Audit leftovers (Nov 8): rerun `scripts/update-linux-agents.sh` when linux-agent-work, linux-blackbox-vault and linux-neri-hunters start; a fresh Windows MSI install leaves the service stopped
+- Audit leftovers (Nov 8): rerun `scripts/update-linux-agents.sh` when linux-agent-work, linux-blackbox-vault and linux-neri-hunters start
