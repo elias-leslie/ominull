@@ -439,6 +439,12 @@ class BackupConfigurationTests(unittest.TestCase):
             self.assertEqual(loaded, config)
             path.write_text(json.dumps({**config, "proxmox_node": "pve-fixture"}))
             self.assertEqual(obs.load_config(root, require_deployment_inputs=False)[0]["proxmox_node"], "pve-fixture")
+            # Other scripts keep their own fields here; a live capture failed on them.
+            path.write_text(json.dumps({**config, "drill": {}, "linux_agent_machines": {}}))
+            self.assertEqual(obs.load_config(root, require_deployment_inputs=False)[0]["drill"], {})
+            path.write_text(json.dumps({**config, "typo_field": 1}))
+            with self.assertRaises(obs.ObservationError):
+                obs.load_config(root, require_deployment_inputs=False)
             path.write_text(json.dumps(config))
             self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
             with self.assertRaises(obs.ObservationError):

@@ -140,8 +140,11 @@ def load_config(root, *, require_deployment_inputs=True):
     # backup_ssh_alias and observer_ssh_alias, once root installs them, are the
     # forced-command keys that can run only the backup dispatcher
     # (pve_backup_dispatch.py) or the observer's reads (pve_observe_dispatch.py).
+    # drill and linux_agent_machines belong to other scripts sharing this file
+    # (live-drill.py, update-linux-agents.sh); nothing here reads them.
     require(isinstance(config, dict) and CONFIG_KEYS <= set(config)
-            and set(config) - CONFIG_KEYS <= {"proxmox_node", "backup_ssh_alias", "observer_ssh_alias"},
+            and set(config) - CONFIG_KEYS <= {"proxmox_node", "backup_ssh_alias", "observer_ssh_alias",
+                                              "drill", "linux_agent_machines"},
             "config_fields")
     for field in ("backup_ssh_alias", "observer_ssh_alias"):
         require(field not in config or (
