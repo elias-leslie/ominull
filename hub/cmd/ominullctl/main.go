@@ -81,6 +81,8 @@ func main() {
 	if wantsHelp(rest) {
 		if subcmd == "screen" {
 			fmt.Print(screenHelp)
+		} else if subcmd == "trust" {
+			fmt.Print(trustUsage)
 		} else {
 			printUsage()
 		}
@@ -130,6 +132,8 @@ func main() {
 		err = client.cmdScripts(rest)
 	case "maint":
 		err = client.cmdMaint(rest)
+	case "trust":
+		err = client.cmdTrust(rest)
 	case "shell":
 		err = client.cmdShell(rest)
 	case "screen":
@@ -1476,6 +1480,7 @@ Fleet & CyberOps Commands:
   maint cancel JOB_ID                     Stop a running job (the agent kills it and its children)
   maint window show [EP]                  Maintenance windows: fleet default and each machine's own, with the next start
   maint window set EP|--default R[,R]     Set a window (HH:MM-HH:MM, up to four; --clock machine|utc); reset EP|--default
+  trust rules | add | remove | show EP    What an isolated machine may still reach (ominullctl trust --help)
   maint status ENDPOINT                   Latest result of each package on a host
   maint settings [ENDPOINT]               Effective package settings (fleet, or one host)
   maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]
