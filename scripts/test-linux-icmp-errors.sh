@@ -66,4 +66,4 @@ while True:
         threading.Thread(target=serve, args=(s.accept()[0],), daemon=True).start()
 ' &
 sleep 0.5
-sudo -n ip netns exec "$A" build/test_linux_icmp_errors_live 10.0.2.2 2001:db8:2::2
+sudo -n ip netns exec "$A" build/test_linux_icmp_errors_live 10.0.2.2 2001:db8:2::2 10.0.1.254 2001:db8:1::fe

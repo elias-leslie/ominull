@@ -17,6 +17,8 @@ typedef struct {
     char addresses[OMINULL_MAX_HUB_ADDRESSES][64];
     size_t count;
     uint16_t port;
+    /* Followed on a lookup alone: open to this agent's own connections, not the host's. */
+    bool agent_only[OMINULL_MAX_HUB_ADDRESSES];
 } OMINULL_HUB_TARGETS;
 static inline void OminullParseHubURL(const char *hubUrl, char *host,
                                       size_t hostLen, uint16_t *port,
@@ -119,6 +121,25 @@ static inline bool OminullHubTargetsSame(const OMINULL_HUB_TARGETS *a,
             return false;
     }
     return true;
+}
+
+/* Adds the answer's addresses the list lacks, marked agent_only, as far as there is
+ * room, so a flapping or rotating answer settles instead of moving the hole each time.
+ * Returns how many it added. */
+static inline size_t OminullHubTargetsFollow(OMINULL_HUB_TARGETS *held,
+                                             const OMINULL_HUB_TARGETS *answer) {
+    size_t added = 0;
+    for (size_t i = 0; i < answer->count && held->count < OMINULL_MAX_HUB_ADDRESSES; i++) {
+        bool found = false;
+        for (size_t j = 0; j < held->count && !found; j++)
+            found = !strcmp(answer->addresses[i], held->addresses[j]);
+        if (found)
+            continue;
+        memcpy(held->addresses[held->count], answer->addresses[i], sizeof(held->addresses[0]));
+        held->agent_only[held->count++] = true;
+        added++;
+    }
+    return added;
 }
 
 static inline bool OminullResolveHub(const char *url,

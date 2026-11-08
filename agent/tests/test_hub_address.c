@@ -74,6 +74,24 @@ int main(void) {
     other = targets;
     other.count = 1;
     assert(!OminullHubTargetsSame(&targets, &other));
+
+    /* Following adds only what is new, marked agent-only, and keeps the old. */
+    OMINULL_HUB_TARGETS held = {0}, answer = {0};
+    strcpy(held.addresses[0], "198.51.100.8");
+    held.count = 1;
+    strcpy(answer.addresses[0], "198.51.100.8");
+    answer.count = 1;
+    assert(OminullHubTargetsFollow(&held, &answer) == 0 && held.count == 1);
+    strcpy(answer.addresses[0], "198.51.100.9");
+    assert(OminullHubTargetsFollow(&held, &answer) == 1 && held.count == 2);
+    assert(!held.agent_only[0] && held.agent_only[1] && !strcmp(held.addresses[1], "198.51.100.9"));
+    assert(OminullHubTargetsFollow(&held, &answer) == 0);
+    /* A list that keeps changing can't grow past the limit. */
+    for (int i = 0; i < OMINULL_MAX_HUB_ADDRESSES + 2; i++) {
+        snprintf(answer.addresses[0], sizeof(answer.addresses[0]), "203.0.113.%d", i);
+        OminullHubTargetsFollow(&held, &answer);
+    }
+    assert(held.count == OMINULL_MAX_HUB_ADDRESSES && !strcmp(held.addresses[0], "198.51.100.8"));
     answers = 17;
     assert(!OminullResolveHub("https://hub.example:9443", &targets) &&
            !targets.count);

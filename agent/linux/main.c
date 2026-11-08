@@ -1808,7 +1808,15 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
                 "-p", "tcp", "--sport", port, "-j", "RETURN", NULL};
             const char *hubOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-d", address,
                 "-p", "tcp", "--dport", port, "-j", "RETURN", NULL};
-            if (RunFw(hubIn) != 0 || RunFw(hubOut) != 0) whole = false;
+            /* A followed address rests on a lookup alone: only this agent may call
+             * it, and nothing there may open a connection to this host. */
+            char uid[16]; snprintf(uid, sizeof(uid), "%u", (unsigned)geteuid());
+            const char *followedIn[] = {tool, "-A", OMINULL_NEXT_IN, "-s", address,
+                "-p", "tcp", "--sport", port, "!", "--syn", "-j", "RETURN", NULL};
+            const char *followedOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-d", address,
+                "-p", "tcp", "--dport", port, "-m", "owner", "--uid-owner", uid, "-j", "RETURN", NULL};
+            bool followed = hub->agent_only[i];
+            if (RunFw(followed ? followedIn : hubIn) != 0 || RunFw(followed ? followedOut : hubOut) != 0) whole = false;
         }
     }
 
@@ -1831,18 +1839,6 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
             NotePermit(RunFw(ndOut));
         }
     }
-
-    /* Preserve path-MTU/error feedback for existing flows, not arbitrary ICMP
-     * requests that could bypass peer quarantine. It comes from routers on no
-     * allow list, and an allowed connection through a smaller link stalls
-     * without it (scripts/test-linux-icmp-errors.sh). */
-    const char *icmp = v6 ? "ipv6-icmp" : "icmp";
-    const char *errorIn[] = {tool, "-A", OMINULL_NEXT_IN, "-p", icmp,
-        "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
-    const char *errorOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-p", icmp,
-        "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
-    NotePermit(RunFw(errorIn));
-    NotePermit(RunFw(errorOut));
 
     /* 3. DHCP, above the peer blocks. */
     for (int i = 0; i < baselineCount; i++) {
@@ -1868,6 +1864,26 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
     }
 
     if (isolated) {
+        /* Errors about existing flows: path-MTU feedback comes from routers on no
+         * allow list, and an allowed connection through a smaller link stalls without
+         * it (scripts/test-linux-icmp-errors.sh). Below the blocks, so a quarantined
+         * address stays silent, and only here: without a default deny nothing needs
+         * it, and this match turns on connection tracking for the whole family. */
+        static const char *const errorTypes4[] = {"3", "11", "12"};
+        static const char *const errorTypes6[] = {"1", "2", "3", "4"};
+        const char *const *errorTypes = v6 ? errorTypes6 : errorTypes4;
+        size_t errorTypeCount = v6 ? 4 : 3;
+        for (size_t i = 0; i < errorTypeCount; i++) {
+            const char *errorIn[] = {tool, "-A", OMINULL_NEXT_IN, "-p", v6 ? "ipv6-icmp" : "icmp",
+                v6 ? "--icmpv6-type" : "--icmp-type", errorTypes[i],
+                "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
+            const char *errorOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-p", v6 ? "ipv6-icmp" : "icmp",
+                v6 ? "--icmpv6-type" : "--icmp-type", errorTypes[i],
+                "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
+            NotePermit(RunFw(errorIn));
+            NotePermit(RunFw(errorOut));
+        }
+
         /* 5. The rest of the baseline - DNS, NTP, whatever else the policy
          *    names - below the peer block on purpose: quarantining a rogue
          *    resolver has to beat the rule that lets this host resolve names. */
@@ -2222,17 +2238,23 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
  * Only the default-deny that made the host unreachable goes. */
 /* FollowHubAddress: a hub that moved can't say so to an isolated host, whose hole still
  * points at the old address, so the host would wait for the dead-man timer to release
- * it. While the hub isn't answering, its name is looked up again and the hole follows
- * the answer: the hub's TCP port only, and the same lookup every apply already trusts.
+ * it. While the hub isn't answering, its name is looked up again and any new address
+ * joins the old: the hub's TCP port, for this agent's own connections only, because an
+ * unanswered lookup could come from whoever is keeping the hub quiet. The hub's next
+ * answer proves itself by its certificate and the rebuild it causes ends this.
  * Needs rules this run built: after a restart the lists aren't known. */
 static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
     if (!known || !appliedIsolated || appliedHubTargets.count == 0) return;
-    OMINULL_HUB_TARGETS current = {0};
-    if (!OminullResolveHub(config->hub_url, &current) || OminullHubTargetsSame(&current, &appliedHubTargets)) return;
-    bool built = EnforcementBuild("iptables", true, &current, appliedAllow, appliedAllowCount, appliedPeers,
+    OMINULL_HUB_TARGETS answer = {0};
+    if (!OminullResolveHub(config->hub_url, &answer)) return;
+    OMINULL_HUB_TARGETS next = appliedHubTargets;
+    if (!OminullHubTargetsFollow(&next, &answer)) return;
+    const char *moved = next.addresses[appliedHubTargets.count];
+    g_PermitsRetry = false;
+    bool built = EnforcementBuild("iptables", true, &next, appliedAllow, appliedAllowCount, appliedPeers,
                                   appliedPeerCount, appliedThreats, appliedThreatCount,
                                   appliedBaseline, appliedBaselineCount);
-    built = EnforcementBuild("ip6tables", true, &current, appliedAllow, appliedAllowCount, appliedPeers,
+    built = EnforcementBuild("ip6tables", true, &next, appliedAllow, appliedAllowCount, appliedPeers,
                              appliedPeerCount, appliedThreats, appliedThreatCount,
                              appliedBaseline, appliedBaselineCount) && built;
     /* One family may hold the new rules: the hub's next answer rebuilds whatever
@@ -2240,15 +2262,17 @@ static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
     if (!built) {
         g_ForgetApplied = true;
         printf("[-] The hub's address changed to %s but the firewall refused the new rules; "
-               "trying again next beat.\n", current.addresses[0]);
+               "trying again next beat.\n", moved);
         fflush(stdout);
         return;
     }
     printf("[!] Isolated, and the hub isn't answering at its old address: it now resolves to %s, "
-           "so its hole moved there.\n", current.addresses[0]);
+           "so this agent may try it too.\n", moved);
     fflush(stdout);
-    appliedHubTargets = current;
-    if (g_PermitsRetry) g_ForgetApplied = true;
+    g_ForgetApplied = true;
+    snprintf(g_HubPeerAddr, sizeof(g_HubPeerAddr), "%s", moved);
+    /* A permit lost to a held lock: leaving this unrecorded rebuilds next beat. */
+    if (!g_PermitsRetry) appliedHubTargets = next;
 }
 
 static void HubContact(bool accepted) {

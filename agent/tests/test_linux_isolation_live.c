@@ -124,6 +124,17 @@ static int HubNameAnswers(const char *hosts, const char *ip) {
     fclose(f);
     return 0;
 }
+/* Another program on the host, as an unprivileged process would be. */
+static bool ConnectAsNobody(const char *ip, unsigned port) {
+    pid_t child = fork();
+    if (child == 0) {
+        if (setgid(65534) != 0 || setuid(65534) != 0) _exit(2);
+        _exit(ConnectPeer(ip, port) ? 0 : 1);
+    }
+    int status = 0;
+    if (child < 0 || waitpid(child, &status, 0) != child) return true;
+    return !(WIFEXITED(status) && WEXITSTATUS(status) == 1);
+}
 static int FollowsAMovedHub(const char *oldIP, const char *newIP, const char *hosts) {
     LINUX_AGENT_CONFIG config;
     memset(&config, 0, sizeof(config));
@@ -138,9 +149,11 @@ static int FollowsAMovedHub(const char *oldIP, const char *newIP, const char *ho
     CHECK(ConnectPeer(oldIP, 9003) && !ConnectPeer(newIP, 9003));
     CHECK(HubNameAnswers(hosts, newIP) == 0);
     FollowHubAddress(&config);
-    CHECK(!strcmp(appliedHubTargets.addresses[0], newIP));
-    CHECK(ConnectPeer(newIP, 9003) && !ConnectPeer(oldIP, 9003));
+    CHECK(appliedHubTargets.count == 2 && !strcmp(appliedHubTargets.addresses[1], newIP));
+    /* The old hole stays in case the answer was wrong; the new one is the agent's. */
+    CHECK(ConnectPeer(newIP, 9003) && ConnectPeer(oldIP, 9003));
     CHECK(!ConnectPeer(newIP, 9004));
+    CHECK(!ConnectAsNobody(newIP, 9003) && ConnectAsNobody(oldIP, 9003));
     known = appliedIsolated = false;
     memset(&appliedHubTargets, 0, sizeof(appliedHubTargets));
     Cleanup();
@@ -175,7 +188,7 @@ int main(int argc, char **argv) {
     if (argc == 5) {
         /* argv[4] is the file mounted over this namespace's /etc/hosts. */
         CHECK(FollowsAMovedHub(argv[1], argv[3], argv[4]) == 0);
-        puts("An isolated host's hub hole follows the hub's new address and only that");
+        puts("An isolated host's hub hole follows the hub's new address, for the agent alone");
     }
     EnforcementBuild("ip6tables", true, &hub, allowed, 1, allowed, 1, empty, 0,
                      NULL, 0);

@@ -414,19 +414,38 @@ static DWORD Wfp_AddIPv6LinkControl(void) {
 
 static DWORD Wfp_AddHubPermits(const OMINULL_HUB_TARGETS *hub) {
     if (!hub || !hub->count) return ERROR_SUCCESS;
-    FWPM_FILTER_CONDITION0 cond[3]; FWP_BYTE_ARRAY16 store;
+    FWPM_FILTER_CONDITION0 cond[4]; FWP_BYTE_ARRAY16 store;
+    FWP_BYTE_BLOB* self = NULL;
+    DWORD status = ERROR_SUCCESS;
     /* Every resolved hub address gets only its configured TCP port. */
     for (size_t i = 0; i < hub->count; i++) {
         OMINULL_BASELINE_RULE rule = {0};
         snprintf(rule.destination, sizeof(rule.destination), "%s", hub->addresses[i]);
         strcpy(rule.protocol, "tcp"); rule.port = hub->port;
         int family = ServiceCondition(&rule, cond, &store);
-        DWORD status = AddFilterEverywhere(L"Ominull Analyst Hub Pinhole", FWP_ACTION_PERMIT,
-                                     OMINULL_WEIGHT_PERMIT_HUB, cond, 3, family);
-        if (status != ERROR_SUCCESS) return status;
+        UINT32 count = 3;
+        /* A followed address rests on a lookup alone: this program's connections only. */
+        if (hub->agent_only[i]) {
+            wchar_t path[MAX_PATH];
+            if (!self) {
+                DWORD length = GetModuleFileNameW(NULL, path, MAX_PATH);
+                if (!length || length >= MAX_PATH) { status = ERROR_BAD_PATHNAME; break; }
+                status = FwpmGetAppIdFromFileName0(path, &self);
+                if (status != ERROR_SUCCESS) break;
+            }
+            memset(&cond[3], 0, sizeof(cond[3]));
+            cond[3].fieldKey = OMINULL_CONDITION_ALE_APP_ID;
+            cond[3].matchType = FWP_MATCH_EQUAL;
+            cond[3].conditionValue.type = FWP_BYTE_BLOB_TYPE;
+            cond[3].conditionValue.byteBlob = self;
+            count = 4;
+        }
+        status = AddFilterEverywhere(L"Ominull Analyst Hub Pinhole", FWP_ACTION_PERMIT,
+                                     OMINULL_WEIGHT_PERMIT_HUB, cond, count, family);
+        if (status != ERROR_SUCCESS) break;
     }
-
-    return ERROR_SUCCESS;
+    if (self) FwpmFreeMemory0((void**)&self);
+    return status;
 }
 
 /* Wfp_IsolateHost builds the default-deny and the floor that has to survive it.

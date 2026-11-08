@@ -60,7 +60,7 @@ static bool Transfer(const char *ip, unsigned port) {
 
 int main(int argc, char **argv) {
     struct stat current, initial;
-    CHECK(argc == 3 && geteuid() == 0);
+    CHECK(argc == 5 && geteuid() == 0);
     CHECK(stat("/proc/self/ns/net", &current) == 0 && stat("/proc/1/ns/net", &initial) == 0 &&
           current.st_ino != initial.st_ino);
     const unsigned port = 9005;
@@ -80,5 +80,21 @@ int main(int argc, char **argv) {
     printf("Isolated, to an allowed address: IPv4 %s, IPv6 %s\n", v4 ? "ok" : "stalled", v6 ? "ok" : "stalled");
     CHECK(v4 && v6);
     puts("An allowed connection hears the router's packet-too-big while isolated");
+
+    const char *echo4[] = {"ping", "-c1", "-W1", argv[3], NULL};
+    const char *echo6[] = {"ping", "-6", "-c1", "-W1", argv[4], NULL};
+    CHECK(RunTool(echo4) != 0 && RunTool(echo6) != 0);
+    puts("Echo stays blocked");
+
+    /* The errors come from the router, so with the router quarantined the same
+     * transfers stall: the permit sits below the blocks. */
+    char quarantined[2][64];
+    strcpy(quarantined[0], argv[3]);
+    strcpy(quarantined[1], argv[4]);
+    CHECK(EnforcementBuild("iptables", true, &hub, allowed, 2, quarantined, 2, empty, 0, NULL, 0));
+    CHECK(EnforcementBuild("ip6tables", true, &hub, allowed, 2, quarantined, 2, empty, 0, NULL, 0));
+    ForgetPathMTU();
+    CHECK(!Transfer(argv[1], port) && !Transfer(argv[2], port));
+    puts("A quarantined router's errors stay blocked");
     return 0;
 }

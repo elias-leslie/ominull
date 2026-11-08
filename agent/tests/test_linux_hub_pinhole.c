@@ -222,7 +222,14 @@ static void FollowsAMovedHub(const char *path) {
     appliedPeerCount = 1;
     strcpy(appliedAllow[0], "198.51.100.5");
     appliedAllowCount = 1;
-    appliedThreatCount = appliedBaselineCount = 0;
+    strcpy(appliedThreats[0], "203.0.113.88");
+    appliedThreatCount = 1;
+    memset(&appliedBaseline[0], 0, sizeof(appliedBaseline[0]));
+    strcpy(appliedBaseline[0].destination, "198.51.100.53");
+    strcpy(appliedBaseline[0].protocol, "udp");
+    strcpy(appliedBaseline[0].service, "dns");
+    appliedBaseline[0].port = 53;
+    appliedBaselineCount = 1;
 
     known = false;
     appliedIsolated = true;
@@ -246,22 +253,42 @@ static void FollowsAMovedHub(const char *path) {
     ResetCommands(path);
     FollowHubAddress(&config);
     const char *data = ReadCommands(path);
-    assert(strstr(data, "-d 198.51.100.9 -p tcp --dport 443 -j RETURN"));
-    assert(!strstr(data, "198.51.100.8"));
+    /* The new address is the agent's alone; the old hole stays as it was. */
+    assert(strstr(data, "-d 198.51.100.9 -p tcp --dport 443 -m owner --uid-owner "));
+    assert(strstr(data, "-s 198.51.100.9 -p tcp --sport 443 ! --syn -j RETURN"));
+    assert(!strstr(data, "-d 198.51.100.9 -p tcp --dport 443 -j RETURN"));
+    assert(strstr(data, "-d 198.51.100.8 -p tcp --dport 443 -j RETURN"));
     assert(strstr(data, "-d 203.0.113.77 -j DROP") && strstr(data, "-d 198.51.100.5 -j RETURN"));
+    assert(strstr(data, "-d 203.0.113.88 -j DROP") && strstr(data, "-d 198.51.100.53 "));
     assert(strstr(data, "-A OMINULL_ISO_OUT_N -j DROP"));
-    assert(!strcmp(appliedHubTargets.addresses[0], "198.51.100.9") && appliedIsolated);
+    assert(appliedHubTargets.count == 2 && appliedHubTargets.agent_only[1] && appliedIsolated);
+    assert(!strcmp(g_HubPeerAddr, "198.51.100.9"));
+    /* The hub's next answer rebuilds, which is what ends the agent-only hole. */
+    assert(g_ForgetApplied);
+    g_ForgetApplied = false;
 
     ResetCommands(path);
     FollowHubAddress(&config);
     assert(!ReadCommands(path)[0]);
     strcpy(config.hub_url, "ftp://host");
     FollowHubAddress(&config);
-    assert(!ReadCommands(path)[0] && !strcmp(appliedHubTargets.addresses[0], "198.51.100.9"));
+    assert(!ReadCommands(path)[0] && appliedHubTargets.count == 2);
+
+    /* A permit lost to a held lock is tried again next beat, with the hub still silent. */
+    strcpy(config.hub_url, "https://198.51.100.10:443");
+    assert(setenv("OMINULL_FIXTURE_FAIL", "198.51.100.53", 1) == 0 && setenv("OMINULL_FIXTURE_FAIL_CODE", "4", 1) == 0);
+    FollowHubAddress(&config);
+    unsetenv("OMINULL_FIXTURE_FAIL");
+    unsetenv("OMINULL_FIXTURE_FAIL_CODE");
+    assert(appliedHubTargets.count == 2 && g_ForgetApplied);
+    ResetCommands(path);
+    FollowHubAddress(&config);
+    assert(strstr(ReadCommands(path), "198.51.100.53") && appliedHubTargets.count == 3);
+    g_ForgetApplied = false;
 
     known = false;
     appliedIsolated = false;
-    appliedPeerCount = appliedAllowCount = 0;
+    appliedPeerCount = appliedAllowCount = appliedThreatCount = appliedBaselineCount = 0;
     memset(&appliedHubTargets, 0, sizeof(appliedHubTargets));
     g_PermitsMissing = g_PermitsRetry = false;
 }
@@ -272,6 +299,25 @@ int main(void) {
     close(fd);
     assert(setenv("OMINULL_FIXTURE_COMMANDS", path, 1) == 0);
     FollowsAMovedHub(path);
+    /* The error permit is for isolated hosts only: its match turns on connection
+     * tracking for the whole family, and a busy host with a peer or threat block
+     * must not start tracking every flow for it. It sits below the blocks. */
+    {
+        char none[1][64] = {{0}}, peer[1][64] = {"203.0.113.77"};
+        OMINULL_HUB_TARGETS held = {0};
+        strcpy(held.addresses[0], "198.51.100.8");
+        held.count = 1;
+        held.port = 443;
+        ResetCommands(path);
+        assert(EnforcementBuild("iptables", false, &held, none, 0, peer, 1, none, 0, NULL, 0));
+        assert(!strstr(ReadCommands(path), "conntrack"));
+        ResetCommands(path);
+        assert(EnforcementBuild("iptables", true, &held, none, 0, peer, 1, none, 0, NULL, 0));
+        const char *rules = ReadCommands(path);
+        const char *blocked = strstr(rules, "-d 203.0.113.77 -j DROP"), *error = strstr(rules, "--icmp-type 3 -m conntrack --ctstate RELATED");
+        assert(blocked && error && blocked < error);
+        assert(!strstr(rules, "--icmp-type 5 "));
+    }
     char addresses[1][64] = {{0}};
     OMINULL_HUB_TARGETS hub = {0};
     strcpy(hub.addresses[0], "2001:db8::9");
