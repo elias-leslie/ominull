@@ -3,6 +3,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 
 ## Now
 ## Next
+- Move golang.org/x/crypto from its pseudo-version pin to a tagged release once one includes the GO-2026-5932 fix
 - Trust fabric leftover: a full 12-hour owner dead-man timer has never been waited out; it held 39 minutes on Linux and 6 on Windows, and the 5-minute timer released on both. Unexplained on Windows 1.8.122: in one moved-hub drill, about a minute after isolate was sent, a lookup failed and another program on VM 110 reached the hub's real address (alert 138873ae); after the move that address was closed to it, and the next run didn't probe it before the move, so check whether isolation applied late or a path stayed open. Tested but not seen live: the Windows agent's hourly retry of a dropped certificate (plan: docs/TRUST_FABRIC.md)
 ## Later
 - Posture false failures seen Nov 8: `check_ssh` in packages/linux/security-baseline.sh runs `sshd -T`, which fails on an idle socket-activated sshd (no /run/sshd until the first login), so CT 190/191 and other Ubuntu 24.04 machines can read as failing after a reboot; gem's snapshot control can't pass on its ext4 root on thick LVM (the guests do have thin snapshots)
