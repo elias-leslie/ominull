@@ -527,6 +527,15 @@ addresses stay separate nodes and a matching name never merges hosts. Arrows kee
 recorded source and destination and do not prove which side started a session. Counts are
 observations, which can include several reporters, not sessions.
 
+## Remote admin
+
+Terminal, screen, scripts, maintenance packages and playbooks stay on every platform and
+are one separate part of the code: `hub/pkg/{terminal,screen,scripts}`, the `terminal_`,
+`screen_`, `script_`, `maintenance_`, `playbooks`, `software_catalog` and `data_inventory`
+files in `hub/pkg/server`, `screen/`, and the `terminal_`, `screen_`, `script_`, `forensics_`,
+`software_inventory_` and `data_inventory_` headers in `agent/include`. Detection never imports
+them (`TestDetectionDoesNotDependOnRemoteAdmin`), and the agent's collectors don't include them.
+
 ## Aico push
 
 The hub pushes its paging alerts and its health to Aico (the owner's Needs you and Status), once a minute. There is no pull

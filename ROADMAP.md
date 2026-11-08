@@ -4,7 +4,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 ## Now
 ## Next
 - M8 rest: confirm the abuse.ch ThreatFox and URLhaus feeds load once the owner puts an abuse.ch Auth-Key in /etc/ominull/abusech.key on the hub (asked in Aico); decoys, decoy names and planted credentials are live (plan: docs/audit-2026-11-06.md)
-- M10, M12: Remote-admin kept everywhere (tidy only), Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
+- M12: Go Linux agent only with remote-admin parity, if the owner still wants the rewrite (asked in Aico) (plan: docs/audit-2026-11-06.md)
 - Rust static library for hub-input parsing and signature verification (C ABI, both platforms) after the grant fix
 - Trust fabric: IP and CIDR rules enforced end to end, including older agents that refuse ranges (plan: docs/TRUST_FABRIC.md)
 - Trust fabric: FQDN rules with hub-side resolution, and close the blanket DNS egress
