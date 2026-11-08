@@ -622,7 +622,6 @@ static char appliedAllow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
 static int appliedAllowCount = 0;
 static OMINULL_BASELINE_RULE appliedBaseline[OMINULL_MAX_BASELINE_RULES];
 static int appliedBaselineCount = 0;
-static bool appliedBaselineKnown = false;
 static bool engineReady = false;
 static bool engineTried = false;
 static bool g_ForgetApplied = false;
@@ -718,11 +717,10 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
     for (int i = 0; i < baselineCount; i++)
         if (IsIPLiteralAny(baseline[i].destination)) baseline[kept++] = baseline[i];
     baselineCount = kept;
-    bool baselineKnown = true;
 
     bool changed = !known || wantIsolated != appliedIsolated ||
                    peerCount != appliedPeerCount || allowCount != appliedAllowCount ||
-                   baselineKnown != appliedBaselineKnown || baselineCount != appliedBaselineCount;
+                   baselineCount != appliedBaselineCount;
     for (int i = 0; !changed && i < baselineCount; i++) {
         if (strcmp(baseline[i].destination, appliedBaseline[i].destination) != 0 ||
             strcmp(baseline[i].protocol, appliedBaseline[i].protocol) != 0 ||
@@ -760,21 +758,16 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
         for (int i = 0; i < allowCount; i++) allowed[i] = allow[i];
 
         DWORD status = Wfp_ApplyState(&hubTargets, wantIsolated ? 1 : 0, blocked, peerCount,
-                           allowed, allowCount, baseline, baselineCount, baselineKnown ? 1 : 0);
+                           allowed, allowCount, baseline, baselineCount, 0);
         if (status != ERROR_SUCCESS) {
             snprintf(g_ApplyNote, sizeof(g_ApplyNote), "policy not applied: WFP error 0x%08lx", (unsigned long)status);
             printf("[-] The user-mode filtering engine refused the change; state not applied.\n");
             return;
         }
-        if (wantIsolated && baselineKnown) {
+        if (wantIsolated) {
             printf("[!] Threat Nullification: host isolated. Permitted: hub %s, loopback, "
                    "%d baseline rule(s), %d allow-list address(es). %d peer block(s) in force.\n",
                    hubTargets.addresses[0], baselineCount, allowCount, peerCount);
-        } else if (wantIsolated) {
-            printf("[!] Threat Nullification: host isolated. This hub sends no baseline policy, so "
-                   "the built-in floor applies: hub %s, loopback, DHCP and DNS to any destination, "
-                   "%d allow-list address(es). %d peer block(s) in force.\n",
-                   hubTargets.addresses[0], allowCount, peerCount);
         } else {
             printf("[+] Threat neutralized: host isolation lifted. %d peer block(s) in force.\n", peerCount);
         }
@@ -788,7 +781,6 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
     appliedAllowCount = allowCount;
     memcpy(appliedBaseline, baseline, sizeof(baseline));
     appliedBaselineCount = baselineCount;
-    appliedBaselineKnown = baselineKnown;
     known = true;
     fflush(stdout);
 }
@@ -833,7 +825,7 @@ static void HubContact(bool accepted) {
         for (int i = 0; i < appliedPeerCount; i++) blocked[i] = appliedPeers[i];
         released = (Wfp_ApplyState(&appliedHubTargets, 0, blocked, appliedPeerCount, NULL, 0,
                                    appliedBaseline, appliedBaselineCount,
-                                   appliedBaselineKnown ? 1 : 0) == ERROR_SUCCESS);
+                                   0) == ERROR_SUCCESS);
     }
 
     if (released) {

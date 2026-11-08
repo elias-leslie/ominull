@@ -75,6 +75,8 @@ type actionPlan struct {
 	// AskFirst: a screen session asks the person at the keyboard first
 	// (audited, not digested).
 	AskFirst bool
+	// AfterSuccess runs once the handler succeeded.
+	AfterSuccess func()
 }
 
 // agentLabelHeader is the name an agent calling with the shared hub admin
@@ -211,6 +213,10 @@ func (s *Server) authorized(resolve actionResolver, next http.HandlerFunc) http.
 			return
 		}
 
+		if plan.Kind == grants.ActionKindIsolation {
+			s.isolationMu.Lock()
+			defer s.isolationMu.Unlock()
+		}
 		au, err := s.responseAuth.Authorize(r.Context(), &grants.AuthorizeInput{
 			TenantID: tenantID, Requester: requester, Kind: plan.Kind, Targets: plan.Targets, Payload: payload,
 			SessionSeconds: plan.SessionSeconds,
@@ -243,6 +249,9 @@ func (s *Server) authorized(resolve actionResolver, next http.HandlerFunc) http.
 		}
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next(rec, r)
+		if rec.status < 300 && plan.AfterSuccess != nil {
+			plan.AfterSuccess()
+		}
 		if len(kept) > 0 {
 			if rec.status >= 300 {
 				if err := s.store.DeleteEnforcementGrants(kept); err != nil {
@@ -366,6 +375,10 @@ func normalizedAllowIPs(w http.ResponseWriter, body []byte, in []string, ranges 
 	if len(in) == 0 {
 		return nil, nil, true
 	}
+	if len(in) > maxAllowEntries {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("allow_ips: %d entries; an agent holds %d", len(in), maxAllowEntries))
+		return nil, nil, false
+	}
 	out := make([]string, 0, len(in))
 	for _, raw := range in {
 		validate := validateIP
@@ -412,16 +425,21 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	}
 	req.AllowIPs = allow
 	var notEnforced []string
+	var afterSuccess func()
 	if mode == isolationModeSelective {
 		// The fabric is expanded here, before the hub signs, so the
 		// signed list and the one the agent enforces are the same.
-		p, err := s.fabricPolicyFor(req.EndpointID, time.Now().UTC())
+		now := time.Now().UTC()
+		s.lookupUnresolvedTrustNames(r.Context(), req.EndpointID, now)
+		p, err := s.fabricPolicyFor(req.EndpointID, now)
 		if err != nil {
 			writeJSONError(w, http.StatusConflict, "trust fabric: "+err.Error())
 			return nil, false
 		}
-		req.AllowIPs = unionAddrs(req.AllowIPs, p.Enforced)
-		notEnforced = p.NotEnforced
+		var over []string
+		req.AllowIPs, over = capAllowList(unionAddrs(allow, p.Enforced))
+		notEnforced = append(p.NotEnforced, over...)
+		afterSuccess = s.freezeIsolationFabric(req.EndpointID, allow, now)
 		if nb == nil {
 			nb = body
 		}
@@ -437,12 +455,12 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 		summary += " except " + strings.Join(req.AllowIPs, ", ")
 	}
 	if len(notEnforced) > 0 {
-		summary += "; trusted ranges not enforced (the agent takes single addresses, or the range is too wide): " + strings.Join(notEnforced, ", ")
+		summary += "; trusted destinations not enforced (too wide, the agent takes few ranges, or the list is full): " + strings.Join(notEnforced, ", ")
 	}
 	if req.Force {
 		summary += " (readiness gate overridden)"
 	}
-	return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}, Body: nb}, true
+	return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}, Body: nb, AfterSuccess: afterSuccess}, true
 }
 
 func (s *Server) resolveUnisolate(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {

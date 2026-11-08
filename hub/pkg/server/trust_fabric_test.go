@@ -45,7 +45,7 @@ func TestTrustFabricIsolationModes(t *testing.T) {
 
 	for _, body := range []string{
 		`{"scope_type":"site","scope_id":"store-12","kind":"ip","value":"198.51.100.25","action":"allow","justification":"payments"}`,
-		`{"scope_type":"group","scope_id":"pos","kind":"cidr","value":"203.0.113.0/28","action":"allow"}`,
+		`{"scope_type":"group","scope_id":"pos","kind":"cidr","value":"203.0.113.0/24","action":"allow"}`,
 		`{"scope_type":"provider","kind":"ip","value":"198.51.100.99","action":"allow"}`,
 		`{"scope_type":"site","scope_id":"store-12","kind":"ip","value":"198.51.100.99","action":"deny"}`,
 	} {
@@ -65,7 +65,7 @@ func TestTrustFabricIsolationModes(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &eff); err != nil || w.Code != http.StatusOK {
 		t.Fatalf("effective: %d %s", w.Code, w.Body.String())
 	}
-	if strings.Join(eff.Policy.Enforced, ",") != "198.51.100.25" || strings.Join(eff.Policy.NotEnforced, ",") != "203.0.113.0/28" {
+	if strings.Join(eff.Policy.Enforced, ",") != "198.51.100.25" || strings.Join(eff.Policy.NotEnforced, ",") != "203.0.113.0/24" {
 		t.Fatalf("policy %+v", eff.Policy)
 	}
 	if eff.Decision.Action != trustfabric.Deny || eff.Decision.Scope != trustfabric.ScopeSite {
@@ -95,7 +95,7 @@ func TestTrustFabricIsolationModes(t *testing.T) {
 	}
 	isolationID := recs[0].ID
 	snaps := auditActions(t, store, "ISOLATION_FABRIC_SNAPSHOT")
-	if len(snaps) != 1 || !strings.Contains(snaps[0].Details, isolationID) || !strings.Contains(snaps[0].Details, "203.0.113.0/28") {
+	if len(snaps) != 1 || !strings.Contains(snaps[0].Details, isolationID) || !strings.Contains(snaps[0].Details, "203.0.113.0/24") {
 		t.Fatalf("snapshot %+v", snaps)
 	}
 

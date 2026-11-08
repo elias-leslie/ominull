@@ -94,7 +94,7 @@ int main(void) {
     const char *blocked[] = {"2001:db8::42"};
     live_count = 5;
     fail_add = 2;
-    DWORD result = Wfp_ApplyState(NULL, 0, blocked, 1, NULL, 0, NULL, 0, 1);
+    DWORD result = Wfp_ApplyState(NULL, 0, blocked, 1, NULL, 0, NULL, 0, 0);
     if (result == 0 || live_count != 5 || transaction) {
         fprintf(stderr,
                 "failed replacement lost previous filters or reported success: "
@@ -104,7 +104,7 @@ int main(void) {
     }
     add_calls = 0;
     fail_add = 0;
-    assert(Wfp_ApplyState(NULL, 0, blocked, 1, NULL, 0, NULL, 0, 1) == 0);
+    assert(Wfp_ApplyState(NULL, 0, blocked, 1, NULL, 0, NULL, 0, 0) == 0);
     assert(live_count == 10 && !transaction);
     puts("WFP replacement commits both directions and preserves old state on "
          "failure");

@@ -222,6 +222,9 @@ func TestAgentTrustDelivery(t *testing.T) {
 	}
 
 	// The detector's isolation is signed with the narrow key.
+	if err := store.SetEndpointIsolation("ep-b", true, nil); err != nil {
+		t.Fatal(err)
+	}
 	srv.signDetectorIsolation("ep-b", "lateral sweep")
 	ag := grantsIn(t, trustBeat(t, srv, "ep-b", &response.AgentTrustReport{V: 1, Keys: "pinned", IsoSeen: 1, MeshSeen: mg[0].Grant.IssuedAt}))
 	if len(ag) != 1 || ag[0].Grant.ActionKind != response.ActionKindAutoIsolate || ag[0].Grant.Verify(keyOf(t, keys.AutoIsolateKey), time.Now()) != nil {

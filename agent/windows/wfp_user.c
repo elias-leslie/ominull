@@ -423,20 +423,19 @@ static DWORD Wfp_AddHubPermits(const OMINULL_HUB_TARGETS *hub) {
 
 /* Wfp_IsolateHost builds the default-deny and the floor that has to survive it.
  *
- * The floor is loopback, the hub, DHCP and DNS - the same four the Linux chains
- * permit, so a quarantined host behaves the same whichever retained agent runs.
- * What sits above the floor is the hub's allow list, which is
- * the mechanism a scoped trust rule is delivered by.
+ * The floor is loopback, the hub and the signed baseline - the same rules the
+ * Linux chains hold, so a quarantined host behaves the same whichever agent
+ * runs. What sits above the floor is the hub's allow list, which is the
+ * mechanism a scoped trust rule is delivered by.
  *
  * DNS and DHCP used to be permitted to *any* destination here. Both were holes
  * with a justification attached rather than policy, and neither was visible to
  * whoever clicked Isolate. They are now whatever the baseline policy names, and
- * the hub resolves that per endpoint. A hub too old to send one leaves
- * baselineKnown at 0 and the old permits stay, because tightening the floor
- * under a fleet whose hub never asked for it would cut hosts off. */
+ * the hub resolves that per endpoint. anyDhcp is the one exception, for the
+ * hand-run recovery tool, which has no hub to ask. */
 static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
                       const OMINULL_BASELINE_RULE* baseline, int baselineCount,
-                      int baselineKnown) {
+                      int anyDhcp) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
 
     printf("[*] Activating WFP User-Mode Network Isolation (Default-Deny)...\n");
@@ -463,10 +462,9 @@ static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
     /* 3. The DHCP part of the baseline, above the peer blocks: a lease that
      *    expires because a quarantine named the DHCP server costs this host the
      *    address the hub reaches it on. */
-    if (baselineKnown) {
-        status = AddBaselineRules(baseline, baselineCount, 1, OMINULL_WEIGHT_PERMIT_DHCP);
-    } else {
-        /* No policy from this hub. DHCPv6 is a different pair of ports
+    status = AddBaselineRules(baseline, baselineCount, 1, OMINULL_WEIGHT_PERMIT_DHCP);
+    if (status == ERROR_SUCCESS && anyDhcp) {
+        /* DHCPv6 is a different pair of ports
          * (546/547) rather than the same two, so the two families get one rule
          * each rather than one rule on four layers. */
         UdpRemotePort(cond, 67);
@@ -486,13 +484,7 @@ static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
     /* 4. The rest of the baseline - DNS, NTP, whatever else the policy names.
      *    Below the peer block on purpose: quarantining a rogue resolver has to
      *    beat the rule that lets this host resolve names. */
-    if (baselineKnown) {
-        status = AddBaselineRules(baseline, baselineCount, 0, OMINULL_WEIGHT_PERMIT_DNS);
-    } else {
-        UdpRemotePort(cond, 53);
-        status = AddFilterEverywhere(L"Ominull DNS Permit", FWP_ACTION_PERMIT,
-                                     OMINULL_WEIGHT_PERMIT_DNS, cond, 2, OMINULL_FAMILY_BOTH);
-    }
+    status = AddBaselineRules(baseline, baselineCount, 0, OMINULL_WEIGHT_PERMIT_DNS);
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add DNS permit filter: 0x%08lX\n", (unsigned long)status);
         return status;
@@ -590,15 +582,15 @@ static DWORD Wfp_DeleteOwnFilters(void) {
 }
 
 DWORD Wfp_UnisolateHost(void) {
-    return Wfp_ApplyState(NULL, 0, NULL, 0, NULL, 0, NULL, 0, 1);
+    return Wfp_ApplyState(NULL, 0, NULL, 0, NULL, 0, NULL, 0, 0);
 }
 
 DWORD Wfp_IsolateHost(const char *address, UINT16 port, const char *const *allow, int allowCount,
-                      const OMINULL_BASELINE_RULE *baseline, int baselineCount, int baselineKnown) {
+                      const OMINULL_BASELINE_RULE *baseline, int baselineCount, int anyDhcp) {
     OMINULL_HUB_TARGETS hub = {0};
     if (!address || strlen(address) >= sizeof(hub.addresses[0]) || !port) return ERROR_INVALID_PARAMETER;
     strcpy(hub.addresses[0], address); hub.count = 1; hub.port = port;
-    return Wfp_ApplyState(&hub, 1, NULL, 0, allow, allowCount, baseline, baselineCount, baselineKnown);
+    return Wfp_ApplyState(&hub, 1, NULL, 0, allow, allowCount, baseline, baselineCount, anyDhcp);
 }
 
 /* Wfp_BlockIP quarantines one peer, in both directions and in whichever address
@@ -633,7 +625,7 @@ DWORD Wfp_ApplyState(const OMINULL_HUB_TARGETS *hub, int isolate,
                      const char* const* blockedIPs, int blockedCount,
                      const char* const* allowIPs, int allowCount,
                      const OMINULL_BASELINE_RULE* baseline, int baselineCount,
-                     int baselineKnown) {
+                     int anyDhcp) {
     if (!g_hEngine) return ERROR_INVALID_HANDLE;
     if (blockedCount < 0 || allowCount < 0 || baselineCount < 0 ||
         (blockedCount && !blockedIPs) || (allowCount && !allowIPs) ||
@@ -663,7 +655,7 @@ DWORD Wfp_ApplyState(const OMINULL_HUB_TARGETS *hub, int isolate,
     if (status == ERROR_SUCCESS && (isolate || blockedCount)) status = Wfp_AddIPv6LinkControl();
     if (status == ERROR_SUCCESS && isolate)
         status = Wfp_AddIsolationRules(allowIPs, allowCount,
-                                       baseline, baselineCount, baselineKnown);
+                                       baseline, baselineCount, anyDhcp);
     for (int i = 0; status == ERROR_SUCCESS && i < blockedCount; i++)
         status = Wfp_BlockIP(blockedIPs[i]);
     if (status != ERROR_SUCCESS) {
@@ -765,10 +757,9 @@ int main(int argc, char* argv[]) {
         }
         const char *hubIp = argv[2];
         /* No hub connection here, so no baseline policy: this is the recovery
-         * tool, and it applies the permissive built-in floor. An operator
-         * isolating a host by hand from its own console wants the floor that
-         * keeps DNS and DHCP working, not an empty policy they cannot see. */
-        status = Wfp_IsolateHost(hubIp, (UINT16)port, NULL, 0, NULL, 0, 0);
+         * tool. It keeps DHCP so the host keeps its address; names stop, like
+         * any other destination the hub has not named. */
+        status = Wfp_IsolateHost(hubIp, (UINT16)port, NULL, 0, NULL, 0, 1);
     } else if (strcmp(argv[1], "unisolate") == 0) {
         Wfp_UnisolateHost();
     } else if (strcmp(argv[1], "uninstall") == 0) {

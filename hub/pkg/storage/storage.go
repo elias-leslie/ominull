@@ -634,6 +634,7 @@ func (s *Store) initSchema() error {
 		// stored here because the agent now reads its isolation state from its
 		// own heartbeat reply.
 		"ALTER TABLE endpoints ADD COLUMN isolation_allow_ips TEXT DEFAULT ''",
+		"ALTER TABLE endpoints ADD COLUMN isolation_fabric TEXT DEFAULT ''",
 		// Each isolation gets an id when it starts, so the trust fabric
 		// snapshot taken then and every rule change made during it can be
 		// told apart from the next isolation's (trust_fabric.go).
@@ -1048,7 +1049,7 @@ func (s *Store) UpsertEndpoint(ep Endpoint) error {
 		provenance_status=CASE WHEN excluded.provenance_status != '' THEN excluded.provenance_status ELSE endpoints.provenance_status END,
 		evidence_signing_key=CASE WHEN excluded.evidence_signing_key != '' THEN excluded.evidence_signing_key ELSE endpoints.evidence_signing_key END,
 		collector_health=excluded.collector_health,
-		response_capabilities=CASE WHEN excluded.response_capabilities != '' THEN excluded.response_capabilities ELSE endpoints.response_capabilities END,
+		response_capabilities=CASE WHEN excluded.response_capabilities != '' THEN excluded.response_capabilities WHEN excluded.driver_version != COALESCE(endpoints.driver_version, '') THEN '' ELSE endpoints.response_capabilities END,
 		status=excluded.status,
 		last_seen_at=excluded.last_seen_at
 	`
@@ -1092,9 +1093,9 @@ func (s *Store) SetEndpointIsolation(id string, isIsolated bool, allowIPs []stri
 // The mode starts from the allow list given (the one placeholder): explicit
 // with one, full without; the isolate route then names a selective one.
 const isolationStartSQL = "isolation_id = CASE WHEN is_isolated = 1 AND COALESCE(isolation_id, '') != '' THEN isolation_id ELSE lower(hex(randomblob(8))) END, " +
-	"isolation_mode = CASE WHEN ? != '' THEN 'explicit' ELSE 'full' END"
+	"isolation_fabric = '', isolation_mode = CASE WHEN ? != '' THEN 'explicit' ELSE 'full' END"
 
-const isolationClearSQL = "isolation_id = '', isolation_mode = ''"
+const isolationClearSQL = "isolation_id = '', isolation_mode = '', isolation_fabric = ''"
 
 // IsolationRecord is the isolation an endpoint is under.
 type IsolationRecord struct {
@@ -1105,6 +1106,9 @@ type IsolationRecord struct {
 	ID         string
 	Mode       string
 	AllowIPs   []string
+	// Fabric is the fabric a selective isolation carrying names was granted
+	// under (server.isolationFabric), so the names can follow their addresses.
+	Fabric string
 }
 
 // SetIsolationMode records how the current isolation was chosen: full (no
@@ -1116,12 +1120,35 @@ func (s *Store) SetIsolationMode(id, mode string) error {
 	return err
 }
 
+// SetIsolationFabric records the fabric a selective isolation was granted under.
+// Any other isolation that got in first keeps its own terms.
+func (s *Store) SetIsolationFabric(id, fabric string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE endpoints SET isolation_fabric = ? WHERE id = ? AND is_isolated = 1 AND isolation_mode = 'selective'", fabric, id)
+	return err
+}
+
+// UpdateIsolationAllowList changes the list of the one isolation named, if it
+// is still in force and still under that fabric. It reports whether it was.
+func (s *Store) UpdateIsolationAllowList(id, isolationID, fabric string, allowIPs []string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec("UPDATE endpoints SET isolation_allow_ips = ? WHERE id = ? AND is_isolated = 1 AND isolation_id = ? AND isolation_fabric = ?",
+		strings.Join(allowIPs, ","), id, isolationID, fabric)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 // IsolatedEndpoints lists every endpoint under isolation now.
 func (s *Store) IsolatedEndpoints() ([]IsolationRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rows, err := s.db.Query(`SELECT id, COALESCE(tenant_id, ''), COALESCE(location_id, ''), COALESCE(role_tag, ''),
-		COALESCE(isolation_id, ''), COALESCE(isolation_mode, ''), COALESCE(isolation_allow_ips, '')
+		COALESCE(isolation_id, ''), COALESCE(isolation_mode, ''), COALESCE(isolation_allow_ips, ''), COALESCE(isolation_fabric, '')
 		FROM endpoints WHERE is_isolated = 1 ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -1131,7 +1158,7 @@ func (s *Store) IsolatedEndpoints() ([]IsolationRecord, error) {
 	for rows.Next() {
 		var r IsolationRecord
 		var allow string
-		if err := rows.Scan(&r.EndpointID, &r.TenantID, &r.LocationID, &r.Role, &r.ID, &r.Mode, &allow); err != nil {
+		if err := rows.Scan(&r.EndpointID, &r.TenantID, &r.LocationID, &r.Role, &r.ID, &r.Mode, &allow, &r.Fabric); err != nil {
 			return nil, err
 		}
 		for _, part := range strings.Split(allow, ",") {

@@ -67,7 +67,15 @@ const (
 	BasisDefault  = "default"
 )
 
-// Rule is one trust rule. Kind is "ip" (a single address) or "cidr".
+// Rule kinds.
+const (
+	KindIP   = "ip"
+	KindCIDR = "cidr"
+	KindFQDN = "fqdn"
+)
+
+// Rule is one trust rule. Kind is "ip" (a single address), "cidr" or "fqdn" (a
+// host name the hub resolves; see ExpandNames).
 type Rule struct {
 	ID            string     `json:"id"`
 	ScopeType     string     `json:"scope_type"`
@@ -183,8 +191,19 @@ func Normalize(r Rule) (Rule, error) {
 			return bad("an allow rule may not cover a whole address family")
 		}
 		r.Value, r.prefix = p.String(), p
+	case "fqdn":
+		// A deny has to hold before the name resolves and while its resolver is
+		// down, and a name with no answer covers nothing. Name the addresses.
+		if r.Action == Deny {
+			return bad("a name rule can only allow; a deny has to name an address or a range")
+		}
+		name, err := normalizeName(value)
+		if err != nil {
+			return bad("%s", err)
+		}
+		r.Value, r.prefix = name, netip.Prefix{}
 	default:
-		return bad("kind must be ip or cidr")
+		return bad("kind must be ip, cidr or fqdn")
 	}
 	if len(r.Justification) > 512 {
 		return bad("justification is longer than 512 characters")
@@ -192,9 +211,78 @@ func Normalize(r Rule) (Rule, error) {
 	return r, nil
 }
 
-// Prefix is the address range a normalized rule covers.
+// normalizeName validates a host name and returns it lower case without a
+// trailing dot. Wildcards are refused: the hub can only resolve a name it can
+// ask about, and "*.example.com" has no answer to enforce.
+func normalizeName(raw string) (string, error) {
+	name := strings.ToLower(strings.TrimSuffix(raw, "."))
+	if name == "" || len(name) > 253 {
+		return "", errors.New("value is not a host name")
+	}
+	labels := strings.Split(name, ".")
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return "", errors.New("value is not a host name")
+		}
+		for _, c := range l {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return "", errors.New("value is not a host name (wildcards are not resolvable)")
+			}
+		}
+	}
+	// A last label of digits only is an address written as a name.
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+		return "", errors.New("value is an address, not a host name; use kind ip")
+	}
+	return name, nil
+}
+
+// ExpandNames replaces each fqdn rule that has answers with one "ip" rule per
+// address, keeping its id, scope, action and everything else, so scope and
+// locks apply to a name's addresses as to any other. A name with no answers
+// stays as it is: it covers no address, and Compile reports it. What the fabric
+// opens is the address, so anything else served from it is reachable too.
+//
+// An answer inside a deny that applies to this endpoint is dropped, whatever the
+// deny's scope or width. Whoever controls a name's DNS chooses its answers, and
+// must not be able to choose an address the operator ruled out.
+func ExpandNames(ep Endpoint, rules []Rule, answers map[string][]netip.Addr, now time.Time) []Rule {
+	var denied []netip.Prefix
+	for _, r := range rules {
+		if r.Action == Deny && r.Active(now) && r.AppliesTo(ep) {
+			if p := r.Prefix(); p.IsValid() {
+				denied = append(denied, p)
+			}
+		}
+	}
+	out := make([]Rule, 0, len(rules))
+	for _, r := range rules {
+		addrs := answers[r.Value]
+		if r.Kind != KindFQDN || len(addrs) == 0 {
+			out = append(out, r)
+			continue
+		}
+		for _, a := range addrs {
+			a = a.Unmap()
+			ruledOut := false
+			for _, p := range denied {
+				ruledOut = ruledOut || p.Contains(a)
+			}
+			if ruledOut {
+				continue
+			}
+			c := r
+			c.Kind, c.Value = KindIP, a.String()
+			c.prefix = netip.PrefixFrom(a, a.BitLen())
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Prefix is the address range a normalized rule covers. A name covers none.
 func (r Rule) Prefix() netip.Prefix {
-	if !r.prefix.IsValid() {
+	if !r.prefix.IsValid() && r.Kind != KindFQDN {
 		if n, err := Normalize(r); err == nil {
 			return n.prefix
 		}
@@ -338,8 +426,9 @@ type Policy struct {
 	Allow []netip.Prefix `json:"allow"`
 	// Entries explain every range a rule decided, allowed or denied.
 	Entries []Entry `json:"entries"`
-	// Withheld lists port-, protocol- or direction-scoped allow rules: the
-	// isolation allow list names addresses only, so they are not in Allow.
+	// Withheld lists rules that opened nothing: port-, protocol- or
+	// direction-scoped allows (the isolation allow list names addresses only)
+	// and names the hub has no answer for.
 	Withheld []Withheld `json:"withheld,omitempty"`
 	// Addresses are the single addresses an allow rule names and the policy
 	// allows: what an agent that takes only literal addresses may be given.
@@ -358,6 +447,11 @@ func Compile(ep Endpoint, rules []Rule, now time.Time) Policy {
 	var policy Policy
 	for _, r := range rules {
 		if !r.Active(now) || !r.AppliesTo(ep) {
+			continue
+		}
+		if r.Kind == KindFQDN {
+			// Unexpanded: the hub has no answer for it yet.
+			policy.Withheld = append(policy.Withheld, Withheld{RuleID: r.ID, Reason: "the hub has no addresses for " + r.Value + " yet"})
 			continue
 		}
 		if r.Action == Allow && (r.Port != 0 || r.Proto != ProtoAny || r.Direction != DirBoth) {

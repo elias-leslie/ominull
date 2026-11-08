@@ -129,16 +129,15 @@ typedef struct {
     int  port;              /* the remote port, in both directions */
 } OMINULL_BASELINE_RULE;
 
-/* baselineKnown distinguishes a hub that sent no policy from a hub whose policy
- * is empty. The first keeps the compiled-in permits - tightening the floor under
- * a fleet whose hub never asked for it would cut hosts off during a hub upgrade.
- * The second means hub and loopback only, and is obeyed. */
+/* An empty baseline means hub and loopback only, and is obeyed. anyDhcp is for
+ * the hand-run recovery tool, which has no policy from a hub: it permits DHCP to
+ * any server so a host isolated from its own console keeps its address. */
 #include "hub_address.h"
 DWORD Wfp_ApplyState(const OMINULL_HUB_TARGETS *hub, int isolate,
                      const char* const* blockedIPs, int blockedCount,
                      const char* const* allowIPs, int allowCount,
                      const OMINULL_BASELINE_RULE* baseline, int baselineCount,
-                     int baselineKnown);
+                     int anyDhcp);
 
 /* Agent_EnforcementStatus is "ok" or the reason this host could not apply
  * isolation rules if it were asked to. Reported on every heartbeat: the hub

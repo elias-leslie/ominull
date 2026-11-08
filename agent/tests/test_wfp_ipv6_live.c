@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
     management.port = 9443;
     const char *allowed[] = {argv[2]}, *blocked[] = {argv[2]},
                *invalid[] = {"fe80::1%11"};
-    CHECK(Wfp_ApplyState(&hub, 1, NULL, 0, allowed, 1, &management, 1, 1) == 0);
+    CHECK(Wfp_ApplyState(&hub, 1, NULL, 0, allowed, 1, &management, 1, 0) == 0);
     MIB_IPNET_ROW2 neighbor = {0};
     neighbor.Address.Ipv6.sin6_family = AF_INET6;
     CHECK(inet_pton(AF_INET6, argv[2], &neighbor.Address.Ipv6.sin6_addr) == 1);
@@ -90,15 +90,15 @@ int main(int argc, char **argv) {
     CHECK(!ConnectPeer(argv[1], 9002) && ConnectPeer(argv[2], 9002));
     puts("Default deny, both hub addresses, exact TCP port and IPv6 allow-list "
          "passed");
-    CHECK(Wfp_ApplyState(&hub, 1, blocked, 1, allowed, 1, &management, 1, 1) ==
+    CHECK(Wfp_ApplyState(&hub, 1, blocked, 1, allowed, 1, &management, 1, 0) ==
           0);
     CHECK(ConnectPeer(argv[2], 9001) && !ConnectPeer(argv[2], 9002));
-    CHECK(Wfp_ApplyState(&hub, 1, invalid, 1, allowed, 1, &management, 1, 1) !=
+    CHECK(Wfp_ApplyState(&hub, 1, invalid, 1, allowed, 1, &management, 1, 0) !=
           0);
     CHECK(ConnectPeer(argv[2], 9001) && !ConnectPeer(argv[2], 9002));
     puts("IPv6 peer block beats allow-list; hub survives; rejected scope "
          "preserves prior state");
-    CHECK(Wfp_ApplyState(&hub, 0, blocked, 1, NULL, 0, NULL, 0, 1) == 0);
+    CHECK(Wfp_ApplyState(&hub, 0, blocked, 1, NULL, 0, NULL, 0, 0) == 0);
     CHECK(ConnectPeer(argv[1], 9002) && !ConnectPeer(argv[2], 9002) &&
           ConnectPeer(argv[2], 9001));
     CHECK(Wfp_UnisolateHost() == 0);

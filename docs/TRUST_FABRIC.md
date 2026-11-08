@@ -48,34 +48,89 @@ audit data by configured policy.
 
 Rules name what an isolated endpoint may still reach. A rule has a scope
 (`provider`, `client` = tenant, `site` = location, `group` = role tag,
-`endpoint`), an `ip` or `cidr` value, `allow` or `deny`, and optionally a
-port and protocol, a direction, `locked`, `expires_at` and a justification.
-Precedence (`hub/pkg/trustfabric`): the hub, loopback and DHCP are always
-reachable; a locked rule cannot be overridden from below (the least specific
-locked scope wins); otherwise the most specific rule wins (scope, then prefix
-length, then port/protocol), deny on a tie; no match means not trusted.
+`endpoint`), an `ip`, `cidr` or `fqdn` value, `allow` or `deny`, and optionally
+a port and protocol, a direction, `locked`, `expires_at` and a justification.
+Precedence (`hub/pkg/trustfabric`): the hub and loopback are always reachable,
+and so is what the signed baseline names (DHCP, the resolvers, NTP); a locked
+rule cannot be overridden from below (the least specific locked scope wins);
+otherwise the most specific rule wins (scope, then prefix length, then
+port/protocol), deny on a tie; no match means not trusted. Rules decide the
+allow list and nothing else: a deny does not take an address out of the baseline.
 
 - `GET|POST /api/v1/trust/rules`, `DELETE /api/v1/trust/rules?id=` (admin).
 - `GET /api/v1/trust/effective?endpoint_id=ID[&addr=A&port=P&proto=tcp]`:
   the compiled allow list, which part agents enforce, and one decision.
-- `POST /api/v1/endpoints/isolate` takes `mode`: `full` reaches only the hub
-  and refuses `allow_ips`; `selective` adds the endpoint's effective policy to
-  `allow_ips` in the same request before the hub signs, so the signed
-  grant carries exactly the list the agent enforces. Without `mode` only the request's own `allow_ips` apply.
-  Detector isolation is always full.
+- `POST /api/v1/endpoints/isolate` takes `mode`: `full` reaches the hub and the
+  signed baseline and refuses `allow_ips`; `selective` adds the endpoint's
+  effective policy to `allow_ips` in the same request before the hub signs, so
+  the signed grant carries exactly the list the agent enforces. Without `mode`
+  only the request's own `allow_ips` apply. Detector isolation is always full.
 
-Agents from 1.8.65 report `allow_prefixes` and enforce address ranges in the
-allow list (Linux iptables `-s/-d addr/len`, Windows WFP address-mask
-filters), no wider than `/8` (IPv4) or `/32` (IPv6); the hub and the agent
-both refuse wider ones. Selective isolation of such an endpoint carries the
-policy's merged prefixes; a request may name a range only for one endpoint
-(bulk isolation names addresses). An older agent refuses a grant naming a
-range, so for it only addresses a rule names (`ip`, or a `/32` / `/128`) and
-the policy allows are added, a trusted range is listed as not enforced in the
-audit summary and stays closed, and a request naming a range is refused
-before the hub signs it. Port- or
-direction-scoped allows are withheld for the same reason. Each isolation gets
-an id; the fabric as it stood is recorded under it
+### What an agent receives
+
+An allow list holds at most 32 entries, because an agent refuses a grant with
+more and would then not isolate at all. Single addresses go first and ranges
+follow widest first, then what only a name answered, each name's newest answer
+first; what does not fit is listed as not enforced in the audit
+summary and in `trust/effective`, and stays closed.
+
+Agents from 1.8.65 report `allow_prefixes` and enforce ranges (Linux iptables
+`-s/-d addr/len`, Windows WFP address-mask filters), no wider than `/8` (IPv4)
+or `/32` (IPv6); the hub and the agent both refuse wider ones. A request may
+name a range only for one endpoint (bulk isolation names addresses).
+
+An older agent refuses a grant naming a range and then applies nothing, while
+the hub would report it isolated. So the hub treats an agent as taking ranges
+only if its version is at least 1.8.65 and it reports the capability; a report
+is dropped when the agent changes version and has not repeated it, because a
+downgraded agent left a capability behind that it did not have. For such an
+agent a range of up to 16 addresses is spelled out, wider ranges are listed as
+not enforced and stay closed, and a request naming a range is refused before the
+hub signs it. Port- or direction-scoped allows are withheld on every agent,
+since the allow list carries addresses only.
+
+### Names
+
+An `fqdn` rule names one host exactly, with no wildcards, and can only allow: a
+deny has to hold before a name resolves and while its resolver is down, so it
+names an address or a range. Whoever controls a name's DNS chooses its answers, so
+an answer inside a deny that applies to the endpoint is dropped, whatever the
+deny's scope or width. The hub resolves a name
+when the rule is created, when an isolation needs it and every
+`trust_name_refresh_seconds` (default 300) while an active rule or isolation uses
+it. Agents never resolve a trusted name and get only addresses, in the signed
+grant. Answers that are unspecified, loopback, multicast or link-local never
+open anything, and at most 16 addresses are kept per name. A name with no answer
+yet stays closed and is listed as not enforced.
+
+When the answer changes, each selective isolation using the name gets a new grant
+under the same isolation id (`TRUST_NAME_REGRANTED`), built from the rules, the
+endpoint's scope and capabilities and the signed baseline as they stood when the
+isolation started; only the addresses change, except that an agent that has since
+lost range support gets ranges spelled out or closed. Addresses a name no longer returns stay open
+for `trust_name_retain_minutes` (default 60, 0 closes them at once) so established
+clients and cached answers keep working; only then are they re-signed out. A
+lookup failure closes nothing and signs nothing; the error is kept with the name.
+
+What this does not do: the agent filters addresses, so a name opens everything
+else hosted on those addresses, and the hub's answer may differ from what a
+geo-aware resolver would tell the endpoint, in which case the endpoint's own
+answer stays closed. Run the hub against the same resolver as the endpoints when
+that matters.
+
+### DNS under isolation
+
+There is no permit for DNS to any resolver left in an agent, on either platform:
+an isolated host reaches a resolver only if the signed baseline or the allow list
+names it. The Windows hand-run recovery tool, which has no hub to ask, keeps DHCP
+to any server and has no DNS permit. Linux agents report the upstream resolver
+behind systemd-resolved's local stub, so the readiness check refuses (unless
+overridden) when a baseline does not cover it. A named resolver still answers any
+query, so DNS tunnelling through it is not closed.
+
+### Audit
+
+Each isolation gets an id; the fabric as it stood is recorded under it
 (`ISOLATION_FABRIC_SNAPSHOT`), and a rule created or deleted while it is in
 force is recorded against it (`TRUST_RULE_DURING_ISOLATION`) without changing
 it. An endpoint allow rule written while that endpoint is isolated expires

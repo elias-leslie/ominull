@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,10 +28,13 @@ import (
 //   - omitted: the request's own allow_ips only, as before modes existed.
 //
 // Agents that report allow_prefixes enforce address ranges (no wider than /8
-// for IPv4 or /32 for IPv6); older agents take single addresses and refuse a
-// grant naming a range. For those, a fabric range wider than one address is
-// reported as not enforced rather than opened, so selective isolation errs
-// closed.
+// for IPv4 or /32 for IPv6). An older agent takes single addresses only, and a
+// list naming a range cuts nothing off at all on the ones that predate grants,
+// so it gets a small range spelled out as addresses; a bigger one is reported as
+// not enforced rather than opened, so selective isolation errs closed.
+//
+// A name rule (kind fqdn) is resolved by the hub, which signs the addresses:
+// the agent never trusts a name. See trust_names.go.
 
 const (
 	isolationModeFull      = "full"
@@ -54,6 +58,14 @@ func parseIsolationMode(raw string) (string, error) {
 const (
 	allowMinBitsV4 = 8
 	allowMinBitsV6 = 32
+	// maxAllowEntries is what an agent holds (TRUST_MAX_ALLOW, agent_trust.h).
+	// It refuses a grant naming more, and that isolation would not apply.
+	maxAllowEntries = 32
+	// allowPrefixesAgentVersion is the first agent that enforces ranges.
+	allowPrefixesAgentVersion = "1.8.65"
+	// addressOnlyMaxRange is the biggest range spelled out as addresses for an
+	// agent that takes no ranges; the agent's list holds few more than this.
+	addressOnlyMaxRange = 16
 )
 
 // validateAllowEntry accepts an address or a bounded address range and
@@ -118,10 +130,20 @@ func allowPrefixProblem(pre netip.Prefix) string {
 }
 
 // takesAllowRanges reports whether the endpoint's agent enforces address
-// ranges in its isolation allow list.
+// ranges in its isolation allow list. The version is checked as well as the
+// capability: a capability outlives the agent that reported it when a host goes
+// back to an older one (a restored VM did, live: its 1.8.40 agent still showed
+// allow_prefixes, took a range, and applied no isolation at all).
 func (s *Server) takesAllowRanges(endpointID string) bool {
 	ep, err := s.store.GetEndpoint(endpointID)
-	return err == nil && ep != nil && parseResponseCapabilities(ep.ResponseCapabilities).AllowPrefixes
+	return err == nil && ep != nil && agentTakesAllowRanges(ep)
+}
+
+func agentTakesAllowRanges(ep *storage.Endpoint) bool {
+	if ep.DriverVersion != "" && compareVersions(ep.DriverVersion, allowPrefixesAgentVersion) < 0 {
+		return false
+	}
+	return parseResponseCapabilities(ep.ResponseCapabilities).AllowPrefixes
 }
 
 // allowRangesProblem refuses ranges for an agent that would reject the grant.
@@ -140,6 +162,8 @@ type fabricPolicy struct {
 	trustfabric.Policy
 	Enforced    []string `json:"enforced"`
 	NotEnforced []string `json:"not_enforced,omitempty"`
+	// Names are the applicable name rules and what the hub resolved them to.
+	Names []storage.TrustNameAnswer `json:"names,omitempty"`
 }
 
 func (s *Server) fabricPolicyFor(endpointID string, now time.Time) (fabricPolicy, error) {
@@ -154,34 +178,190 @@ func (s *Server) fabricPolicyFor(endpointID string, now time.Time) (fabricPolicy
 	if err != nil {
 		return fabricPolicy{}, err
 	}
-	p := fabricPolicy{Policy: trustfabric.Compile(trustfabric.Endpoint{
-		ID: ep.ID, TenantID: ep.TenantID, LocationID: ep.LocationID, Role: ep.RoleTag,
-	}, rules, now)}
-	p.Enforced = []string{}
-	if parseResponseCapabilities(ep.ResponseCapabilities).AllowPrefixes {
-		for _, pre := range p.Allow {
-			switch {
-			case allowPrefixProblem(pre) != "":
-				p.NotEnforced = append(p.NotEnforced, pre.String())
-			case pre.IsSingleIP():
-				p.Enforced = append(p.Enforced, pre.Addr().String())
-			default:
-				p.Enforced = append(p.Enforced, pre.String())
+	answers, err := s.store.TrustNameAnswers()
+	if err != nil {
+		return fabricPolicy{}, err
+	}
+	return compileFabric(ep, rules, answers, now), nil
+}
+
+func fabricEndpoint(ep *storage.Endpoint) trustfabric.Endpoint {
+	return trustfabric.Endpoint{ID: ep.ID, TenantID: ep.TenantID, LocationID: ep.LocationID, Role: ep.RoleTag}
+}
+
+// compileFabric is an endpoint's policy under the given rules and name answers.
+func compileFabric(ep *storage.Endpoint, rules []trustfabric.Rule, answers map[string]storage.TrustNameAnswer, now time.Time) fabricPolicy {
+	return compileFabricFor(fabricEndpoint(ep), agentTakesAllowRanges(ep), rules, answers, now)
+}
+
+func compileFabricFor(fe trustfabric.Endpoint, ranges bool, rules []trustfabric.Rule, answers map[string]storage.TrustNameAnswer, now time.Time) fabricPolicy {
+	p := fabricPolicy{Policy: trustfabric.Compile(fe, trustfabric.ExpandNames(fe, rules, answerAddrs(answers), now), now)}
+	listed := map[string]bool{}
+	for _, r := range rules {
+		if r.Kind == trustfabric.KindFQDN && r.Active(now) && r.AppliesTo(fe) && !listed[r.Value] {
+			listed[r.Value] = true
+			a, ok := answers[r.Value]
+			if !ok {
+				a = storage.TrustNameAnswer{Name: r.Value}
+			}
+			p.Names = append(p.Names, a)
+		}
+	}
+	p.Enforced, p.NotEnforced = allowEntries(p.Policy, ranges, nameAddressRanks(rules, p.Names, fe, now))
+	for _, w := range p.Withheld {
+		p.NotEnforced = append(p.NotEnforced, w.Reason)
+	}
+	return p
+}
+
+// nameAddressRanks orders the addresses that only a name put on the list: every
+// name's newest answer first, then every name's second newest, and so on, so
+// one name's old addresses cannot push out another name's current one. An
+// address a rule also names outright is not here.
+func nameAddressRanks(rules []trustfabric.Rule, names []storage.TrustNameAnswer, fe trustfabric.Endpoint, now time.Time) map[netip.Addr]int {
+	ranks := map[netip.Addr]int{}
+	for _, n := range names {
+		for i, entry := range n.Addrs {
+			a, err := netip.ParseAddr(entry.Addr)
+			if err != nil {
+				continue
+			}
+			if have, ok := ranks[a]; !ok || i+1 < have {
+				ranks[a] = i + 1
 			}
 		}
-		return p, nil
 	}
-	named := map[netip.Addr]bool{}
-	for _, a := range p.Addresses {
-		named[a] = true
-		p.Enforced = append(p.Enforced, a.String())
-	}
-	for _, pre := range p.Allow {
-		if !pre.IsSingleIP() || !named[pre.Addr()] {
-			p.NotEnforced = append(p.NotEnforced, pre.String())
+	for _, r := range rules {
+		if r.Kind == trustfabric.KindFQDN || !r.Active(now) || !r.AppliesTo(fe) {
+			continue
+		}
+		if pre := r.Prefix(); pre.IsSingleIP() {
+			delete(ranks, pre.Addr())
 		}
 	}
-	return p, nil
+	return ranks
+}
+
+// allowEntries turns a compiled policy into the list an agent can hold: what a
+// rule names outright first (single addresses, then ranges, widest first), then
+// what only a name put there, by rank. What does not fit stays closed and is
+// reported.
+func allowEntries(pol trustfabric.Policy, ranges bool, ranks map[netip.Addr]int) (enforced, notEnforced []string) {
+	enforced = []string{}
+	seen := map[netip.Addr]bool{}
+	var addrs []netip.Addr
+	var wide []netip.Prefix
+	addAddr := func(a netip.Addr) {
+		if !seen[a] {
+			seen[a] = true
+			addrs = append(addrs, a)
+		}
+	}
+	for _, a := range pol.Addresses {
+		addAddr(a)
+	}
+	for _, pre := range pol.Allow {
+		hostBits := pre.Addr().BitLen() - pre.Bits()
+		switch {
+		case pre.IsSingleIP():
+			addAddr(pre.Addr())
+		case ranges && allowPrefixProblem(pre) == "":
+			wide = append(wide, pre)
+		case !ranges && hostBits < 31 && 1<<hostBits <= addressOnlyMaxRange:
+			for a := pre.Addr(); pre.Contains(a); a = a.Next() {
+				addAddr(a)
+			}
+		default:
+			notEnforced = append(notEnforced, pre.String())
+		}
+	}
+	if ranges {
+		// A named address inside a range the list already carries needs no entry.
+		kept := addrs[:0]
+		for _, a := range addrs {
+			covered := false
+			for _, pre := range wide {
+				covered = covered || pre.Contains(a)
+			}
+			if !covered {
+				kept = append(kept, a)
+			}
+		}
+		addrs = kept
+	}
+	type namedEntry struct {
+		rank int
+		addr netip.Addr
+		text string
+	}
+	var ruleAddrs []netip.Addr
+	var ruleWide []netip.Prefix
+	var named []namedEntry
+	for _, a := range addrs {
+		if r := ranks[a]; r != 0 {
+			named = append(named, namedEntry{r, a, a.String()})
+		} else {
+			ruleAddrs = append(ruleAddrs, a)
+		}
+	}
+	for _, pre := range wide {
+		// Compile merges neighbouring addresses; a range made only of what names
+		// answered is still only as important as those names' answers.
+		if r := namedRangeRank(pre, ranks); r != 0 {
+			named = append(named, namedEntry{r, pre.Addr(), pre.String()})
+		} else {
+			ruleWide = append(ruleWide, pre)
+		}
+	}
+	sort.Slice(ruleAddrs, func(i, j int) bool { return ruleAddrs[i].Less(ruleAddrs[j]) })
+	sort.SliceStable(ruleWide, func(i, j int) bool { return ruleWide[i].Bits() < ruleWide[j].Bits() })
+	sort.Slice(named, func(i, j int) bool {
+		if named[i].rank != named[j].rank {
+			return named[i].rank < named[j].rank
+		}
+		return named[i].addr.Less(named[j].addr)
+	})
+	for _, a := range ruleAddrs {
+		enforced = append(enforced, a.String())
+	}
+	for _, pre := range ruleWide {
+		enforced = append(enforced, pre.String())
+	}
+	for _, n := range named {
+		enforced = append(enforced, n.text)
+	}
+	enforced, over := capAllowList(enforced)
+	return enforced, append(notEnforced, over...)
+}
+
+// namedRangeRank is the best rank in a range every address of which came only
+// from a name, or 0 if a rule has a part in it.
+func namedRangeRank(pre netip.Prefix, ranks map[netip.Addr]int) int {
+	hostBits := pre.Addr().BitLen() - pre.Bits()
+	if hostBits >= 31 || 1<<hostBits > len(ranks) {
+		return 0
+	}
+	count, best := 0, 0
+	for a, r := range ranks {
+		if pre.Contains(a) {
+			count++
+			if best == 0 || r < best {
+				best = r
+			}
+		}
+	}
+	if count != 1<<hostBits {
+		return 0
+	}
+	return best
+}
+
+// capAllowList keeps what an agent holds; the rest stays closed.
+func capAllowList(list []string) (kept, over []string) {
+	if len(list) <= maxAllowEntries {
+		return list, nil
+	}
+	return list[:maxAllowEntries], list[maxAllowEntries:]
 }
 
 // unionAddrs merges address lists, first occurrence kept.
@@ -248,6 +428,9 @@ func (s *Server) handleTrustRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit(r, "TRUST_RULE_CREATED", created.ID, describeRule(created))
+		if created.Kind == trustfabric.KindFQDN {
+			s.lookupTrustName(r.Context(), created.Value, now)
+		}
 		s.auditRuleDuringIsolation(r, isolated, created, "created")
 		writeJSON(w, http.StatusCreated, created)
 	case http.MethodDelete:
@@ -358,13 +541,12 @@ func (s *Server) handleTrustEffective(w http.ResponseWriter, r *http.Request) {
 		}
 		ep, _ := s.store.GetEndpoint(id)
 		rules, err := s.store.TrustRules()
-		if err != nil || ep == nil {
+		answers, aerr := s.store.TrustNameAnswers()
+		if err != nil || aerr != nil || ep == nil {
 			writeJSONError(w, http.StatusInternalServerError, "trust rules unavailable")
 			return
 		}
-		resp["decision"] = trustfabric.Decide(trustfabric.Endpoint{
-			ID: ep.ID, TenantID: ep.TenantID, LocationID: ep.LocationID, Role: ep.RoleTag,
-		}, rules, t, now)
+		resp["decision"] = trustfabric.Decide(fabricEndpoint(ep), trustfabric.ExpandNames(fabricEndpoint(ep), rules, answerAddrs(answers), now), t, now)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

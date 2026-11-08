@@ -600,6 +600,13 @@ func (s *Server) signDetectorIsolation(endpointID, reason string) {
 	if err != nil {
 		return
 	}
+	// An owner's release may have got in since the row was written; this grant
+	// is newer than the release's and would undo it.
+	s.isolationMu.Lock()
+	defer s.isolationMu.Unlock()
+	if isolated, _, err := s.store.GetEndpointIsolation(endpointID); err != nil || !isolated {
+		return
+	}
 	raw, _ := json.Marshal(g.Grant)
 	if err := s.store.SaveEnforcementGrants([]storage.StoredGrant{{
 		GrantID: g.Grant.GrantID, TenantID: g.Grant.TenantID, Target: endpointID, Kind: string(g.Grant.ActionKind),

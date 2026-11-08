@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -80,6 +81,11 @@ type Server struct {
 	responseStore *response.Store
 	// responseAuth signs what agents act on; nil refuses those actions.
 	responseAuth grants.Client
+	// trustNameLookup resolves a trust rule's name; nil uses the hub's resolver.
+	trustNameLookup func(ctx context.Context, name string) ([]netip.Addr, error)
+	// isolationMu puts signing an isolation's grant and recording it in one
+	// step, so the newest grant an agent sees is the state the hub recorded.
+	isolationMu sync.Mutex
 	// maintBlocks is why scheduled package runs could not run (health findings).
 	maintBlocks maintenanceBlocks
 	// jobWake wakes ominullctl maint wait long-polls on job events.
@@ -438,7 +444,10 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 	}
 	s.startScan = s.scanner.StartScan
 	s.detector = detector.New(store, nil, func(endpointID, reason string) error {
-		if err := s.store.SetEndpointIsolation(endpointID, true, nil); err != nil {
+		s.isolationMu.Lock()
+		err := s.store.SetEndpointIsolation(endpointID, true, nil)
+		s.isolationMu.Unlock()
+		if err != nil {
 			if errors.Is(err, storage.ErrMonitorOnly) {
 				// A hypervisor is never isolated, not even automatically; the
 				// detector's finding stands and asks for guest containment.
@@ -733,6 +742,7 @@ func (s *Server) Start(addr string) error {
 	s.runFloorDrill(time.Now().UTC())
 	go s.floorDrillLoop()
 	go s.reconcilePendingGrantsLoop()
+	go s.trustNameLoop()
 	go s.agentRolloutLoop()
 	go s.maintenanceScheduleLoop()
 	go s.sessionJobsLoop()

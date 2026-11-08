@@ -28,7 +28,7 @@ func TestValidateAllowEntry(t *testing.T) {
 }
 
 // Ranges reach only agents that report allow_prefixes; an older agent would
-// refuse the whole grant, so it keeps getting single addresses.
+// refuse the whole grant, so it gets single addresses.
 func TestAllowRangesNeedAnAgentThatEnforcesThem(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
@@ -68,7 +68,9 @@ func TestAllowRangesNeedAnAgentThatEnforcesThem(t *testing.T) {
 	if w := postJSON(t, srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"pos-old","mode":"selective"}`); w.Code != http.StatusOK {
 		t.Fatalf("selective old: %d %s", w.Code, w.Body.String())
 	}
-	if got := allowOf("pos-old"); got != "198.51.100.25" {
+	// The /28 is spelled out as addresses; the /10 is too big and stays closed.
+	got := allowOf("pos-old")
+	if !strings.HasPrefix(got, "198.51.100.25,203.0.113.0,203.0.113.1,") || !strings.HasSuffix(got, ",203.0.113.15") || strings.Contains(got, "/") || strings.Contains(got, "100.64") {
 		t.Fatalf("old agent got %s", got)
 	}
 
@@ -78,7 +80,7 @@ func TestAllowRangesNeedAnAgentThatEnforcesThem(t *testing.T) {
 	if w := postJSON(t, srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"pos-new","mode":"selective","allow_ips":["10.0.8.5/22"]}`); w.Code != http.StatusOK {
 		t.Fatalf("selective new: %d %s", w.Code, w.Body.String())
 	}
-	if got := allowOf("pos-new"); got != "10.0.8.0/22,100.64.0.0/10,198.51.100.25,203.0.113.0/28" {
+	if got := allowOf("pos-new"); got != "10.0.8.0/22,198.51.100.25,100.64.0.0/10,203.0.113.0/28" {
 		t.Fatalf("new agent got %s", got)
 	}
 	// Bulk isolation names addresses only.

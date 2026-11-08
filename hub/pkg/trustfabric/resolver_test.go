@@ -276,7 +276,11 @@ func TestNormalizeRefusals(t *testing.T) {
 		{ScopeType: ScopeProvider, Kind: "cidr", Value: "192.0.2.0/24", Action: Allow, Port: 80},
 		{ScopeType: ScopeProvider, Kind: "cidr", Value: "192.0.2.0/24", Action: Allow, Port: 70000, Proto: ProtoTCP},
 		{ScopeType: ScopeProvider, Kind: "cidr", Value: "192.0.2.0/24", Action: Allow, Direction: "sideways"},
-		{ScopeType: ScopeProvider, Kind: "fqdn", Value: "example.com", Action: Allow},
+		{ScopeType: ScopeProvider, Kind: "fqdn", Value: "*.example.com", Action: Allow},
+		{ScopeType: ScopeProvider, Kind: "fqdn", Value: "192.0.2.1", Action: Allow},
+		{ScopeType: ScopeProvider, Kind: "fqdn", Value: "-bad.example.com", Action: Allow},
+		{ScopeType: ScopeProvider, Kind: "fqdn", Value: "", Action: Allow},
+		{ScopeType: ScopeProvider, Kind: "dns", Value: "example.com", Action: Allow},
 		{ScopeType: ScopeProvider, Kind: "cidr", Value: "::ffff:0.0.0.0/80", Action: Deny},
 	} {
 		if _, err := Normalize(r); err == nil {
@@ -344,5 +348,60 @@ func TestCompileNamedAddresses(t *testing.T) {
 				t.Errorf("addresses = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestNamesExpandToAddressesUnderTheSamePrecedence(t *testing.T) {
+	now := time.Now()
+	ep := Endpoint{ID: "e1", TenantID: "t1"}
+	mustRule := func(r Rule) Rule {
+		t.Helper()
+		n, err := Normalize(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	allowName := mustRule(Rule{ID: "a", ScopeType: ScopeProvider, Kind: KindFQDN, Value: "API.Example.com.", Action: Allow})
+	if allowName.Value != "api.example.com" {
+		t.Fatalf("name not normalized: %q", allowName.Value)
+	}
+	if _, err := Normalize(Rule{ScopeType: ScopeProvider, Kind: KindFQDN, Value: "bad.example.com", Action: Deny}); err == nil {
+		t.Error("a deny on a name holds nothing until the name resolves, and must be refused")
+	}
+	denyAddr := mustRule(Rule{ID: "d", ScopeType: ScopeProvider, Kind: KindIP, Value: "192.0.2.2", Action: Deny})
+	missing := mustRule(Rule{ID: "m", ScopeType: ScopeProvider, Kind: KindFQDN, Value: "unknown.example.com", Action: Allow})
+	answers := map[string][]netip.Addr{
+		"api.example.com": {netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("::ffff:192.0.2.2")},
+	}
+	rules := ExpandNames(ep, []Rule{allowName, denyAddr, missing}, answers, now)
+
+	// A name cannot answer its way through a deny, even a wider one at a lower scope.
+	wideDeny := mustRule(Rule{ID: "w", ScopeType: ScopeProvider, Kind: KindCIDR, Value: "192.0.2.0/24", Action: Deny})
+	byName := mustRule(Rule{ID: "e", ScopeType: ScopeEndpoint, ScopeID: ep.ID, Kind: KindFQDN, Value: "api.example.com", Action: Allow})
+	if d := Decide(ep, ExpandNames(ep, []Rule{wideDeny, byName}, answers, now), Target{Addr: netip.MustParseAddr("192.0.2.1")}, now); d.Action != Deny {
+		t.Errorf("a name's answer opened a denied range: %+v", d)
+	}
+
+	// Before expansion a name covers nothing; a deny wins an address a name returns.
+	if d := Decide(ep, []Rule{allowName}, Target{Addr: netip.MustParseAddr("192.0.2.1")}, now); d.Action != Deny || d.Basis != BasisDefault {
+		t.Errorf("unexpanded name decided %+v", d)
+	}
+	if d := Decide(ep, rules, Target{Addr: netip.MustParseAddr("192.0.2.1")}, now); d.Action != Allow || d.RuleID != "a" {
+		t.Errorf("allowed answer: %+v", d)
+	}
+	if d := Decide(ep, rules, Target{Addr: netip.MustParseAddr("192.0.2.2")}, now); d.Action != Deny {
+		t.Errorf("denied answer: %+v", d)
+	}
+
+	p := Compile(ep, rules, now)
+	if len(p.Allow) != 1 || p.Allow[0] != netip.MustParsePrefix("192.0.2.1/32") {
+		t.Errorf("allow %v", p.Allow)
+	}
+	if len(p.Addresses) != 1 || p.Addresses[0] != netip.MustParseAddr("192.0.2.1") {
+		t.Errorf("addresses %v", p.Addresses)
+	}
+	if len(p.Withheld) != 1 || p.Withheld[0].RuleID != "m" {
+		t.Errorf("withheld %+v", p.Withheld)
 	}
 }

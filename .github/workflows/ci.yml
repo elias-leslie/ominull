@@ -134,6 +134,7 @@ jobs:
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
             -o build/test_baseline agent/tests/test_baseline.c -lbpf -lcurl
           build/test_baseline
+          bash scripts/test-linux-isolation.sh
           gcc -O2 -Wall -Wextra -Wformat=2 -Iagent/include \
             -o build/test_linux_collector agent/tests/test_linux_collector.c -lbpf -lcurl
           build/test_linux_collector
