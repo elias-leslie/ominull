@@ -41,8 +41,10 @@
     <InstallExecuteSequence>
       <!-- MajorUpgrade uninstalls the old product as part of the same
            transaction. Do not purge ProgramData identity during that leg;
-           the new MSI must inherit the enrolled endpoint. -->
-      <Custom Action="ClearWfp" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT REINSTALL</Custom>
+           the new MSI must inherit the enrolled endpoint. wixl places a
+           Before= action right after the previous one it knows, which here was
+           outside the install script: every uninstall then failed with 2762. -->
+      <Custom Action="ClearWfp" After="DeleteServices">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT REINSTALL</Custom>
     </InstallExecuteSequence>
   </Product>
 </Wix>

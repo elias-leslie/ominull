@@ -18,7 +18,7 @@ if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-for tool in x86_64-w64-mingw32-gcc go cargo dpkg-deb wixl objdump; do
+for tool in x86_64-w64-mingw32-gcc go cargo dpkg-deb wixl msiinfo objdump; do
     command -v "${tool}" >/dev/null || {
         echo "[-] Required build tool is missing: ${tool}" >&2
         exit 1
@@ -177,6 +177,14 @@ wixl --arch x64 \
          -e "s|@WFP_EXE@|${BUILD_DIR}/ominull_wfp_user.exe|g" \
          -e "s|@SCREEN_HELPER_EXE@|${BUILD_DIR}/ominull-screen-helper.exe|g" \
          "${ROOT_DIR}/packaging/windows/ominull.wxs.in")
+# A deferred action outside InstallInitialize..InstallFinalize makes the package
+# impossible to uninstall (error 2762); only an installed machine would show it.
+msiinfo export "${DIST_DIR}/ominull-agent-windows-${VERSION}.msi" InstallExecuteSequence | awk -F'\t' '
+    { seq[$1] = $3 }
+    END { exit !(seq["ClearWfp"] > seq["InstallInitialize"] && seq["ClearWfp"] < seq["InstallFinalize"]) }' || {
+    echo "[-] The MSI runs ClearWfp outside the install script; it could not be uninstalled." >&2
+    exit 1
+}
 
 echo "[+] Built packages:"
 printf '    %s\n' "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb" \
