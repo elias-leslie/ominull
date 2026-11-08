@@ -26,8 +26,7 @@ import (
 // sizes, times and hints), flagged items (secret candidates, private keys,
 // encrypted containers, key files - by rule name, never by content) and a
 // few host facts. Secret detection runs on the endpoint; nothing it matched
-// leaves the host. The hub keeps the latest picture and a run log, and hands
-// a bounded copy to Nightshift (contract v3), which classifies and decides.
+// leaves the host. The hub keeps the latest picture and a run log.
 //
 // The hub owns the policy. It is served as text to the agent
 // (ominull-data-policy/1) and is disabled for any endpoint whose canary list
@@ -117,8 +116,7 @@ func mergeDataPolicy(base storage.DataPolicy, layer storage.DataPolicy) storage.
 	return base
 }
 
-// dataPathOK is the contract's path rule, shared with Nightshift
-// (ingest.data_path_ok): absolute, normalised, valid UTF-8, no C0, DEL or C1
+// dataPathOK is the path rule: absolute, normalised, valid UTF-8, no C0, DEL or C1
 // control, short enough. The agent percent-encodes anything else
 // (DataInv_PutJSONPath), so every real file name passes.
 func dataPathOK(p string) bool {
@@ -662,9 +660,8 @@ func (s *Server) handleDataPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleDataCanaries records the canary paths of endpoints, as synced from
-// Nightshift's canary registry (admin, audited). An empty list is a valid
-// sync: it says the endpoint was checked and holds none.
+// handleDataCanaries records the canary paths of endpoints (admin, audited). An
+// empty list is a valid sync: it says the endpoint was checked and holds none.
 func (s *Server) handleDataCanaries(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Tenant-ID") != "" {
 		writeJSONError(w, http.StatusForbidden, "canary lists are fleet-wide")

@@ -49,6 +49,7 @@
 #include "../include/forensics_linux.h"
 #include "../include/script_exec_linux.h"
 #include "../include/process_lineage_linux.h"
+#include "../include/session_block_linux.h"
 #include "../include/software_inventory_linux.h"
 #include "../include/data_inventory_linux.h"
 #include "../include/gzip_encode.h"
@@ -2248,6 +2249,43 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     known = !g_PermitsRetry;            /* a held lock passes; try those permits again */
 }
 
+/* Agent session blocks from the hub (session_block_linux.h). They are the hub's
+ * word, like threat indicators: public ranges only, and only a host whose
+ * ceiling allows isolating takes them. */
+static char g_SessionBlockNote[SESSION_BLOCK_NOTE_MAX] = "";
+typedef struct {
+    SESSION_BLOCK_ENTRY* entries;
+    int count;
+    int bad;
+} SessionBlockList;
+
+static bool SessionBlockNoTable(const char* tool) {
+    return NoIPv6Here(tool);
+}
+
+static const SESSION_BLOCK_OPS kSessionBlockOps = { RunFw, DropChain, Trust_PublicAddress, SessionBlockNoTable };
+
+static void TakeSessionBlock(const char* token, void* ctx) {
+    SessionBlockList* l = (SessionBlockList*)ctx;
+    if (l->count < SESSION_BLOCK_MAX_ENTRIES && SessionBlock_ParseEntry(&kSessionBlockOps, token, &l->entries[l->count])) l->count++;
+    else l->bad++;
+}
+
+static void SyncSessionBlocks(const char* respJson) {
+    static SESSION_BLOCK_ENTRY entries[SESSION_BLOCK_MAX_ENTRIES];
+    SessionBlockList list = { entries, 0, 0 };
+    Scrape_AddressList(respJson, "agent_session_blocks", TakeSessionBlock, &list);
+    bool sent = list.count + list.bad > 0;
+    bool barred = sent && !Trust_CeilingHas(g_Trust.ceiling, "isolate");
+    if (barred) list.count = 0;
+    char note[SESSION_BLOCK_NOTE_MAX];
+    SessionBlock_Sync(&kSessionBlockOps, entries, list.count, note, sizeof(note));
+    if (note[0]) snprintf(g_SessionBlockNote, sizeof(g_SessionBlockNote), "%s", note);
+    else if (barred) snprintf(g_SessionBlockNote, sizeof(g_SessionBlockNote), "agent session rules not held: this host's ceiling does not allow it");
+    else if (list.bad > 0) snprintf(g_SessionBlockNote, sizeof(g_SessionBlockNote), "agent session rules not held for %d: the hub sent entries this agent refuses", list.bad);
+    else g_SessionBlockNote[0] = '\0';
+}
+
 /* HubContact drives the dead-man timer. Every beat reports whether the hub
  * answered and accepted; a run of failures while this host is isolated releases
  * the isolation.
@@ -2569,7 +2607,7 @@ static int AppendObservations(const LINUX_AGENT_CONFIG* config, char* buf, size_
                     haveHub ? hubIP : "",
                     haveDHCP ? "dhcp" : "static",
                     rolledBack ? "released by the dead-man timer after losing contact with the hub"
-                    : g_ApplyNote);
+                    : g_ApplyNote[0] ? g_ApplyNote : g_SessionBlockNote);
     return off;
 }
 
@@ -3331,7 +3369,12 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         if (f->enrichment.actor[0] && enrichLen > 0 && (size_t)enrichLen < sizeof(enrichmentJson) - sizeof(f->enrichment.actor) * 6 - 16) {
             char escapedActor[sizeof(f->enrichment.actor) * 6 + 1] = {0};
             ProcessLineage_EscapeJSON(f->enrichment.actor, escapedActor, sizeof(escapedActor));
-            snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen, ",\"actor\":\"%s\"", escapedActor);
+            enrichLen += snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen, ",\"actor\":\"%s\"", escapedActor);
+        }
+        if (f->enrichment.agent_session[0] && enrichLen > 0 && (size_t)enrichLen < sizeof(enrichmentJson) - sizeof(f->enrichment.agent_session) * 6 - 24) {
+            char escapedSession[sizeof(f->enrichment.agent_session) * 6 + 1] = {0};
+            ProcessLineage_EscapeJSON(f->enrichment.agent_session, escapedSession, sizeof(escapedSession));
+            snprintf(enrichmentJson + enrichLen, sizeof(enrichmentJson) - enrichLen, ",\"agent_session\":\"%s\"", escapedSession);
         }
 
         char observationJson[640];
@@ -3424,6 +3467,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         AdoptRenewedClientCert(config, respBuf);
         Trust_ProcessHeartbeat(&g_Trust, respBuf, strlen(respBuf), (int64_t)time(NULL));
         SyncEnforcement(config, respBuf);
+        SyncSessionBlocks(respBuf);
         ProcessResponseOffers(config, respBuf);
     }
     if (!accepted || g_FollowPending.count) FollowHubAddress(config);
@@ -3760,6 +3804,7 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < 3 && !gone; i++) {
             gone = EnforcementTeardown("iptables");
             gone = EnforcementTeardown("ip6tables") && gone;
+            gone = SessionBlock_Clear(&kSessionBlockOps) && gone;
         }
         if (!gone) {
             fprintf(stderr, "[-] The Ominull firewall rules are still there; something may be holding the firewall lock. Run --cleanup again.\n");

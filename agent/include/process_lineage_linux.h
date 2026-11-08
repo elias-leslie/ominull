@@ -48,6 +48,7 @@ typedef struct {
     char executable_sha256[65];
     char attribution_status[32]; // authoritative, inferred_cached, race_suspected, permission_denied, path_mismatch, unknown
     char actor[160];             // agent:claude:<aico widget>, service:nightshift:<unit>, or empty (see ProcessLineage_ReadActor)
+    char agent_session[100];     // claude:<aico widget>, or empty (see ProcessLineage_SessionOf)
     int64_t observed_at;
 } PROCESS_ENRICHMENT;
 
@@ -313,6 +314,15 @@ typedef struct {
 
 static LINUX_ACTOR_CACHE_ENTRY g_LinuxActorCache[LINUX_ACTOR_CACHE_CAP];
 
+typedef struct {
+    uint32_t pid;
+    unsigned long long start;
+    char session[100];
+    bool valid;
+} LINUX_SESSION_CACHE_ENTRY;
+
+static LINUX_SESSION_CACHE_ENTRY g_LinuxSessionCache[LINUX_ACTOR_CACHE_CAP];
+
 static inline bool ProcessLineage_ReadSmall(uint32_t pid, const char* what, char* out, size_t outLen, size_t* outRead) {
     char suffix[64], path[512];
     snprintf(suffix, sizeof(suffix), "%u/%s", pid, what);
@@ -430,6 +440,45 @@ static inline bool ProcessLineage_ReadServiceActor(uint32_t pid, char* out, size
     return true;
 }
 
+/* The agent session a process belongs to, for Traffic: "<tool>:<window>", where
+ * the window is empty outside Aico. Unlike the actor this names the agent's own
+ * traffic too, and follows the kernel's ancestry across users, so what an agent
+ * runs through sudo stays its own. With no agent binary above it, a process that
+ * carries an Aico window id belongs to that window under the tool "aico". */
+static inline void ProcessLineage_SessionOf(uint32_t pid, char* out, size_t outLen) {
+    out[0] = '\0';
+    char widget[65];
+    uint32_t cur = pid;
+    for (int depth = 0; depth < LINUX_ACTOR_MAX_DEPTH && cur > 1; depth++) {
+        const char* tool = ProcessLineage_AgentTool(cur);
+        if (tool) {
+            ProcessLineage_ReadWidget(cur, widget, sizeof(widget));
+            snprintf(out, outLen, "%s:%s", tool, widget);
+            return;
+        }
+        unsigned long long st = 0;
+        uint32_t ppid = 0;
+        if (!ProcessLineage_ReadStat(cur, &st, &ppid) || ppid == cur) break;
+        cur = ppid;
+    }
+    ProcessLineage_ReadWidget(pid, widget, sizeof(widget));
+    if (widget[0]) snprintf(out, outLen, "aico:%s", widget);
+}
+
+/* The session of one process instance, read once. */
+static inline void ProcessLineage_ReadSession(uint32_t pid, unsigned long long start, char* out, size_t outLen) {
+    out[0] = '\0';
+    if (pid == 0 || start == 0) return;
+    LINUX_SESSION_CACHE_ENTRY* slot = &g_LinuxSessionCache[pid % LINUX_ACTOR_CACHE_CAP];
+    if (!slot->valid || slot->pid != pid || slot->start != start) {
+        ProcessLineage_SessionOf(pid, slot->session, sizeof(slot->session));
+        slot->pid = pid;
+        slot->start = start;
+        slot->valid = true;
+    }
+    snprintf(out, outLen, "%s", slot->session);
+}
+
 /* Fills out with the process's actor ("" when it is none of ours). */
 static inline void ProcessLineage_ReadActor(uint32_t pid, unsigned long long start, char* out, size_t outLen) {
     out[0] = '\0';
@@ -474,6 +523,7 @@ static inline void ProcessLineage_ReadActor(uint32_t pid, unsigned long long sta
 static inline void ProcessLineage_ResetCache(void) {
     memset(g_LinuxHashCache, 0, sizeof(g_LinuxHashCache));
     memset(g_LinuxActorCache, 0, sizeof(g_LinuxActorCache));
+    memset(g_LinuxSessionCache, 0, sizeof(g_LinuxSessionCache));
     g_LinuxHashAccessCounter = 0;
     g_LinuxCachedBootID[0] = '\0';
 }
@@ -694,6 +744,7 @@ static inline bool ProcessLineage_InspectProcess(uint32_t pid, PROCESS_ENRICHMEN
             }
         }
         ProcessLineage_ReadActor(pid, startTime, outEnrichment->actor, sizeof(outEnrichment->actor));
+        ProcessLineage_ReadSession(pid, startTime, outEnrichment->agent_session, sizeof(outEnrichment->agent_session));
     } else {
         snprintf(outEnrichment->attribution_status, sizeof(outEnrichment->attribution_status), "race_suspected");
     }
