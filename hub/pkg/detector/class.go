@@ -148,6 +148,7 @@ type classEvidence struct {
 	SNI        string         `json:"sni"`
 	Owner      string         `json:"destination_owner"`
 	Dest       string         `json:"destination"`
+	SourceIP   string         `json:"source_ip"`
 }
 
 type sweepEntry struct {
@@ -187,7 +188,7 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 		}
 		return record(fmt.Sprintf("threat-intelligence match at confidence %d%%, below the %d%% that pages", conf, cx.cfg.IntelPageConfidence))
 	case "DECOY_TOUCH":
-		return page("a decoy address nothing legitimate uses was reached")
+		return page("a decoy address or name nothing legitimate uses was reached")
 	case "SENSITIVE_PORT_EGRESS":
 		return page("SMB, RDP, telnet or RPC left the network")
 	case "AGENT_UPLOAD_VOLUME":
@@ -361,7 +362,8 @@ func incidentKey(a storage.AnomalyAlert, ev classEvidence) string {
 		// dark again pages again.
 		party = ev.LastSeenAt
 	case "threat_intel_match":
-		party = a.DstIP
+		// An address match, or a lookup of a listed name (no address).
+		party = firstNonEmpty(a.DstIP, strings.ToLower(ev.Domain))
 	case "sweep":
 		// One detector's sweep of one target: a lab escape is not hidden in
 		// an open sweep incident, nor a scan of one host in another's.
@@ -379,7 +381,13 @@ func incidentKey(a storage.AnomalyAlert, ev classEvidence) string {
 	default:
 		party = strings.ToLower(firstNonEmpty(ev.Dest, registrable(ev.Domain), registrable(ev.SNI), ev.Owner, a.DstIP))
 	}
-	return a.EndpointID + "|" + fam + "|" + party
+	// A device with no agent (a lookup in the gateway's DNS log) is its
+	// address: two such devices are two incidents.
+	device := a.EndpointID
+	if device == "" && ev.SourceIP != "" {
+		device = "ip:" + ev.SourceIP
+	}
+	return device + "|" + fam + "|" + party
 }
 
 // knownResolverOrLocal says whether a DNS-port destination is a resolver the

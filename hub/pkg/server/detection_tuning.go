@@ -127,6 +127,7 @@ func (s *Server) applyTuning(w http.ResponseWriter, r *http.Request, c policyCha
 	if s.detector != nil {
 		s.detector.InvalidateTuning()
 	}
+	s.refreshDomainFeedsIfChanged(c.before, saved)
 	s.audit(r, action, "detection", c.wording+"; credential "+credentialOf(r)+" (unverified)")
 	if c.changed() {
 		s.notePolicyChange(r, c, approvalID)

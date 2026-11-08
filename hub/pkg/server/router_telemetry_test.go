@@ -500,3 +500,73 @@ func TestRouterHealthGarbageDoesNotCostTheOtherSections(t *testing.T) {
 		t.Fatalf("garbage was stored: %+v", got)
 	}
 }
+
+// A device looking up a decoy name in the gateway's DNS log pages, and the
+// feed reads it as a lookup of that name.
+func TestRouterDNSDecoyNameLookupPages(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	tuning := store.GetDetectionTuning()
+	tuning.DecoyNames = []string{"s3.vault-archive.lan"}
+	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+		t.Fatalf("saving tuning: %v", err)
+	}
+	srv.detector.InvalidateTuning()
+
+	w := postTelemetry(t, srv, `{"router_id":"gw","dns":[
+		{"client_ip":"10.0.0.36","domain":"S3.Vault-Archive.lan","qtype":"A"},
+		{"client_ip":"10.0.0.36","domain":"firmware.nest.com","qtype":"A"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest returned %d: %s", w.Code, w.Body.String())
+	}
+	all, err := store.ListAnomalyAlerts("default", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].AnomalyType != "DECOY_TOUCH" || storage.AlertClass(all[0]) != storage.ClassPage {
+		t.Fatalf("want one paging decoy finding, got %+v", all)
+	}
+	out := describeAlert(all[0], store.GetDetectionTuning())
+	if out.What != "10.0.0.36 looked up s3.vault-archive.lan, a decoy name from a planted credential that nothing legitimate uses" || out.Destinations != "s3.vault-archive.lan" {
+		t.Fatalf("described as %q to %q", out.What, out.Destinations)
+	}
+}
+
+// Only a private client address and a DNS name reach the tripwires, and a
+// poll writes at most dnsTripwireFindingsPerPoll findings.
+func TestRouterDNSTripwireInputIsChecked(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	tuning := store.GetDetectionTuning()
+	tuning.DecoyNames = []string{"s3.vault-archive.lan"}
+	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
+		t.Fatalf("saving tuning: %v", err)
+	}
+	srv.detector.InvalidateTuning()
+
+	var lines []string
+	lines = append(lines, `{"client_ip":"not-an-ip","domain":"s3.vault-archive.lan"}`,
+		`{"client_ip":"8.8.8.8","domain":"s3.vault-archive.lan"}`,
+		`{"client_ip":"10.0.0.9","domain":"x y.s3.vault-archive.lan"}`)
+	for i := 0; i < 200; i++ {
+		lines = append(lines, fmt.Sprintf(`{"client_ip":"10.0.%d.%d","domain":"s3.vault-archive.lan"}`, i/250, i%250+1))
+	}
+	w := postTelemetry(t, srv, `{"router_id":"gw","dns":[`+strings.Join(lines, ",")+`]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ingest returned %d", w.Code)
+	}
+	all, err := store.ListAnomalyAlerts("default", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != dnsTripwireFindingsPerPoll {
+		t.Fatalf("want %d findings, got %d", dnsTripwireFindingsPerPoll, len(all))
+	}
+	for _, a := range all {
+		if strings.Contains(a.Title, "not-an-ip") || strings.Contains(a.Title, "8.8.8.8") || strings.Contains(a.Title, "x y") {
+			t.Fatalf("unchecked input reached a finding: %s", a.Title)
+		}
+	}
+}

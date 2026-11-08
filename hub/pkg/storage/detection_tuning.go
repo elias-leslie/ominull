@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -101,6 +102,16 @@ type DetectionTuning struct {
 	// DecoyAddrs are LAN addresses ("ip" or "ip:port") nothing legitimate
 	// uses: any connection to one pages, whatever the role or exclusion.
 	DecoyAddrs []string `json:"decoy_addrs"`
+	// DecoyNames are DNS names nothing legitimate looks up (the host in a
+	// planted credential or config): a lookup of one, or of a name under it,
+	// from any device in the gateway's DNS log pages.
+	DecoyNames []string `json:"decoy_names"`
+	// DomainIntelFeeds are bad-domain lists (hosts-file or one name per
+	// line) matched against the gateway's DNS log; a listed name pages as a
+	// threat-list match when the feed's confidence reaches
+	// IntelPageConfidence. An abuse.ch URL may hold {auth_key}, filled from
+	// the hub's abuse.ch key file.
+	DomainIntelFeeds []DomainIntelFeed `json:"domain_intel_feeds"`
 	// TunnelServices are shared fronts (name suffixes) where beacon rarity
 	// means nothing: a non-browser program beaconing to one pages.
 	TunnelServices []string `json:"tunnel_services"`
@@ -209,6 +220,7 @@ func defaultDetectionTuning() DetectionTuning {
 
 		ExpectedRules: seedExpectedRules(),
 
+		DomainIntelFeeds:     defaultDomainIntelFeeds(),
 		TunnelServices:       defaultTunnelServices(),
 		BeaconBrowsers:       defaultBeaconBrowsers(),
 		IntelPageConfidence:  IntelPageConfidenceDefault,
@@ -225,6 +237,28 @@ func defaultDetectionTuning() DetectionTuning {
 		MaxPlausibleRateMbps: 10000,
 		EphemeralPortFrom:    32768,
 	}
+}
+
+// defaultDomainIntelFeeds are abuse.ch's host files (a free Auth-Key, in the
+// hub's abuse.ch key file, fills {auth_key}). ThreatFox lists botnet C2 and
+// payload-delivery domains and pages; URLhaus lists hosts serving malware,
+// often hacked ordinary sites, so a lookup is recorded, not paged. An empty
+// list in the saved row turns them off.
+func defaultDomainIntelFeeds() []DomainIntelFeed {
+	return []DomainIntelFeed{
+		{Name: "threatfox", URL: "https://threatfox-api.abuse.ch/v2/files/exports/{auth_key}/hostfile.txt", Confidence: 90},
+		{Name: "urlhaus", URL: "https://urlhaus-api.abuse.ch/v2/files/exports/{auth_key}/hostfile.txt", Confidence: 70},
+	}
+}
+
+// MaxDomainIntelFeeds bounds the lists held in memory (each up to 2M names).
+const MaxDomainIntelFeeds = 8
+
+// DomainIntelFeed is one bad-domain list the hub fetches.
+type DomainIntelFeed struct {
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	Confidence int    `json:"confidence"`
 }
 
 // IntelPageConfidenceDefault is the threat-intelligence confidence at which a
@@ -424,6 +458,15 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.LabCIDRs = tidyList(t.LabCIDRs)
 	t.InfraCIDRs = tidyList(t.InfraCIDRs)
 	t.DecoyAddrs = tidyList(t.DecoyAddrs)
+	t.DecoyNames = tidyList(t.DecoyNames)
+	for i := range t.DecoyNames {
+		t.DecoyNames[i] = strings.TrimSuffix(t.DecoyNames[i], ".")
+	}
+	t.DecoyNames = tidyList(t.DecoyNames)
+	if t.DomainIntelFeeds == nil {
+		t.DomainIntelFeeds = defaultDomainIntelFeeds()
+	}
+	t.DomainIntelFeeds = tidyFeeds(t.DomainIntelFeeds)
 	t.TunnelServices = tidyList(t.TunnelServices)
 	if t.BeaconBrowsers == nil {
 		t.BeaconBrowsers = defaultBeaconBrowsers()
@@ -487,6 +530,28 @@ func (t DetectionTuning) validZones() (DetectionTuning, error) {
 			return t, fmt.Errorf("%w: decoy %q must be a private address, optionally with :port", ErrInvalidDetectionTuning, d)
 		}
 	}
+	for _, name := range t.DecoyNames {
+		if !DNSName(name) {
+			return t, fmt.Errorf("%w: decoy name %q must be a DNS name such as s3.archive.lan", ErrInvalidDetectionTuning, name)
+		}
+	}
+	if len(t.DomainIntelFeeds) > MaxDomainIntelFeeds {
+		return t, fmt.Errorf("%w: at most %d domain feeds", ErrInvalidDetectionTuning, MaxDomainIntelFeeds)
+	}
+	seenFeed := map[string]bool{}
+	for _, f := range t.DomainIntelFeeds {
+		u, err := url.Parse(f.URL)
+		if f.Name == "" || len(f.Name) > 64 || strings.ContainsAny(f.Name, " /\\") || seenFeed[f.Name] {
+			return t, fmt.Errorf("%w: domain feed name %q must be a short unique word such as threatfox", ErrInvalidDetectionTuning, f.Name)
+		}
+		seenFeed[f.Name] = true
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			return t, fmt.Errorf("%w: domain feed %s must have an https URL", ErrInvalidDetectionTuning, f.Name)
+		}
+		if f.Confidence < 1 || f.Confidence > 100 {
+			return t, fmt.Errorf("%w: domain feed %s confidence must be 1-100", ErrInvalidDetectionTuning, f.Name)
+		}
+	}
 	for _, name := range t.TunnelServices {
 		if name == "" || strings.ContainsAny(name, " /:@*") || !strings.Contains(name, ".") {
 			return t, fmt.Errorf("%w: tunnel service %q must be a domain name such as trycloudflare.com", ErrInvalidDetectionTuning, name)
@@ -520,6 +585,48 @@ func ParseDecoy(entry string) (netip.Addr, uint16, bool) {
 	}
 	a = a.Unmap()
 	return a, 0, privatePrefix(netip.PrefixFrom(a, a.BitLen()))
+}
+
+// DNSName reports a lower-case DNS name of at least two labels: letters,
+// digits, hyphens and underscores, 63 bytes a label, 253 in all.
+func DNSName(name string) bool {
+	if len(name) == 0 || len(name) > 253 || !strings.Contains(name, ".") {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// DecoyName returns the decoy name a looked-up name is, or lies under.
+func (t DetectionTuning) DecoyName(domain string) (string, bool) {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	for _, d := range t.DecoyNames {
+		if domain == d || strings.HasSuffix(domain, "."+d) {
+			return d, true
+		}
+	}
+	return "", false
+}
+
+func tidyFeeds(in []DomainIntelFeed) []DomainIntelFeed {
+	out := make([]DomainIntelFeed, 0, len(in))
+	for _, f := range in {
+		f.Name = strings.ToLower(strings.TrimSpace(f.Name))
+		f.URL = strings.TrimSpace(f.URL)
+		out = append(out, f)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // IsDecoy says whether a connection to ip:port touches a decoy.

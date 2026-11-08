@@ -959,3 +959,25 @@ func TestADrillCaseTheChangeDropsCountsAsBlinded(t *testing.T) {
 		t.Fatalf("summary %q", a.Summary)
 	}
 }
+
+// Adding a decoy name or a feed tightens; dropping either, or changing a
+// feed's confidence, loosens.
+func TestDecoyNamesAndDomainFeedsLoosenWhenTakenAway(t *testing.T) {
+	base := storage.DefaultDetectionTuning()
+	more := base
+	more.DecoyNames = []string{"s3.vault-archive.lan"}
+	more.DomainIntelFeeds = append(append([]storage.DomainIntelFeed(nil), base.DomainIntelFeeds...),
+		storage.DomainIntelFeed{Name: "extra", URL: "https://lists.example/hosts", Confidence: 80})
+	if got := tuningLoosens(base, more); len(got) != 0 {
+		t.Fatalf("adding a decoy name and a feed loosened %v", got)
+	}
+	if got := tuningLoosens(more, base); len(got) != 2 {
+		t.Fatalf("taking them away loosened only %v", got)
+	}
+	lower := more
+	lower.DomainIntelFeeds = append([]storage.DomainIntelFeed(nil), more.DomainIntelFeeds...)
+	lower.DomainIntelFeeds[0].Confidence = 10
+	if got := tuningLoosens(more, lower); len(got) != 1 || got[0] != "domain_intel_feeds" {
+		t.Fatalf("lowering a feed's confidence loosened %v", got)
+	}
+}

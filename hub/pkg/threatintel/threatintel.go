@@ -25,6 +25,12 @@ type Manager struct {
 	// attributionCancel stops the network attribution refresh, which runs on
 	// its own much slower schedule than the indicator feeds.
 	attributionCancel context.CancelFunc
+	// Bad-domain lists matched against the gateway's DNS log (domainfeeds.go).
+	domainMu      sync.RWMutex
+	domainFeeds   map[string]*domainFeedSet
+	domainRefresh sync.Mutex
+	domainCancel  context.CancelFunc
+	domainHTTP    *http.Client
 }
 
 func New(store *storage.Store) *Manager {
@@ -33,7 +39,8 @@ func New(store *storage.Store) *Manager {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		cache: make(map[string]*storage.IOC),
+		cache:      make(map[string]*storage.IOC),
+		domainHTTP: newDomainFeedClient(),
 	}
 }
 
@@ -73,6 +80,9 @@ func (m *Manager) Stop() {
 	}
 	if m.attributionCancel != nil {
 		m.attributionCancel()
+	}
+	if m.domainCancel != nil {
+		m.domainCancel()
 	}
 }
 

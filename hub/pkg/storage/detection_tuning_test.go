@@ -116,3 +116,48 @@ func TestASavedTuningSurvivesTheRoundTrip(t *testing.T) {
 		t.Errorf("authorship not recorded: %q", got.UpdatedBy)
 	}
 }
+
+func TestDecoyNamesAndDomainFeedsAreChecked(t *testing.T) {
+	base := DefaultDetectionTuning()
+	ok := base
+	ok.DecoyNames = []string{"S3.Vault-Archive.LAN.", "s3.vault-archive.lan"}
+	ok.DomainIntelFeeds = []DomainIntelFeed{{Name: "ThreatFox", URL: "https://threatfox-api.abuse.ch/v2/files/exports/{auth_key}/hostfile.txt", Confidence: 90}}
+	got, err := PrepareDetectionTuning(ok)
+	if err != nil {
+		t.Fatalf("valid tuning refused: %v", err)
+	}
+	if len(got.DecoyNames) != 1 || got.DecoyNames[0] != "s3.vault-archive.lan" || got.DomainIntelFeeds[0].Name != "threatfox" {
+		t.Fatalf("not tidied: %v %+v", got.DecoyNames, got.DomainIntelFeeds)
+	}
+	if d, hit := got.DecoyName("x.s3.vault-archive.lan."); !hit || d != "s3.vault-archive.lan" {
+		t.Fatalf("subdomain did not match: %q %v", d, hit)
+	}
+	if _, hit := got.DecoyName("xs3.vault-archive.lan"); hit {
+		t.Fatal("a name that only ends with the decoy's text matched")
+	}
+	for name, edit := range map[string]func(*DetectionTuning){
+		"one-label name":  func(t *DetectionTuning) { t.DecoyNames = []string{"archive"} },
+		"name with space": func(t *DetectionTuning) { t.DecoyNames = []string{"a b.lan"} },
+		"http feed": func(t *DetectionTuning) {
+			t.DomainIntelFeeds = []DomainIntelFeed{{Name: "x", URL: "http://lists.example/h", Confidence: 50}}
+		},
+		"no confidence": func(t *DetectionTuning) {
+			t.DomainIntelFeeds = []DomainIntelFeed{{Name: "x", URL: "https://lists.example/h"}}
+		},
+		"unnamed feed": func(t *DetectionTuning) {
+			t.DomainIntelFeeds = []DomainIntelFeed{{URL: "https://lists.example/h", Confidence: 50}}
+		},
+		"repeated feed": func(t *DetectionTuning) {
+			t.DomainIntelFeeds = []DomainIntelFeed{{Name: "x", URL: "https://a.example/h", Confidence: 50}, {Name: "X", URL: "https://b.example/h", Confidence: 50}}
+		},
+		"feed with a user": func(t *DetectionTuning) {
+			t.DomainIntelFeeds = []DomainIntelFeed{{Name: "x", URL: "https://u:p@lists.example/h", Confidence: 50}}
+		},
+	} {
+		bad := base
+		edit(&bad)
+		if _, err := PrepareDetectionTuning(bad); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -730,6 +731,8 @@ func (s *Server) Start(addr string) error {
 	// Published vendor ranges change slowly; daily is the cadence the feeds
 	// themselves are updated on.
 	s.ti.StartNetworkAttribution(context.Background(), 24*time.Hour)
+	// Bad-domain lists for the gateway's DNS log; which ones is tuning.
+	s.ti.StartDomainFeeds(context.Background(), time.Hour, s.domainIntelFeeds)
 	s.detector.Start(context.Background())
 	// Every start is drilled before the feed is served: an upgrade is the
 	// change most likely to break a floor detector.
@@ -2686,6 +2689,30 @@ func (s *Server) handleThreatIntelIOCs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(iocs)
 }
 
+// refreshDomainFeedsIfChanged applies a saved change to the feed list now,
+// not at the next hourly fetch: a feed dropped stops matching at once.
+func (s *Server) refreshDomainFeedsIfChanged(before any, after storage.DetectionTuning) {
+	prev, ok := before.(storage.DetectionTuning)
+	if s.ti == nil || (ok && reflect.DeepEqual(prev.DomainIntelFeeds, after.DomainIntelFeeds)) {
+		return
+	}
+	go s.ti.RefreshDomainFeeds(context.Background(), after.DomainIntelFeeds, threatintel.AbuseCHKeyFile())
+}
+
+func (s *Server) domainIntelFeeds() []storage.DomainIntelFeed {
+	return s.store.GetDetectionTuning().DomainIntelFeeds
+}
+
+// handleDomainFeeds reports each bad-domain list: names held, last good
+// fetch, last error.
+func (s *Server) handleDomainFeeds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"feeds": s.ti.DomainFeedStatuses()})
+}
+
 func (s *Server) handleThreatIntelSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2694,6 +2721,7 @@ func (s *Server) handleThreatIntelSync(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		_ = s.ti.SyncAllFeeds(context.Background())
+		s.ti.RefreshDomainFeeds(context.Background(), s.domainIntelFeeds(), threatintel.AbuseCHKeyFile())
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -3668,6 +3696,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/traffic/flows/", s.authMiddleware(s.handleTrafficFlows))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
+	mux.HandleFunc("/api/v1/threatintel/domain-feeds", s.authMiddleware(s.handleDomainFeeds))
 	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
 
 	// 5. RBAC Auth & Audit Logging API

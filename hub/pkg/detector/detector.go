@@ -173,9 +173,20 @@ func (e *Engine) shouldSuppressAlert(key string, cooldown time.Duration) bool {
 	if exists && now.Sub(last) < cooldown {
 		return true
 	}
+	if len(e.alertCooldown) >= alertCooldownMax {
+		// Keys built from reported addresses and names must not grow without
+		// end; no cooldown here is longer than a day.
+		for k, t := range e.alertCooldown {
+			if now.Sub(t) > 24*time.Hour {
+				delete(e.alertCooldown, k)
+			}
+		}
+	}
 	e.alertCooldown[key] = now
 	return false
 }
+
+const alertCooldownMax = 50000
 
 // recordAnomaly writes a finding, classed (page, record or digest) and with
 // its hunt tier.

@@ -242,6 +242,9 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 		out.What = fmt.Sprintf("%s on %s tried many different ports on %s within 10 seconds", who, host, orUnknown(a.DstIP))
 	case "THREAT_INTEL_MATCH":
 		out.What = intelWhat(a, ev, who, proc != "", host)
+		if a.DstIP == "" && ev.Domain != "" {
+			out.Destinations = ev.Domain
+		}
 	case "C2_BEACONING":
 		out.What = fmt.Sprintf("%s on %s contacted %s on a steady timer, the way remote-control malware checks in", who, host, orUnknown(a.DstIP))
 	case "BANDWIDTH_SPIKE":
@@ -264,7 +267,12 @@ func describeAlert(a storage.AnomalyAlert, tuning storage.DetectionTuning) feedA
 			out.Cause = fmt.Sprintf("Probably %s itself: %s is %s's own service", proc, name, vendor)
 		}
 	case "DECOY_TOUCH":
-		out.What = fmt.Sprintf("%s on %s connected to %s, a decoy address nothing legitimate uses", who, host, orUnknown(a.DstIP))
+		if a.DstIP == "" && ev.Domain != "" {
+			out.What = fmt.Sprintf("%s looked up %s, a decoy name from a planted credential that nothing legitimate uses", host, ev.Domain)
+			out.Destinations = ev.Domain
+		} else {
+			out.What = fmt.Sprintf("%s on %s connected to %s, a decoy address nothing legitimate uses", who, host, orUnknown(a.DstIP))
+		}
 	case "LAB_ESCAPE":
 		where := "outside the lab"
 		if z := zoneWord(ev.TargetZone); z != "" {
@@ -383,6 +391,9 @@ func intelWhat(a storage.AnomalyAlert, ev alertEvidence, who string, named bool,
 		subject = who + " on " + host
 	}
 	out := fmt.Sprintf("%s connected to %s, an address on a threat list", subject, orUnknown(a.DstIP))
+	if a.DstIP == "" && ev.Domain != "" {
+		out = fmt.Sprintf("%s looked up %s, a name on a threat list", host, ev.Domain)
+	}
 	switch {
 	case kind != "" && conf >= 0:
 		out += fmt.Sprintf(" (%s, %d%% sure)", kind, conf)

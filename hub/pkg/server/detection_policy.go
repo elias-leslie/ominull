@@ -416,6 +416,7 @@ func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyCh
 	if s.detector != nil {
 		s.detector.InvalidateTuning()
 	}
+	s.refreshDomainFeedsIfChanged(before, s.store.GetDetectionTuning())
 	s.notePolicyChange(r, tight, "")
 	rest := tuningChange(c.op, s.store.GetDetectionTuning(), after)
 	rest.tightenedFirst = tight.wording
@@ -538,6 +539,8 @@ var tuningDirections = map[string]tuningDirection{
 	"beacon_browsers":         addLoosens,
 	"beacon_page_span_min":    higherLoosens,
 	"decoy_addrs":             removeLoosens,
+	"decoy_names":             removeLoosens,
+	"domain_intel_feeds":      removeLoosens, // a feed dropped, or its confidence changed
 	"tunnel_services":         removeLoosens,
 	"intel_page_confidence":   higherLoosens,
 	"auto_isolate_roles":      removeLoosens,

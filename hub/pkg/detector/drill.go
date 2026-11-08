@@ -166,6 +166,25 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 	cases = append(cases, run(DrillCase{Rule: "decoy touch", Want: "DECOY_TOUCH"}, decoyed,
 		[]storage.Event{flow(drillProgram+"mapper", lan(199), 80, 60, 0)}))
 
+	// A device looking up a decoy name (the host in a planted credential)
+	// pages, and so does a lookup of a name on a feed sure enough to page.
+	runDNS := func(c DrillCase, tuning storage.DetectionTuning, l DNSLookup, intel *storage.IOC) DrillCase {
+		e := New(store, nil, func(string, string) error { c.Isolated = true; return nil })
+		e.pinned = &tuning
+		e.sink = func(a storage.AnomalyAlert) { c.Findings = append(c.Findings, a) }
+		l.TenantID, l.At = drillTenant, now
+		e.NoteDNSLookup(l, intel)
+		c.Tuning = tuning
+		return c
+	}
+	named := live
+	named.DecoyNames = append(append([]string(nil), live.DecoyNames...), "floor-drill.decoy.invalid")
+	cases = append(cases, runDNS(DrillCase{Rule: "decoy name lookup", Want: "DECOY_TOUCH"}, named,
+		DNSLookup{ClientIP: lan(198), Domain: "floor-drill.decoy.invalid"}, nil))
+	cases = append(cases, runDNS(DrillCase{Rule: "threat-listed name lookup", Want: "THREAT_INTEL_MATCH"}, live,
+		DNSLookup{ClientIP: lan(198), Domain: "floor-drill.c2.invalid"},
+		&storage.IOC{Value: "floor-drill.c2.invalid", Type: "domain", Source: "floor-drill", ThreatType: "malicious domain", Confidence: 100, Active: true}))
+
 	// A parked lab guest reaching a home host outside the lab pages.
 	labEP := ep
 	labEP.RoleTag, labEP.Presence = "", storage.PresenceParked

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/storage"
 )
@@ -215,6 +217,7 @@ func (s *Server) recordRouterDNS(routerID string, lines []routerDNSLine, now tim
 			}
 		}
 	}()
+	s.checkDNSTripwires(routerID, lines, now)
 	if len(lines) > storage.MaxRouterDNSPerPoll {
 		rejected += len(lines) - storage.MaxRouterDNSPerPoll
 		lines = lines[:storage.MaxRouterDNSPerPoll]
@@ -257,6 +260,45 @@ func (s *Server) recordRouterDNS(routerID string, lines []routerDNSLine, now tim
 		daily[dayKey{day, client, domain}]++
 	}
 	return accepted, rejected
+}
+
+// dnsTripwireFindingsPerPoll bounds the findings one poll can write: a
+// gateway (or a tenant-key holder posting as one) cannot flood the feed.
+const dnsTripwireFindingsPerPoll = 50
+
+// checkDNSTripwires matches every line of a poll against the decoy names and
+// the bad-domain feeds, before the per-poll storage cut and whether or not
+// the line is stored: junk queries ahead of a decoy lookup must not push it
+// out. Only a private client address and a DNS name are considered.
+func (s *Server) checkDNSTripwires(routerID string, lines []routerDNSLine, now time.Time) {
+	if s.detector == nil {
+		return
+	}
+	written := 0
+	for _, l := range lines {
+		client, err := netip.ParseAddr(strings.TrimSpace(l.ClientIP))
+		if err != nil || !(client.IsPrivate() || client.Unmap().IsPrivate()) {
+			continue
+		}
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(l.Domain)), ".")
+		if !storage.DNSName(domain) {
+			continue
+		}
+		var intel *storage.IOC
+		if s.ti != nil {
+			intel, _ = s.ti.CheckDomain(domain)
+		}
+		at := l.At
+		if at.IsZero() {
+			at = now
+		}
+		if s.detector.NoteDNSLookup(detector.DNSLookup{RouterID: routerID, ClientIP: client.Unmap().String(), Domain: domain, At: at.UTC()}, intel) {
+			if written++; written >= dnsTripwireFindingsPerPoll {
+				log.Printf("[!] router %s: %d DNS tripwire findings in one poll; the rest of the poll is not checked", routerID, written)
+				return
+			}
+		}
+	}
 }
 
 // parseGLClients reads GL.iNet's gl-clients list: {"clients": {mac: {...}}}.
