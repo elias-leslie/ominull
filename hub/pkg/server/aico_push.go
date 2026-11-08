@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/storage"
 )
 
@@ -214,6 +215,9 @@ type aicoNotice struct {
 	Actions  []string    `json:"actions"`
 	Primary  string      `json:"primary"`
 	Push     string      `json:"push"`
+	// Lab: the alert's machine is a lab or test machine, so Aico's Settings
+	// can treat its alerts apart from those of real machines.
+	Lab bool `json:"lab,omitempty"`
 }
 
 type aicoRow struct {
@@ -405,6 +409,7 @@ func aicoWhen(at string, now time.Time) string {
 type aicoGroup struct {
 	token  string
 	alerts []feedAlert // oldest first; the last one leads
+	lab    bool        // the lead alert's machine has the lab role
 }
 
 // aicoTokens are the asks a paging alert makes: its incident, plus the
@@ -475,6 +480,7 @@ func (s *Server) aicoNoticesScanning(since time.Time, scan int, now time.Time) (
 	if err != nil {
 		return nil, nil, false, err
 	}
+	labs := aicoLabHosts(tuning, s.store.GetEndpoints())
 	var notices []aicoNotice
 	var tokens []string
 	for _, g := range groups {
@@ -484,12 +490,29 @@ func (s *Server) aicoNoticesScanning(since time.Time, scan int, now time.Time) (
 		if len(notices) == aicoListMax {
 			break
 		}
+		g.lab = labs[g.alerts[len(g.alerts)-1].Host]
 		if n, ok := s.aicoNotice(g, now); ok {
 			notices = append(notices, n)
 			tokens = append(tokens, g.token)
 		}
 	}
 	return notices, tokens, complete, nil
+}
+
+// aicoLabHosts names the machines with the lab role, by the host an alert
+// carries: the hostname, or the endpoint id when it has none.
+func aicoLabHosts(tuning storage.DetectionTuning, endpoints []storage.Endpoint) map[string]bool {
+	cx := detector.NewClassContext(tuning, endpoints, nil)
+	labs := map[string]bool{}
+	for _, ep := range endpoints {
+		if cx.RoleOf(ep) == storage.RoleLab {
+			labs[ep.ID] = true
+			if ep.Hostname != "" {
+				labs[ep.Hostname] = true
+			}
+		}
+	}
+	return labs
 }
 
 func (s *Server) aicoNotice(g *aicoGroup, now time.Time) (aicoNotice, bool) {
@@ -550,7 +573,7 @@ func (s *Server) aicoNotice(g *aicoGroup, now time.Time) (aicoNotice, bool) {
 		Title:  cutRunes("Security alert on "+oneLine(lead.Host), 200),
 		Body:   body,
 		Detail: cutRunes(strings.Join(detail, "\n"), 4000),
-		Key:    key, Fields: fields, Actions: actions, Primary: "not-expected", Push: "phone"}
+		Key:    key, Fields: fields, Actions: actions, Primary: "not-expected", Push: "phone", Lab: g.lab}
 	if base := strings.TrimSuffix(s.hubURL, "/"); strings.HasPrefix(base, "https://") && len(base) <= 300 {
 		n.Open = base
 		n.Actions = append(n.Actions, "open")

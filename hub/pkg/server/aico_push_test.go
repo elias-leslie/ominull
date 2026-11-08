@@ -781,3 +781,42 @@ func TestAicoPushNewFindingBehindAFullScanOfSentOnes(t *testing.T) {
 		t.Fatalf("the new HIGH finding should be the one notice, got %d", len(rcv.notices))
 	}
 }
+
+func TestAicoLabHostsNamesLabMachinesOnly(t *testing.T) {
+	t.Parallel()
+	labs := aicoLabHosts(storage.DetectionTuning{}, []storage.Endpoint{
+		{ID: "ep-lab", Hostname: "target-linux", RoleTag: storage.RoleLab},
+		{ID: "ep-parked", Presence: storage.PresenceParked},
+		{ID: "ep-real", Hostname: "desktop", RoleTag: storage.RolePersonal},
+	})
+	for _, host := range []string{"target-linux", "ep-lab", "ep-parked"} {
+		if !labs[host] {
+			t.Errorf("%s should be a lab machine", host)
+		}
+	}
+	for _, host := range []string{"desktop", "ep-real", "someone-else"} {
+		if labs[host] {
+			t.Errorf("%s should not be a lab machine", host)
+		}
+	}
+}
+
+func TestAicoNoticeCarriesTheLabFlag(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	alert := feedAlert{ID: fmt.Sprintf("%036d", 1), Type: "X", Host: "h", What: "w", At: now.Format(time.RFC3339)}
+	plain, ok := srv.aicoNotice(&aicoGroup{token: "a", alerts: []feedAlert{alert}}, now)
+	if !ok || plain.Lab {
+		t.Fatalf("a real machine's notice: ok %v lab %v", ok, plain.Lab)
+	}
+	raw, _ := json.Marshal(plain)
+	if strings.Contains(string(raw), `"lab"`) {
+		t.Fatalf("a real machine's notice names lab: %s", raw)
+	}
+	lab, ok := srv.aicoNotice(&aicoGroup{token: "b", lab: true, alerts: []feedAlert{alert}}, now)
+	if !ok || !lab.Lab {
+		t.Fatalf("a lab machine's notice: ok %v lab %v", ok, lab.Lab)
+	}
+}
