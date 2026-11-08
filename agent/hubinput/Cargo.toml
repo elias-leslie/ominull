@@ -6,7 +6,7 @@ name = "ominull-hubinput"
 version = "0.1.0"
 edition = "2021"
 publish = false
-rust-version = "1.82"
+rust-version = "1.87"
 
 [lib]
 name = "ominull_hubinput"
@@ -14,9 +14,9 @@ crate-type = ["staticlib"]
 path = "src/lib.rs"
 
 [dependencies]
-ecdsa = { version = "=0.16.9", default-features = false, features = ["der", "verifying"] }
+ecdsa = { version = "=0.17.0", default-features = false, features = ["der", "algorithm"] }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast"] }
-p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "ecdsa", "sha256"] }
+p256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa"] }
 sha2 = { version = "=0.10.9", default-features = false, features = ["compress"] }
 
 [workspace]

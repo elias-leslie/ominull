@@ -114,8 +114,9 @@ fn p256_key(xy: &[u8; 64]) -> Option<p256::ecdsa::VerifyingKey> {
 
 /// A DER ECDSA-P256/SHA-256 signature over msg with the raw point xy.
 pub fn p256_verify_xy(xy: &[u8; 64], msg: &[u8], der: &[u8]) -> bool {
-    let (Some(key), Ok(sig)) = (p256_key(xy), p256::ecdsa::Signature::from_der(der)) else { return false };
-    key.verify(msg, &sig).is_ok()
+    let mut hash = [0u8; 32];
+    sha256_sum(msg, &mut hash);
+    p256_verify_hash(xy, &hash, der)
 }
 
 /// The same, over a digest the caller already holds (a package too big to keep in memory).
