@@ -1830,15 +1830,19 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
             NotePermit(RunFw(ndIn));
             NotePermit(RunFw(ndOut));
         }
-        /* Preserve path-MTU/error feedback for existing flows, not arbitrary
-         * ICMPv6 requests that could bypass peer quarantine. */
-        const char *errorIn[] = {tool, "-A", OMINULL_NEXT_IN, "-p", "ipv6-icmp",
-            "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
-        const char *errorOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-p", "ipv6-icmp",
-            "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
-        NotePermit(RunFw(errorIn));
-        NotePermit(RunFw(errorOut));
     }
+
+    /* Preserve path-MTU/error feedback for existing flows, not arbitrary ICMP
+     * requests that could bypass peer quarantine. It comes from routers on no
+     * allow list, and an allowed connection through a smaller link stalls
+     * without it (scripts/test-linux-icmp-errors.sh). */
+    const char *icmp = v6 ? "ipv6-icmp" : "icmp";
+    const char *errorIn[] = {tool, "-A", OMINULL_NEXT_IN, "-p", icmp,
+        "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
+    const char *errorOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-p", icmp,
+        "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
+    NotePermit(RunFw(errorIn));
+    NotePermit(RunFw(errorOut));
 
     /* 3. DHCP, above the peer blocks. */
     for (int i = 0; i < baselineCount; i++) {
