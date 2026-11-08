@@ -273,6 +273,8 @@ static void test_forensics_payload(void) {
            FP("{\"profile\":\"\",\"bundle_id\":\"\"}") && strcmp(profile, "diagnostic") == 0 && bundle[0] == 0, true);
     expect("timeout over a day clamped to a day", FP("{\"timeout_seconds\":999999}") && to == 86400, true);
     expect("other-case member refused", FP("{\"profile\":\"a\",\"Profile\":\"b\"}"), false);
+    expect("escaped member refused", FP("{\"profile\":\"a\",\"pro\\u0066ile\":\"b\"}"), false);
+    expect("Kelvin-sign key refused (Go folds U+212A to k)", FP("{\"\xe2\x84\xaaind\":\"x\"}"), false);
     expect("job id fallback must be a safe bundle id", Response_BundleId("", "job-1") != NULL &&
                                                           Response_BundleId("", "../x") == NULL &&
                                                           strcmp(Response_BundleId("b1", "../x"), "b1") == 0, true);

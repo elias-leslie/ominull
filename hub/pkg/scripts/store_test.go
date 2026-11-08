@@ -329,3 +329,18 @@ func TestScripts_ParameterNamesUniqueIgnoringCase(t *testing.T) {
 		t.Fatalf("distinct names: %v", err)
 	}
 }
+
+func TestScripts_LongValueOnlyForCatalogs(t *testing.T) {
+	schema, err := ValidateSchema(`{"parameters":[{"name":"target","type":"string"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateParameters(schema, map[string]string{"target": strings.Repeat("a", MaxParamEnvValueBytes)}); err != nil {
+		t.Fatalf("a value at the environment limit: %v", err)
+	}
+	// The agent cannot put a longer value in the environment; refusing it here
+	// beats a script that runs with the parameter silently unset.
+	if err := ValidateParameters(schema, map[string]string{"target": strings.Repeat("a", MaxParamEnvValueBytes+1)}); err == nil {
+		t.Fatal("a string value longer than an environment variable must be refused")
+	}
+}

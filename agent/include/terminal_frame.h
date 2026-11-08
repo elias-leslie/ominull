@@ -160,12 +160,13 @@ static inline bool TermJson_KeyIs(const char* key, size_t key_len, const char* w
 
 /* TermJson_Member classifies a raw member key against the names a reader
  * knows: the index on an exact match, -1 for an unknown member, -2 for a key
- * another JSON reader could take for a known member (one holding an escape,
- * or one equal to a known name ignoring ASCII case: Go's encoding/json does
- * both). Readers refuse -2, so the hub and the agent read the same member. */
+ * another JSON reader could take for a known member: one holding an escape or
+ * a non-ASCII byte (Go's encoding/json folds U+017F to s and U+212A to k), or
+ * one equal to a known name ignoring ASCII case. Readers refuse -2, so the hub
+ * and the agent read the same member. The hub's keys are plain ASCII. */
 static inline int TermJson_Member(const char* key, size_t key_len, const char* const* names, int n) {
     for (size_t i = 0; i < key_len; i++)
-        if (key[i] == '\\') return -2;
+        if (key[i] == '\\' || (unsigned char)key[i] >= 0x80) return -2;
     for (int m = 0; m < n; m++) {
         size_t nl = strlen(names[m]);
         if (nl != key_len) continue;

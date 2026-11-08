@@ -12,6 +12,10 @@ import (
 const (
 	MaxParamSchemaBytes      = 8192  // 8 KiB max schema JSON
 	MaxParamTotalValuesBytes = 16384 // 16 KiB max total parameter values
+	// MaxParamEnvValueBytes is the longest value the agent can put in an
+	// environment variable (its buffer is 2048 bytes with the NUL). Only a
+	// catalog, which scripts read from the params file, may be longer.
+	MaxParamEnvValueBytes = 2047
 )
 
 var (
@@ -182,6 +186,10 @@ func ValidateParameters(schema *ParameterSchema, values map[string]string) error
 				return fmt.Errorf("%w: parameter %q is required", ErrMissingParameter, p.Name)
 			}
 			continue
+		}
+
+		if p.Type != "catalog" && len(val) > MaxParamEnvValueBytes {
+			return fmt.Errorf("%w: parameter %q value is %d bytes; only a catalog parameter may be longer than %d", ErrInvalidParameter, p.Name, len(val), MaxParamEnvValueBytes)
 		}
 
 		switch p.Type {

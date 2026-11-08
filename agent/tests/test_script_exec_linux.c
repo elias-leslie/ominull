@@ -754,6 +754,8 @@ static void test_strict_payload_reader(void) {
            !ScriptExec_ParsePayload("{\"source\":\"a\",\"sour\\u0063e\":\"b\"}", &g_sp));
     expect("other-case twin of a known member refused",
            !ScriptExec_ParsePayload("{\"source\":\"a\",\"Source\":\"b\"}", &g_sp));
+    expect("non-ASCII key refused (Go folds U+017F long s to s)",
+           !ScriptExec_ParsePayload("{\"source\":\"a\",\"\xc5\xbfource\":\"b\"}", &g_sp));
     expect("unknown member still skipped", ScriptExec_ParsePayload("{\"source\":\"a\",\"future\":\"b\"}", &g_sp));
     expect("64-character parameter name accepted (the hub allows 64)",
            ScriptExec_ParsePayload("{\"source\":\"a\",\"parameters\":{\"p123456789012345678901234567890123456789012345678901234567890123\":\"v\"}}", &g_sp) &&

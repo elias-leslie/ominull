@@ -164,6 +164,10 @@ static void test_screen_canonical_vectors(void) {
            Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"mode\":\"view\",\"mode\":\"control\",\"connect_token\":\"t\"}", &sp), false);
     expect("worker refuses a repeated unattended",
            Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"mode\":\"view\",\"unattended\":true,\"unattended\":true,\"connect_token\":\"t\"}", &sp), false);
+    expect("worker refuses an other-case member",
+           Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"mode\":\"view\",\"Mode\":\"control\",\"connect_token\":\"t\"}", &sp), false);
+    expect("worker refuses an escaped member",
+           Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"mode\":\"view\",\"\\u006dode\":\"control\",\"connect_token\":\"t\"}", &sp), false);
     expect("worker refuses a repeated session_id",
            Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"session_id\":\"s2\",\"mode\":\"view\",\"connect_token\":\"t\"}", &sp), false);
     expect("canonical refuses a repeated mode",

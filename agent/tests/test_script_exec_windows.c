@@ -251,6 +251,44 @@ static void test_parameter_delivery(void) {
     expect("param file cleaned up", GetFileAttributesA(param_path) == INVALID_FILE_ATTRIBUTES);
 }
 
+/* A catalog past the environment cap reaches the script through the params
+   file only; the environment carries neither name for it. */
+static void test_long_value_in_params_file(void) {
+    printf("[*] Testing a long value goes to the params file only...\n");
+    const char* script_body = "@echo off\r\nif defined OMINULL_PARAM_CATALOG (echo ENV=yes) else (echo ENV=no)\r\n"
+                              "if defined catalog (echo BARE=yes) else (echo BARE=no)\r\n"
+                              "findstr /c:\"cccccccccc\" \"%OMINULL_PARAMS_FILE%\" >nul && echo FILE=yes\r\n";
+    uint8_t hash[32];
+    Response_SHA256_Sum((const uint8_t*)script_body, strlen(script_body), hash);
+    char digest_hex[65];
+    for (int i = 0; i < 32; i++) snprintf(digest_hex + (i * 2), 3, "%02x", hash[i]);
+    static ScriptExecParamsWin params;
+    memset(&params, 0, sizeof(params));
+    snprintf(params.script_id, sizeof(params.script_id), "scr-long");
+    params.script_version = 1;
+    snprintf(params.script_digest, sizeof(params.script_digest), "%s", digest_hex);
+    snprintf(params.interpreter, sizeof(params.interpreter), "cmd.exe");
+    snprintf(params.source, sizeof(params.source), "%s", script_body);
+    params.source_len = strlen(script_body);
+    params.timeout_seconds = 10;
+    params.max_output_bytes = 65536;
+    int n = snprintf(params.parameters_json, sizeof(params.parameters_json), "{\"catalog\":\"");
+    memset(params.parameters_json + n, 'c', 3072);
+    snprintf(params.parameters_json + n + 3072, 8, "\"}");
+    params.parameters_len = strlen(params.parameters_json);
+    bool ok = ScriptPayload_Params(params.parameters_json, params.parameters_len, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    expect("long value parses, marked for the params file", ok && params.param_count == 1 && params.params[0].env_skip);
+    char output[4096] = {0};
+    bool truncated = false, timed_out = false;
+    int64_t duration_ms = 0;
+    char error_code[64] = {0};
+    int exit_code = ScriptExec_RunContainedWin(&params, "job-win-long", output, sizeof(output), &truncated, &timed_out,
+                                               &duration_ms, error_code, sizeof(error_code));
+    expect("long value: exit code is 0", exit_code == 0);
+    expect("long value: not in the environment", strstr(output, "ENV=no") != NULL && strstr(output, "BARE=no") != NULL);
+    expect("long value: in the params file", strstr(output, "FILE=yes") != NULL);
+}
+
 static void test_digest_tamper_rejection(void) {
     printf("[*] Testing Windows digest tamper rejection...\n");
 
@@ -532,8 +570,9 @@ static void test_parameter_once_per_name(void) {
     expect("param once: OMINULL_PARAM_MODE arrives", strstr(output, "OMINULL_PARAM_MODE=audit") != NULL);
     expect("param once: no lowercase duplicate", strstr(output, "OMINULL_PARAM_mode=") == NULL && lines == 1);
 
-    /* ominull_param_mode would fold onto OMINULL_PARAM_MODE: never exported bare. */
-    const char* pjson2 = "{\"mode\":\"audit\",\"ominull_param_mode\":\"evil\"}";
+    /* ominull_param_mode would fold onto OMINULL_PARAM_MODE: never exported
+       bare. It comes first, so the env block does not hold OMINULL_PARAM_MODE yet. */
+    const char* pjson2 = "{\"ominull_param_mode\":\"evil\",\"mode\":\"audit\"}";
     snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson2);
     params.parameters_len = strlen(pjson2);
     ScriptPayload_Params(pjson2, strlen(pjson2), params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
@@ -614,7 +653,9 @@ static void test_bare_names(void) {
                !ScriptParam_BareExportWindows("dotnet_startup_hooks") && !ScriptParam_BareExportWindows("psmodulepath") &&
                !ScriptParam_BareExportWindows("windir") && !ScriptParam_BareExportWindows("__compat_layer") &&
                !ScriptParam_BareExportWindows("ominull_param_x") && !ScriptParam_BareExportWindows("comspec") &&
-               !ScriptParam_BareExportWindows("pathext") && !ScriptParam_BareExportWindows("systemroot"));
+               !ScriptParam_BareExportWindows("pathext") && !ScriptParam_BareExportWindows("systemroot") &&
+               !ScriptParam_BareExportWindows("appdomain_manager_asm") && !ScriptParam_BareExportWindows("corehost_tracefile") &&
+               !ScriptParam_BareExportWindows("https_proxy") && !ScriptParam_BareExportWindows("no_proxy"));
 }
 
 int main(void) {
@@ -630,6 +671,7 @@ int main(void) {
     test_cmd_simple_exec();
     test_parameter_delivery();
     test_parameter_once_per_name();
+    test_long_value_in_params_file();
     test_console_idle_env();
     test_digest_tamper_rejection();
     test_output_truncation();

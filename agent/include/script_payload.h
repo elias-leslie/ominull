@@ -69,8 +69,7 @@ static inline bool ScriptParam_Identifier(const char* n, bool lower_only) {
 /* ScriptParam_BareExport: whether the value may also be set under the bare
  * name on Linux. Only a lower-case identifier, so a parameter can never set
  * PATH, LD_PRELOAD, BASH_ENV, BASH_FUNC_x%% or any other upper-case variable
- * the interpreter or loader reads. Windows names ignore case, so there the
- * executor takes any identifier the environment block does not hold yet. */
+ * the interpreter or loader reads. Windows: ScriptParam_BareExportWindows. */
 static inline bool ScriptParam_BareExport(const char* n) { return ScriptParam_Identifier(n, true); }
 
 /* ScriptParam_BareExportWindows: a lower-case identifier outside the names
@@ -81,10 +80,13 @@ static inline bool ScriptParam_BareExportWindows(const char* n) {
     static const char* const denied[] = {"ominull_", "cor_", "coreclr_", "dotnet_", "complus_", "ps", "powershell",
                                          "__", "windir", "path", "comspec", "system", "temp", "tmp", "program",
                                          "appdata", "localappdata", "userprofile", "public", "allusersprofile",
-                                         "processor_", "number_of_processors", "os", "homedrive", "homepath"};
+                                         "processor_", "number_of_processors", "os", "homedrive", "homepath",
+                                         "appdomain_", "corehost_", "no_proxy"};
     if (!ScriptParam_Identifier(n, true)) return false;
     for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); i++)
         if (strncmp(n, denied[i], strlen(denied[i])) == 0) return false;
+    size_t len = strlen(n);   /* http_proxy, https_proxy, all_proxy: .NET's HTTP client reads them */
+    if (len >= 6 && strcmp(n + len - 6, "_proxy") == 0) return false;
     return true;
 }
 
