@@ -3,6 +3,7 @@ package threatintel
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -32,7 +33,11 @@ type DomainFeedStatus struct {
 	// Error is the last failure; the names from the last good fetch stay in
 	// force meanwhile (Domains counts them).
 	Error string `json:"error,omitempty"`
+	// NeedsKey says the last failure was the hub having no abuse.ch key.
+	NeedsKey bool `json:"needs_key,omitempty"`
 }
+
+var errNoAbuseCHKey = errors.New("no abuse.ch Auth-Key")
 
 type domainFeedSet struct {
 	names      map[string]bool
@@ -89,7 +94,7 @@ func feedRequestURL(raw, keyFile string) (string, string, error) {
 	}
 	raw2, err := os.ReadFile(keyFile)
 	if err != nil {
-		return "", "", fmt.Errorf("no abuse.ch Auth-Key at %s", keyFile)
+		return "", "", fmt.Errorf("%w at %s", errNoAbuseCHKey, keyFile)
 	}
 	key := strings.TrimSpace(strings.SplitN(string(raw2), "\n", 2)[0])
 	if !authKeyRe.MatchString(key) {
@@ -198,7 +203,7 @@ func (m *Manager) RefreshDomainFeeds(ctx context.Context, feeds []storage.Domain
 		}
 		names, err := fetchDomainFeed(ctx, m.domainHTTP, feed, keyFile)
 		if err != nil {
-			set.status.Error = err.Error()
+			set.status.Error, set.status.NeedsKey = err.Error(), errors.Is(err, errNoAbuseCHKey)
 			log.Printf("[-] domain feed %s: %v (kept %d names from the last good fetch)", feed.Name, err, len(set.names))
 		} else {
 			fetched := time.Now().UTC()

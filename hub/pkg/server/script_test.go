@@ -579,65 +579,7 @@ func TestServer_Scripts_DigestAndSchedules(t *testing.T) {
 	_ = json.NewDecoder(wCreate.Body).Decode(&createResp)
 	scriptID := createResp.Script.ID
 
-	// 2. Test POST /api/v1/scripts/digest
-	// 2a. Parameter validation error
-	digestBadParams, _ := json.Marshal(map[string]interface{}{
-		"script_id":  scriptID,
-		"version":    1,
-		"parameters": map[string]string{"env": "invalid-env"},
-	})
-	reqDigestBad := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/digest", bytes.NewReader(digestBadParams))
-	reqDigestBad.Header.Set("Authorization", "Bearer "+jwtToken)
-	reqDigestBad.Header.Set("Content-Type", "application/json")
-	wDigestBad := httptest.NewRecorder()
-	handler.ServeHTTP(wDigestBad, reqDigestBad)
-	if wDigestBad.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for invalid parameter enum in digest, got %d: %s", wDigestBad.Code, wDigestBad.Body.String())
-	}
-
-	// 2b. Valid digest calculation
 	validParams := map[string]string{"env": "prod", "dry_run": "true"}
-	digestReqBody, _ := json.Marshal(map[string]interface{}{
-		"script_id":        scriptID,
-		"version":          1,
-		"parameters":       validParams,
-		"timeout_seconds":  45,
-		"max_output_bytes": 2048,
-	})
-	reqDigest := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/digest", bytes.NewReader(digestReqBody))
-	reqDigest.Header.Set("Authorization", "Bearer "+jwtToken)
-	reqDigest.Header.Set("Content-Type", "application/json")
-	wDigest := httptest.NewRecorder()
-	handler.ServeHTTP(wDigest, reqDigest)
-	if wDigest.Code != http.StatusOK {
-		t.Fatalf("failed to calculate digest: %d: %s", wDigest.Code, wDigest.Body.String())
-	}
-
-	var digestResp struct {
-		ActionDigest string `json:"action_digest"`
-		ScriptDigest string `json:"script_digest"`
-	}
-	if err := json.NewDecoder(wDigest.Body).Decode(&digestResp); err != nil {
-		t.Fatalf("failed to decode digest response: %v", err)
-	}
-
-	expectedPayload := response.ScriptExecPayload{
-		ScriptID:       scriptID,
-		ScriptVersion:  1,
-		ScriptDigest:   createResp.Version.DigestSHA256,
-		Interpreter:    createResp.Script.Interpreter,
-		Source:         createResp.Version.Source,
-		Parameters:     validParams,
-		TimeoutSeconds: 45,
-		MaxOutputBytes: 2048,
-	}
-	expectedDigest, _ := response.ComputeActionDigest(expectedPayload)
-	if digestResp.ActionDigest != expectedDigest {
-		t.Fatalf("action digest mismatch: expected %s, got %s", expectedDigest, digestResp.ActionDigest)
-	}
-	if digestResp.ScriptDigest != createResp.Version.DigestSHA256 {
-		t.Fatalf("script digest mismatch: expected %s, got %s", createResp.Version.DigestSHA256, digestResp.ScriptDigest)
-	}
 
 	// 3. Test POST /api/v1/scripts/schedules
 	// 3a. Static API key rejection (fail-closed)

@@ -684,7 +684,6 @@ static inline bool Forensics_CollectServiceState(char** out_data, size_t* out_si
     const char* services[] = {
         "ominull-agent",
         "ominull-hub",
-        "ominull-response-authority",
         "ssh",
         "sshd",
         "systemd-resolved",

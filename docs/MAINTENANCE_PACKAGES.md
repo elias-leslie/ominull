@@ -509,11 +509,6 @@ The hub's health findings (`/api/v1/health/findings`, pushed to Aico as Status r
   neediest first. When the run clears, the record reads resolved for a day, then drops (the raised set is the
   settings row `maintenance.run_records`).
 
-**Escalation.** `POST /api/v1/maintenance/escalate {"job_id","reason"}` (admin) hands a run to the owner: it becomes
-one decision (group `job:<id>`, answer `handled`) on the decisions card and the health findings, audited
-`MAINTENANCE_ESCALATED`. `404` unknown job, `400` no reason or not a script run. Escalating the same job again
-replaces the reason; the newest 50 are kept (settings row `maintenance.escalations`).
-
 ## Owner decisions
 
 A package result may list what it could not settle by itself in
