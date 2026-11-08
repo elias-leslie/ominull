@@ -17,14 +17,17 @@ from datetime import datetime, timezone
 import observer as obs
 
 SOURCE = "ominull-production-state"
-# The removable backup volume as udisks mounts it for the invoking user.
+# The removable backup volume as udisks mounts it for the invoking user. The
+# standby on Proxmox has no such disk: it names its own folder in the environment
+# (Aico's Drive copy job sets it) and keeps less free, as it only staged one copy.
 BACKUP_MOUNT = Path("/media") / pwd.getpwuid(os.getuid()).pw_name / "Backups"
 BACKUP_UUID = "068613B88613A769"
-DESTINATION = BACKUP_MOUNT / SOURCE
+LOCAL_STAGE = os.environ.get("OMINULL_BACKUP_STAGE", "").strip()
+DESTINATION = (Path(LOCAL_STAGE) if LOCAL_STAGE else BACKUP_MOUNT) / SOURCE
 NODE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}\Z")
 GUEST = 150
 DEADLINE_SECONDS = 3600
-RESERVE_BYTES = 25 * 1024**3
+RESERVE_BYTES = (2 if LOCAL_STAGE else 25) * 1024**3
 EVIDENCE_KEEP = 20  # Newest failure/retirement/recovery markers kept per kind.
 REQUEST_KEYS = {"contract_version", "operation", "project", "source_id", "backup_id"}
 
@@ -101,6 +104,8 @@ def private_directory(path):
 
 
 def require_backup_mount():
+    if LOCAL_STAGE:
+        return
     obs.require(BACKUP_MOUNT.resolve() == BACKUP_MOUNT, "backup_mount_path")
     try:
         result = subprocess.run(["findmnt", "--json", "--mountpoint", str(BACKUP_MOUNT),

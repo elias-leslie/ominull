@@ -421,6 +421,16 @@ class SecretSplitTests(unittest.TestCase):
                     pd.run(["fetch", "a" * 32, "bkp-fixture", "pve-fixture", which], forced=True, out=io.BytesIO())
 
 
+class LocalStageTests(unittest.TestCase):
+    def test_standby_stage_skips_the_removable_disk_check_and_lands_in_its_folder(self):
+        code = ("import os, backup as bk; bk.require_backup_mount();"
+                "print(bk.DESTINATION, bk.RESERVE_BYTES)")
+        result = subprocess.run(["python3", "-c", code], cwd=Path(bk.__file__).parent, check=True,
+                                env={**os.environ, "OMINULL_BACKUP_STAGE": "/stage"},
+                                capture_output=True, text=True)
+        self.assertEqual(result.stdout.split(), [f"/stage/{bk.SOURCE}", str(2 * 1024**3)])
+
+
 class BackupConfigurationTests(unittest.TestCase):
     def test_backup_loader_does_not_depend_on_deployment_build_or_credentials(self):
         with tempfile.TemporaryDirectory() as temporary:
