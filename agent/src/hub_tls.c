@@ -416,21 +416,6 @@ static PCCERT_CONTEXT LoadClientCertFromPFX(const char* pfxPath) {
     return out;
 }
 
-/* What WinHTTP says about the handshake that just failed, read by
- * Hub_RetryWithoutClientCert. Every failure overwrites it, so a stale answer can't
- * outlive the next handshake. */
-static volatile LONG g_serverCertFailed;
-
-static VOID CALLBACK NoteSecureFailure(HINTERNET handle, DWORD_PTR context, DWORD status, LPVOID info, DWORD infoLen) {
-    (void)handle;
-    (void)context;
-    if (status != WINHTTP_CALLBACK_STATUS_SECURE_FAILURE || !info || infoLen < sizeof(DWORD)) return;
-    const DWORD server = WINHTTP_CALLBACK_STATUS_FLAG_CERT_REV_FAILED | WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CERT |
-                         WINHTTP_CALLBACK_STATUS_FLAG_CERT_REVOKED | WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CA |
-                         WINHTTP_CALLBACK_STATUS_FLAG_CERT_CN_INVALID | WINHTTP_CALLBACK_STATUS_FLAG_CERT_DATE_INVALID;
-    InterlockedExchange(&g_serverCertFailed, (*(DWORD*)info & server) ? 1 : 0);
-}
-
 /* Hub_AttachClientCert gives the request this endpoint's certificate when one
  * has been issued. It is deliberately not fatal when there is none: an endpoint
  * enrolled before certificates existed, or one whose enrolment was interrupted,
@@ -477,8 +462,6 @@ static bool g_certUnusable = false;
 bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
     static DWORD lastAttempt = 0;
     static bool complained = false;
-
-    WinHttpSetStatusCallback((HINTERNET)hRequest, NoteSecureFailure, WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, 0);
 
     if (!Hub_UsesTLS(config) || !config->client_pfx_path[0] || g_certUnusable) {
         DeclareNoClientCert((HINTERNET)hRequest);
@@ -541,7 +524,43 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
  * certificate down and retries without it: the endpoint drops to the API key,
  * says so once, and stays reachable. If the hub is in --client-certs required
  * the retry is refused too and the endpoint goes visibly offline, which is the
- * correct outcome - it is no longer able to prove who it is. */
+ * correct outcome - it is no longer able to prove who it is.
+ *
+ * The same failure comes from a server whose own certificate fails, and that costs
+ * this one nothing: whoever answered isn't the hub, and a lying name server shouldn't
+ * cost the endpoint its identity. WinHTTP's failure flags can't tell the two apart, as
+ * a hub rejecting this certificate sends the same alerts. So the address gets asked
+ * again with no certificate on a session of its own: only a handshake that then works
+ * puts the certificate down. If that can't even be asked, the certificate goes as
+ * before, since a lockout is the worse outcome. */
+static bool ServerShakesHandsWithoutCert(HINTERNET failed) {
+    WCHAR url[1024], host[256];
+    DWORD size = sizeof(url);
+    URL_COMPONENTS parts;
+    memset(&parts, 0, sizeof(parts));
+    parts.dwStructSize = sizeof(parts);
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = sizeof(host) / sizeof(host[0]);
+    if (!WinHttpQueryOption(failed, WINHTTP_OPTION_URL, url, &size) || !WinHttpCrackUrl(url, 0, 0, &parts)) return true;
+
+    HINTERNET session = WinHttpOpen(L"OminullAgent/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return true;
+    bool ok = true;
+    WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000);
+    HINTERNET connect = WinHttpConnect(session, host, parts.nPort, 0);
+    HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", L"/", NULL, WINHTTP_NO_REFERER,
+                                                     WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : NULL;
+    if (request) {
+        DeclareNoClientCert(request);
+        ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0);
+        WinHttpCloseHandle(request);
+    }
+    if (connect) WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    return ok;
+}
+
 bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
     if (err == ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) {
         DeclareNoClientCert((HINTERNET)hRequest);
@@ -549,14 +568,11 @@ bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
     }
 
     if (err == ERROR_WINHTTP_SECURE_FAILURE && g_cached) {
-        /* The server's certificate failed, so this one is not at fault: whoever answered
-         * isn't the hub. A lying name server would otherwise cost the endpoint its
-         * identity for the rest of this run. */
-        if (InterlockedExchange(&g_serverCertFailed, 0)) return false;
+        if (!ServerShakesHandsWithoutCert((HINTERNET)hRequest)) return false;
         fprintf(stderr, "[!] The client certificate this endpoint holds cannot complete a TLS "
                         "handshake (WinHTTP error %lu); dropping it and reporting under the API "
                         "key alone. Re-run enrolment to replace it.\n", err);
-        CertFreeCertificateContext(g_cached);
+        /* Not freed: another thread may be presenting it, as in Hub_UseClientCert. */
         g_cached = NULL;
         g_clientCertLoaded = false;
         g_certUnusable = true;
