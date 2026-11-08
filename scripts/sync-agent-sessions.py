@@ -11,6 +11,7 @@ import os
 import ssl
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -54,7 +55,21 @@ def post(found):
 
 def main():
     found = sessions()
-    print(f"ok: {post(found).get('saved', 0)} of {len(found)} session names saved")
+    try:
+        saved = post(found).get("saved", 0)
+    except urllib.error.HTTPError:
+        raise
+    except urllib.error.URLError as e:
+        # The hub is off or restarting (no connection at all): not a failure, the next run sends the names.
+        if not isinstance(e.reason, OSError) or isinstance(e.reason, ssl.SSLError):
+            raise
+        print("skipped: the hub did not answer; the next run tries again")
+        return None
+    except TimeoutError:
+        print("skipped: the hub did not answer; the next run tries again")
+        return None
+    print(f"ok: {saved} of {len(found)} session names saved")
+    return None
 
 
 if __name__ == "__main__":
