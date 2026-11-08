@@ -648,7 +648,7 @@ static bool HubPostTelemetryBody(const AGENT_CONFIG* config, const void* body, s
      * WinHTTP fails the send rather than answering an ask it cannot satisfy.
      * Resend once having said there is none; the hub accepts an endpoint that
      * has not enrolled an identity yet. */
-    if (!bResults && Hub_RetryWithoutClientCert(hRequest, GetLastError())) {
+    if (!bResults && Hub_RetryWithoutClientCert(hRequest, GetLastError(), config)) {
         bResults = WinHttpSendRequest(
             hRequest,
             WINHTTP_NO_ADDITIONAL_HEADERS,
@@ -890,7 +890,7 @@ bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const cha
         0
     );
 
-    if (!bResults && Hub_RetryWithoutClientCert(hRequest, GetLastError())) {
+    if (!bResults && Hub_RetryWithoutClientCert(hRequest, GetLastError(), config)) {
         bResults = WinHttpSendRequest(
             hRequest,
             WINHTTP_NO_ADDITIONAL_HEADERS,

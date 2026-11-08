@@ -210,7 +210,7 @@ bool Hub_HasClientCert(void);
 // Answers a certificate request that arrived after the send. Returns true when
 // err was ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED and the request has been told
 // there is no certificate, so the caller should send it once more.
-bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err);
+bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err, const AGENT_CONFIG* config);
 /* Client certificate renewal (cert_renewal.h, Service_AdoptRenewedClientCert).
  * Hub_ImportClientCertPFX imports an archive the hub issued and returns its
  * context only when it carries its key, names this endpoint and is in date;

@@ -906,7 +906,7 @@ static inline int Screen_RunWindowsWorker(const AGENT_CONFIG* config, const Scre
     Hub_AttachClientCert(hRequest, config);
 
     BOOL bSend = WinHttpSendRequest(hRequest, hdrsW, -1L, NULL, 0, 0, 0);
-    if (!bSend && Hub_RetryWithoutClientCert(hRequest, GetLastError())) {
+    if (!bSend && Hub_RetryWithoutClientCert(hRequest, GetLastError(), config)) {
         bSend = WinHttpSendRequest(hRequest, hdrsW, -1L, NULL, 0, 0, 0);
     }
     if (!bSend || !WinHttpReceiveResponse(hRequest, NULL)) goto fail;

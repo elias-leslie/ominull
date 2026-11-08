@@ -82,6 +82,9 @@ grep -q 'NOT REINSTALL' "${msi_tables}/InstallExecuteSequence.idt"
 # Runs as the machine, inside the install script, and a failed start can't fail the install.
 grep -qE $'^StartIfEnrolled\t3186\tCMDEXE\t.*agent\\.conf.*sc\\.exe start ominulld' "${msi_tables}/CustomAction.idt"
 grep -qE $'^StartIfEnrolled\tNOT REMOVE="ALL"\t' "${msi_tables}/InstallExecuteSequence.idt"
+sequence_of() { awk -F'\t' -v action="$1" '$1 == action { sub(/\r$/, "", $3); print $3 }' "${msi_tables}/InstallExecuteSequence.idt"; }
+[ "$(sequence_of InstallInitialize)" -lt "$(sequence_of StartIfEnrolled)" ]
+[ "$(sequence_of StartIfEnrolled)" -lt "$(sequence_of InstallFinalize)" ]
 echo "[+] MSI ${VERSION}: files, service registration, recovery action, and no driver payload verified."
 
 make_versioned_deb() {

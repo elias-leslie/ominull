@@ -231,7 +231,7 @@ static bool Preflight(const AGENT_CONFIG* config) {
         DWORD sendErr = GetLastError();
         /* One resend, only for the hub asking who this is. Anything else is a
          * real handshake failure and is reported as one. */
-        if (!Hub_RetryWithoutClientCert(hRequest, sendErr) ||
+        if (!Hub_RetryWithoutClientCert(hRequest, sendErr, config) ||
             !WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
             char reason[320];
             snprintf(reason, sizeof(reason),
@@ -245,7 +245,15 @@ static bool Preflight(const AGENT_CONFIG* config) {
             goto done;
         }
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) goto done;
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        /* Under TLS 1.3 a hub refuses a certificate after the handshake, so the refusal
+         * lands here, as a Schannel error, on real Windows. Every request waits on this
+         * preflight, so here is enough: the next attempt goes without the certificate. */
+        DWORD receiveErr = GetLastError();
+        if (receiveErr == ERROR_WINHTTP_SECURE_FAILURE || (receiveErr & 0xFFFF0000u) == 0x80090000u)
+            Hub_RetryWithoutClientCert(hRequest, ERROR_WINHTTP_SECURE_FAILURE, config);
+        goto done;
+    }
 
     ok = Hub_VerifyRequestPin(hRequest, config);
 
@@ -529,53 +537,61 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
  * The same failure comes from a server whose own certificate fails, and that costs
  * this one nothing: whoever answered isn't the hub, and a lying name server shouldn't
  * cost the endpoint its identity. WinHTTP's failure flags can't tell the two apart, as
- * a hub rejecting this certificate sends the same alerts. So the address gets asked
- * again with no certificate on a session of its own: only a handshake that then works
- * puts the certificate down. If that can't even be asked, the certificate goes as
+ * a hub rejecting this certificate sends the same alerts. So the hub gets asked afresh,
+ * with the certificate and then without: only a hub that answers without it and not
+ * with it puts the certificate down. If that can't even be asked, the certificate goes
  * before, since a lockout is the worse outcome. */
-static bool ServerShakesHandsWithoutCert(HINTERNET failed) {
-    WCHAR url[1024], host[256];
-    DWORD size = sizeof(url);
-    URL_COMPONENTS parts;
-    memset(&parts, 0, sizeof(parts));
-    parts.dwStructSize = sizeof(parts);
-    parts.lpszHostName = host;
-    parts.dwHostNameLength = sizeof(host) / sizeof(host[0]);
-    if (!WinHttpQueryOption(failed, WINHTTP_OPTION_URL, url, &size) || !WinHttpCrackUrl(url, 0, 0, &parts)) return true;
+/* One real request to the hub on a session of its own, so nothing pooled or remembered
+ * stands in for it. A hub rejecting a certificate can do it after the handshake, so an
+ * answer is what counts. *asked goes false when the request couldn't be made at all. */
+static bool HubAnswers(const AGENT_CONFIG* config, PCCERT_CONTEXT cert, bool* asked) {
+    char hostA[256] = {0};
+    WCHAR host[256] = {0};
+    WORD port = 0;
+    BOOL isHttps = FALSE;
+    Hub_SplitURL(config->hub_url, hostA, sizeof(hostA), &port, &isHttps);
+    MultiByteToWideChar(CP_UTF8, 0, hostA, -1, host, 256);
 
+    bool ok = false;
     HINTERNET session = WinHttpOpen(L"OminullAgent/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) return true;
-    bool ok = true;
-    WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000);
-    HINTERNET connect = WinHttpConnect(session, host, parts.nPort, 0);
+    if (session) WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000);
+    HINTERNET connect = session ? WinHttpConnect(session, host, port, 0) : NULL;
     HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", L"/", NULL, WINHTTP_NO_REFERER,
                                                      WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : NULL;
     if (request) {
-        DeclareNoClientCert(request);
-        ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0);
+        if (cert) WinHttpSetOption(request, WINHTTP_OPTION_CLIENT_CERT_CONTEXT, (LPVOID)cert, sizeof(CERT_CONTEXT));
+        else DeclareNoClientCert(request);
+        ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0) &&
+             WinHttpReceiveResponse(request, NULL) && Hub_VerifyRequestPin(request, config);
         WinHttpCloseHandle(request);
+    } else {
+        *asked = false;
     }
     if (connect) WinHttpCloseHandle(connect);
-    WinHttpCloseHandle(session);
+    if (session) WinHttpCloseHandle(session);
     return ok;
 }
 
-bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
+bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err, const AGENT_CONFIG* config) {
     if (err == ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) {
         DeclareNoClientCert((HINTERNET)hRequest);
         return true;
     }
 
     if (err == ERROR_WINHTTP_SECURE_FAILURE && g_cached) {
-        if (!ServerShakesHandsWithoutCert((HINTERNET)hRequest)) return false;
+        PCCERT_CONTEXT held = g_cached;
+        bool asked = true;
+        bool without = !HubAnswers(config, held, &asked) && asked && HubAnswers(config, NULL, &asked);
+        SetLastError(err);
+        if ((asked && !without) || g_cached != held) return false;
         fprintf(stderr, "[!] The client certificate this endpoint holds cannot complete a TLS "
                         "handshake (WinHTTP error %lu); dropping it and reporting under the API "
                         "key alone. Re-run enrolment to replace it.\n", err);
         /* Not freed: another thread may be presenting it, as in Hub_UseClientCert. */
-        g_cached = NULL;
-        g_clientCertLoaded = false;
         g_certUnusable = true;
+        g_clientCertLoaded = false;
+        g_cached = NULL;
         DeclareNoClientCert((HINTERNET)hRequest);
         return true;
     }

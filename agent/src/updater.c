@@ -149,7 +149,7 @@ static bool DownloadToFile(const AGENT_CONFIG* config, const char* path, const c
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
         DWORD sendErr = GetLastError();
-        if (!Hub_RetryWithoutClientCert(hRequest, sendErr) ||
+        if (!Hub_RetryWithoutClientCert(hRequest, sendErr, config) ||
             !WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
             printf("[!] Update download of %s could not be sent (WinHTTP error %lu)\n", path, sendErr);
             goto done;

@@ -1,24 +1,17 @@
-/* Hub_RetryWithoutClientCert under the two kinds of failed handshake: a certificate
- * this endpoint can't use is put down, so it can't lock itself out of its own updates;
- * a server whose own certificate fails costs it nothing, whoever sent it there. */
+/* Hub_RetryWithoutClientCert under the kinds of failed handshake: a certificate this
+ * endpoint can't use is put down, so it can't lock itself out of its own updates; a
+ * server whose own certificate fails costs it nothing, whoever sent it there. */
 #include <winsock2.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <stdio.h>
 #define FIXTURE_FAILED ((HINTERNET)(uintptr_t)1)
 #define FIXTURE_OTHER ((HINTERNET)(uintptr_t)2)
-static BOOL urlKnown = TRUE, serverOk;
-static int sends, opened, closed;
-static BOOL FixtureQueryOption(HINTERNET h, DWORD option, LPVOID out, LPDWORD size) {
-    (void)h;
-    if (!urlKnown || option != WINHTTP_OPTION_URL) return FALSE;
-    static const WCHAR url[] = L"https://hub.example:9443/api/v1/events";
-    memcpy(out, url, sizeof(url));
-    *size = sizeof(url);
-    return TRUE;
-}
+static BOOL canOpen, sendWithCert, receiveWithCert, answersWithout, offered;
+static int asks, opened, closed;
 static HINTERNET FixtureOpen(LPCWSTR a, DWORD b, LPCWSTR c, LPCWSTR d, DWORD e) {
     (void)a; (void)b; (void)c; (void)d; (void)e;
+    if (!canOpen) return NULL;
     opened++;
     return FIXTURE_OTHER;
 }
@@ -28,22 +21,33 @@ static BOOL FixtureTimeouts(HINTERNET h, int a, int b, int c, int d) {
 }
 static HINTERNET FixtureConnect(HINTERNET h, LPCWSTR host, INTERNET_PORT port, DWORD c) {
     (void)h; (void)c;
-    if (wcscmp(host, L"hub.example") || port != 9443) puts("Asked the wrong address");
+    if (wcscmp(host, L"2001:db8::9") || port != 9443) puts("Asked the wrong address");
     opened++;
     return FIXTURE_OTHER;
 }
 static HINTERNET FixtureOpenRequest(HINTERNET h, LPCWSTR a, LPCWSTR b, LPCWSTR c, LPCWSTR d, LPCWSTR *e, DWORD f) {
     (void)h; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
     opened++;
+    offered = FALSE;
     return FIXTURE_OTHER;
+}
+static BOOL FixtureSetOption(HINTERNET h, DWORD option, LPVOID value, DWORD len) {
+    (void)h; (void)len;
+    if (option == WINHTTP_OPTION_CLIENT_CERT_CONTEXT && value) offered = TRUE;
+    return TRUE;
 }
 static BOOL FixtureSend(HINTERNET h, LPCWSTR a, DWORD b, LPVOID c, DWORD d, DWORD e, DWORD_PTR f) {
     (void)h; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
-    sends++;
-    return serverOk;
+    asks++;
+    return offered ? sendWithCert : answersWithout;
 }
-static BOOL FixtureSetOption(HINTERNET h, DWORD a, LPVOID b, DWORD c) {
-    (void)h; (void)a; (void)b; (void)c;
+static DWORD receiveError = SEC_E_UNTRUSTED_ROOT;
+static BOOL FixtureReceive(HINTERNET h, LPVOID a) {
+    (void)h; (void)a;
+    if (offered && !receiveWithCert) {
+        SetLastError(receiveError);
+        return FALSE;
+    }
     return TRUE;
 }
 static BOOL FixtureClose(HINTERNET h) {
@@ -51,36 +55,90 @@ static BOOL FixtureClose(HINTERNET h) {
     closed++;
     return TRUE;
 }
-#define WinHttpQueryOption FixtureQueryOption
 #define WinHttpOpen FixtureOpen
 #define WinHttpSetTimeouts FixtureTimeouts
 #define WinHttpConnect FixtureConnect
 #define WinHttpOpenRequest FixtureOpenRequest
-#define WinHttpSendRequest FixtureSend
 #define WinHttpSetOption FixtureSetOption
+#define WinHttpSendRequest FixtureSend
+#define WinHttpReceiveResponse FixtureReceive
 #define WinHttpCloseHandle FixtureClose
 #include "../src/hub_tls.c"
 
+static AGENT_CONFIG config;
 static int failures;
-static void Check(const char *name, unsigned long err, BOOL known, BOOL server, bool wantRetry, bool wantKept, int wantSends) {
+typedef struct {
+    const char *name;
+    unsigned long err;
+    BOOL canOpen, sendWithCert, receiveWithCert, answersWithout;
+    bool wantRetry, wantKept;
+    int wantAsks;
+} CASE;
+static void Check(const CASE *c) {
     g_cached = (PCCERT_CONTEXT)(uintptr_t)1;
     g_certUnusable = false;
     g_clientCertLoaded = true;
-    urlKnown = known;
-    serverOk = server;
-    sends = opened = closed = 0;
-    bool retry = Hub_RetryWithoutClientCert(FIXTURE_FAILED, err);
-    if (retry != wantRetry || (g_cached != NULL) != wantKept || g_certUnusable == wantKept || sends != wantSends || opened != closed) {
-        printf("%s: retry %d, certificate kept %d, handshakes %d, opened %d, closed %d\n", name, retry, g_cached != NULL, sends, opened, closed);
+    canOpen = c->canOpen;
+    sendWithCert = c->sendWithCert;
+    receiveWithCert = c->receiveWithCert;
+    answersWithout = c->answersWithout;
+    asks = opened = closed = 0;
+    bool retry = Hub_RetryWithoutClientCert(FIXTURE_FAILED, c->err, &config);
+    if (retry != c->wantRetry || (g_cached != NULL) != c->wantKept || g_certUnusable == c->wantKept ||
+        asks != c->wantAsks || opened != closed || GetLastError() != c->err) {
+        printf("%s: retry %d, certificate kept %d, asked %d, opened %d, closed %d, last error %lu\n", c->name, retry,
+               g_cached != NULL, asks, opened, closed, GetLastError());
         failures++;
     }
 }
 int main(void) {
-    Check("a server whose own certificate fails", ERROR_WINHTTP_SECURE_FAILURE, TRUE, FALSE, false, true, 1);
-    Check("a certificate only this endpoint can't use", ERROR_WINHTTP_SECURE_FAILURE, TRUE, TRUE, true, false, 1);
-    Check("a failure that can't be asked about", ERROR_WINHTTP_SECURE_FAILURE, FALSE, FALSE, true, false, 0);
-    Check("the hub asking who this is", ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, TRUE, FALSE, true, true, 0);
-    Check("any other failure", ERROR_WINHTTP_CANNOT_CONNECT, TRUE, TRUE, false, true, 0);
+    snprintf(config.hub_url, sizeof(config.hub_url), "https://[2001:db8::9]:9443");
+    const unsigned long tls = ERROR_WINHTTP_SECURE_FAILURE;
+    static const CASE cases[] = {
+        {"a server whose own certificate fails", tls, TRUE, FALSE, FALSE, FALSE, false, true, 2},
+        {"a certificate only this endpoint can't use", tls, TRUE, FALSE, FALSE, TRUE, true, false, 2},
+        {"a certificate the hub refuses after the handshake", tls, TRUE, TRUE, FALSE, TRUE, true, false, 2},
+        {"a wrong address this time, the right one on a fresh lookup", tls, TRUE, TRUE, TRUE, TRUE, false, true, 1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) Check(&cases[i]);
+    /* These don't reach the hub, so the last error is whatever they were given. */
+    static const CASE unasked[] = {
+        {"a failure that can't be asked about", tls, FALSE, FALSE, FALSE, FALSE, true, false, 0},
+    };
+    Check(&unasked[0]);
+    g_cached = (PCCERT_CONTEXT)(uintptr_t)1;
+    g_certUnusable = false;
+    asks = 0;
+    if (!Hub_RetryWithoutClientCert(FIXTURE_FAILED, ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, &config) || !g_cached || asks) {
+        puts("The hub asking who this is shouldn't cost the certificate or a question");
+        failures++;
+    }
+    if (Hub_RetryWithoutClientCert(FIXTURE_FAILED, ERROR_WINHTTP_CANNOT_CONNECT, &config) || !g_cached || asks) {
+        puts("Any other failure shouldn't cost the certificate or a question");
+        failures++;
+    }
+    /* Under TLS 1.3 the hub's refusal lands on the preflight's receive, as seen on real
+     * Windows. It puts the certificate down, and the next preflight goes without it. */
+    snprintf(config.client_pfx_path, sizeof(config.client_pfx_path), "unused");
+    canOpen = sendWithCert = answersWithout = TRUE;
+    receiveWithCert = FALSE;
+    g_cached = (PCCERT_CONTEXT)(uintptr_t)1;
+    g_certUnusable = false;
+    receiveError = ERROR_WINHTTP_TIMEOUT;
+    asks = 0;
+    if (Hub_TransportReady(&config) || !g_cached || asks != 1) {
+        printf("A timeout isn't a refusal: certificate kept %d, asked %d\n", g_cached != NULL, asks);
+        failures++;
+    }
+    receiveError = SEC_E_UNTRUSTED_ROOT;
+    if (Hub_TransportReady(&config) || g_cached || !g_certUnusable) {
+        printf("A refusal after the handshake kept the certificate: unusable %d\n", g_certUnusable);
+        failures++;
+    }
+    if (!Hub_TransportReady(&config)) {
+        puts("The preflight after a refusal didn't go through without the certificate");
+        failures++;
+    }
     printf("Client certificate fallback failures: %d\n", failures);
     return failures ? 1 : 0;
 }
