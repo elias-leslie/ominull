@@ -1369,8 +1369,8 @@ func (s *Server) PublicURLServesHub() bool {
 // publicURLServesHub reports whether --hub-url answers as this hub does.
 //
 // The probe is the exact request an operator's installer makes: an
-// unauthenticated GET of the bootstrap route. This hub answers that with a JSON
-// refusal. A sign-in page, a redirect to one, a CDN error or a timeout all mean
+// unauthenticated GET of the bootstrap route. This hub answers that with the
+// script, or a JSON refusal where it asks for a token. A sign-in page, a redirect to one, a CDN error or a timeout all mean
 // the URL cannot be pasted onto a host that needs to install from it.
 func (s *Server) publicURLServesHub() bool {
 	s.publicURLMu.Lock()
@@ -1420,10 +1420,16 @@ func probeServesHub(base string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		return false
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// The installer itself; a sign-in page also answers 200, but never with this.
+		head := make([]byte, 2)
+		n, _ := io.ReadFull(resp.Body, head)
+		return string(head[:n]) == "#!"
+	case http.StatusUnauthorized:
+		return strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json")
 	}
-	return strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json")
+	return false
 }
 
 // agentPackageName is the on-disk filename of an agent package. Signature and

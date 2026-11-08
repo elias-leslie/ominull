@@ -41,12 +41,10 @@ func KeyFingerprint(key string) string {
 // requireAdmin gates a route to the admin credential. authMiddleware has
 // already resolved the caller; this only reads its verdict.
 //
-// The distinction it enforces is the one the deployment depends on: the tenant
-// key is on every endpoint in the fleet, so anything a legacy shared key can do is
-// something a single compromised host can do. Fleet-wide controls - creating
+// The distinction it enforces: the tenant key is limited to one tenant's reads,
+// and agents use device credentials and no longer hold it. Fleet-wide controls - creating
 // tenants, quarantining a peer on every agent, pushing a deploy, pointing the
-// another server - are operator actions and must not be reachable
-// with a credential that ships to endpoints.
+// another server - are operator actions and must not be reachable with it.
 func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Role") != "admin" {

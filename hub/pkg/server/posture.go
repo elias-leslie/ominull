@@ -589,7 +589,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "scripts or response engine not initialized")
 		return
 	}
-	// The report lists every machine's weak points; the tenant key ships on every endpoint.
+	// The report lists every machine's weak points; the tenant key is not an operator's.
 	if r.Header.Get("X-Role") == "tenant" {
 		writeJSONError(w, http.StatusForbidden, "posture is not available to this credential")
 		return

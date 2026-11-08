@@ -228,6 +228,11 @@ func TestProbeRejectsAnOriginThatIsNotThisHub(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"valid admin key required"}`))
 		}, true},
+		{"this hub serving the installer", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte("#!/bin/bash\nset -e\n"))
+		}, true},
+		{"empty 200", func(w http.ResponseWriter, r *http.Request) {}, false},
 		{"identity proxy redirect", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "https://example.cloudflareaccess.com/login", http.StatusFound)
 		}, false},
