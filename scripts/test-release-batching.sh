@@ -68,6 +68,18 @@ expect "nothing to release"
 mkdir -p screen/helper && echo 'fn main() {}' > screen/helper/main.rs
 git add -A && git commit -qm "screen helper change"
 expect "${passed}" # the screen helper ships in the Windows package
+git rev-parse HEAD > VERSION.source
+git add -A && git commit -qm "Release 1.0.2: built from the commit before this one"
+expect "nothing to release" # the built commit is what counts, and it had everything
+built="$(git rev-parse HEAD~1)"
+echo 'int during;' > agent/during.c
+git add -A && git commit -qm "agent change while a release was building"
+echo "${built}" > VERSION.source
+git add -A && git commit -q --allow-empty -m "Release 1.0.3: built before the agent change below it"
+expect "${passed}" # it never shipped, though it sits behind the Release commit
+echo 'not-a-commit' > VERSION.source
+git add -A && git commit -qm "Release 1.0.4: unreadable source"
+expect "nothing to release" # falls back to the Release commit
 
 if [ "${failures}" -ne 0 ]; then
     echo "${failures} release batching check(s) failed" >&2

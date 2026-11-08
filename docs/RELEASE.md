@@ -12,8 +12,10 @@ scripts/release.sh --version X.Y.Z [--canary IDS]
 
 `release.sh --help` lists its options. It refuses when nothing the agents ship changed
 since the last `Release X.Y.Z` commit, and when anything uncommitted would ship, since the
-gates and package builds read the working tree. With other work in the checkout, release
-from a worktree, then commit the version bump `release.sh` leaves there:
+gates and package builds read the working tree. It counts changes from the commit the last
+release was built from (`VERSION.source`), since agent work can land while a release builds.
+With other work in the checkout, release from a worktree, then commit the version bump and
+`VERSION.source` that `release.sh` leaves there:
 
 ```bash
 git worktree add --detach DIR HEAD

@@ -76,14 +76,20 @@ fi
 if [ "${DO_HUB}" -eq 1 ]; then
     # The last release is the last "Release X.Y.Z" commit. What ships is the
     # agents and their packaging; tests and docs change no bytes, and a hub
-    # change deploys on its own (scripts/deploy-hub.sh).
+    # change deploys on its own (scripts/deploy-hub.sh). That commit lands after
+    # the build, so agent work committed meanwhile sits behind it and never
+    # shipped: compare with the commit the release was built from, VERSION.source.
     last_release="$(git -C "${ROOT_DIR}" log -1 --format='%H %ct %s' --grep='^Release [0-9]' 2>/dev/null || true)"
     if [ -n "${last_release}" ]; then
         read -r last_sha _ last_subject <<<"${last_release}"
         last_name="$(printf '%s' "${last_subject}" | cut -d' ' -f1-2 | sed -E 's/[.:]+$//')"
         # Committed changes only: a rerun after a failed run must not count
         # the version bump that run left in the working tree.
-        shipped="$(git -C "${ROOT_DIR}" diff --name-only "${last_sha}" HEAD -- agent packaging screen \
+        built_from="$(git -C "${ROOT_DIR}" show HEAD:VERSION.source 2>/dev/null | tr -d '[:space:]' || true)"
+        if ! git -C "${ROOT_DIR}" merge-base --is-ancestor "${built_from:-none}" HEAD 2>/dev/null; then
+            built_from="${last_sha}"
+        fi
+        shipped="$(git -C "${ROOT_DIR}" diff --name-only "${built_from}" HEAD -- agent packaging screen \
             scripts/build.sh scripts/build-packages.sh scripts/build-linux-agent.sh scripts/build-bpf.sh scripts/build-hub-input.sh \
             ':(exclude)*_test.go' ':(exclude)agent/tests' ':(exclude,glob)hub/**/testdata/**' ':(exclude)*.md')"
         if [ -z "${shipped}" ]; then
@@ -111,6 +117,9 @@ if [ -n "${VERSION}" ]; then
 else
     VERSION="$("${ROOT_DIR}/scripts/version.sh" show)"
     "${ROOT_DIR}/scripts/version.sh" check
+fi
+if [ "${DO_HUB}" -eq 1 ]; then
+    git -C "${ROOT_DIR}" rev-parse HEAD > "${ROOT_DIR}/VERSION.source"
 fi
 
 if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
