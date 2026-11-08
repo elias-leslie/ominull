@@ -185,7 +185,7 @@ func TestARepeatPageJoinsItsIncident(t *testing.T) {
 }
 
 // A lab guest reaching a home host pages; its DNS and time lookups and the
-// sensor's own heartbeat to the hub do not.
+// sensor's own heartbeat and updates from the hub do not.
 func TestALabHostReachingHomePages(t *testing.T) {
 	engine, store := noiseEngine(t)
 	now := time.Now().UTC()
@@ -196,20 +196,51 @@ func TestALabHostReachingHomePages(t *testing.T) {
 	if err := store.SetEndpointPresence("guest", storage.PresenceParked); err != nil {
 		t.Fatal(err)
 	}
-	flow := func(dst string, port uint16, path string, at time.Time) {
+	run := func(dst string, port uint16, path, cmd, user string, at time.Time) {
 		engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "guest", Timestamp: at, Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: dst, DstPort: port, BytesOut: 300, ProcessPath: path})
+			DstIP: dst, DstPort: port, BytesOut: 300, ProcessPath: path, CommandLine: cmd, UserIdentity: user})
 	}
+	flow := func(dst string, port uint16, path string, at time.Time) { run(dst, port, path, "", "", at) }
 	flow("10.0.0.1", 53, "/usr/lib/systemd/systemd-resolved", now)
 	flow("10.0.0.1", 123, "/usr/lib/systemd/systemd-timesyncd", now)
 	flow("10.0.0.58", 9443, "/opt/ominull/bin/ominulld", now)
+	// The agent's updater (live 2026-11-08: dash running apply.sh paged).
+	fetch := "curl -fsSL --cacert /etc/ominull/ca.crt --proto =https -m 300 -o /var/lib/ominull/updates/agent.deb https://10.0.0.58:9443/download/x.deb"
+	run("10.0.0.58", 9443, "/usr/bin/dash", "sh /var/lib/ominull/updates/apply.sh", "root", now)
+	run("10.0.0.58", 9443, "/usr/bin/curl", fetch, "root", now)
 	if got := anomaliesOfType(t, store, "LAB_ESCAPE"); len(got) != 0 {
-		t.Fatalf("lookups and the sensor raised %d lab escapes", len(got))
+		t.Fatalf("lookups, the sensor and its updater raised %d lab escapes", len(got))
 	}
-	flow("10.0.0.77", 8080, "/usr/bin/python3", now.Add(time.Second))
+	// curl writing outside the update directory is not the updater.
+	run("10.0.0.77", 8080, "/usr/bin/curl", "curl -o /tmp/agent.deb https://10.0.0.77:8080/", "root", now.Add(time.Second))
 	got := anomaliesOfType(t, store, "LAB_ESCAPE")
 	if len(got) != 1 || storage.AlertClass(got[0]) != storage.ClassPage || got[0].HeldReason != "" {
-		t.Fatalf("a lab host reaching a home host should page once, got %+v", got)
+		t.Fatalf("curl writing outside the update directory should page once, got %+v", got)
+	}
+	ev := func(dst string, port uint16, cmd, user string) storage.Event {
+		return storage.Event{DstIP: dst, DstPort: port, CommandLine: cmd, UserIdentity: user}
+	}
+	for _, c := range []struct {
+		path string
+		ev   storage.Event
+	}{
+		{"/usr/bin/dash", ev("10.0.0.58", 9443, "sh /tmp/apply.sh", "root")},
+		{"/usr/bin/dash", ev("10.0.0.58", 9443, "sh /var/lib/ominull/updates/apply.sh extra", "root")},
+		{"/usr/bin/dash", ev("10.0.0.58", 9443, "sh /var/lib/ominull/updates/apply.sh", "lab")}, // LD_PRELOAD or BASH_ENV as a user
+		{"/tmp/dash", ev("10.0.0.58", 9443, "sh /var/lib/ominull/updates/apply.sh", "root")},
+		{"/tmp/curl", ev("10.0.0.58", 9443, fetch, "root")},
+		{"/usr/bin/curl", ev("10.0.0.58", 9443, fetch, "lab")}, // curl connects before it opens the root-only file
+		{"/usr/bin/curl", ev("10.0.0.5", 22, fetch, "root")},   // the URL names another host
+		{"/usr/bin/curl", ev("10.0.0.58", 22, fetch, "root")},  // or another port
+		{"/usr/bin/curl", ev("10.0.0.5", 8080, "curl -o /var/lib/ominull/updates/agent.deb -T /etc/x http://10.0.0.5:8080/", "root")},
+		{"/usr/bin/curl", ev("10.0.0.58", 9443, "curl -o /var/lib/ominull/updates/../../../tmp/x https://10.0.0.58:9443/", "root")},
+	} {
+		if isSensorUpdater(c.ev, c.path) {
+			t.Fatalf("%s %+v is not the updater", c.path, c.ev)
+		}
+	}
+	if !isSensorUpdater(ev("10.0.0.58", 443, "curl -o /var/lib/ominull/updates/agent.deb.sig https://10.0.0.58/x.sig", "root"), "/usr/bin/curl") {
+		t.Fatal("an https URL without a port is port 443")
 	}
 }
 

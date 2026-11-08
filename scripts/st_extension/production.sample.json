@@ -8,5 +8,15 @@
   "admin_key_file": "/private/approved/admin.key",
   "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
   "local_binary": "build/ominull-hub",
-  "local_authority_binary": "build/ominull-response-authority"
+  "local_authority_binary": "build/ominull-response-authority",
+  "drill": {
+    "vm": 900,
+    "endpoint": "linux-lab-guest",
+    "lab_decoy": "10.0.0.177",
+    "scan_target": "10.0.0.88",
+    "decoy_name": "decoy.example.invalid",
+    "upload_url": "https://echo.example.invalid/post",
+    "key_file": "/private/approved/admin.key",
+    "ca_file": "/etc/ominull/ca.crt"
+  }
 }

@@ -3,7 +3,9 @@ package detector
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,12 +53,13 @@ func labEscapeQuietPort(port uint16) bool {
 // checkLabEscape pages when a lab host reaches lab_escape_hosts or more
 // private hosts outside the lab (the home or infrastructure zones) within the
 // sweep window. Lab guests run untrusted code by design; what they must not
-// do is touch the rest of the network. The sensor's own heartbeat and the
-// guest's DNS, DHCP and time lookups do not count.
+// do is touch the rest of the network. The sensor's own heartbeat and updates
+// and the guest's DNS, DHCP and time lookups do not count.
 func (e *Engine) checkLabEscape(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
 	role, quietPath string, now time.Time) {
 	if role != storage.RoleLab || ev.Direction != "OUTBOUND" || servedFlow(ev, cfg) || !isPrivateIP(ev.DstIP) || netaddr.IsLoopback(ev.DstIP) ||
-		labEscapeQuietPort(ev.DstPort) || cfg.IsContainerAddress(ev.DstIP) || isSensorProcess(quietPath) {
+		labEscapeQuietPort(ev.DstPort) || cfg.IsContainerAddress(ev.DstIP) || isSensorProcess(quietPath) ||
+		isSensorUpdater(ev, quietPath) {
 		return
 	}
 	destination, err := netaddr.Parse(ev.DstIP)
@@ -147,6 +150,52 @@ func isSensorProcess(path string) bool {
 		return true
 	}
 	return false
+}
+
+// sensorUpdateDir is where the Linux agent stages an update (agent
+// OMINULL_UPDATE_DIR, root-only): its apply.sh fetches the package and its
+// signature from the hub with curl, into this directory.
+const sensorUpdateDir = "/var/lib/ominull/updates/"
+
+// isSensorUpdater reports whether a connection is the agent updating itself:
+// root running the staged apply.sh with the system shell, or one of its two
+// curl downloads into the update directory from an https URL at the very
+// address and port connected to. quietPath is empty when the agent found the
+// reported path is not the file running, so a renamed copy never counts. An
+// unprivileged lab program cannot borrow it: curl connects before it opens
+// its output file, so the user and the URL are what tell the updater apart.
+func isSensorUpdater(ev storage.Event, quietPath string) bool {
+	if quietPath == "" || ev.UserIdentity != "root" {
+		return false
+	}
+	path, base := executableOf(quietPath)
+	args := strings.Fields(ev.CommandLine)
+	if interpreterFamily(base) == "shell" {
+		return (strings.HasPrefix(path, "/usr/bin/") || strings.HasPrefix(path, "/bin/")) &&
+			len(args) == 2 && args[1] == sensorUpdateDir+"apply.sh"
+	}
+	if path != "/usr/bin/curl" && path != "/bin/curl" {
+		return false
+	}
+	out := ""
+	for i, a := range args {
+		if a == "-o" && i+1 < len(args) {
+			out = args[i+1]
+			break
+		}
+	}
+	if out != sensorUpdateDir+"agent.deb" && out != sensorUpdateDir+"agent.deb.sig" || len(args) < 2 {
+		return false
+	}
+	u, err := url.Parse(args[len(args)-1])
+	if err != nil || u.Scheme != "https" || u.User != nil {
+		return false
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	return u.Hostname() == ev.DstIP && port == strconv.Itoa(int(ev.DstPort))
 }
 
 func baseName(path string) string {
