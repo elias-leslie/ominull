@@ -124,6 +124,8 @@ for id in ${TARGETS}; do
     envs=(OMINULL_PARAM_MODE=audit)
     while IFS=$'\t' read -r k v; do
         [ -n "${k}" ] || continue
+        # This run is an audit whatever is saved; it is recorded as one below.
+        [ "${k}" != mode ] || continue
         if ! [[ "${k}" =~ ^[a-z0-9_]+$ && "${v}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
             echo "[-] ${id}: ignoring a parameter with unexpected characters." >&2; continue
         fi

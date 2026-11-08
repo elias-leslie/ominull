@@ -143,9 +143,10 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     bash "${ROOT_DIR}/scripts/test-release-batching.sh"
     bash "${ROOT_DIR}/scripts/test-install-agent-deb.sh"
     bash "${ROOT_DIR}/scripts/test-update-linux-agents.sh"
+    bash "${ROOT_DIR}/scripts/test-posture-collect.sh"
     bash "${ROOT_DIR}/scripts/test-native-sign.sh"
     # bash -n reads only its first file.
-    for script in build-packages.sh sign-release.sh lib/native-sign.sh sign-trust-bundle.sh update-linux-agents.sh lib/install-agent-deb.sh \
+    for script in build-packages.sh sign-release.sh lib/native-sign.sh sign-trust-bundle.sh update-linux-agents.sh posture-collect.sh lib/install-agent-deb.sh \
         deploy-hub.sh publish-agents.sh pve/install.sh lib/hub-admin-key.sh retire-macos-agent.sh retire-hub-host-agent.sh \
         test-package-lifecycle.sh; do
         bash -n "${ROOT_DIR}/scripts/${script}"
