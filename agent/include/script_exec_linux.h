@@ -45,6 +45,7 @@
 
 #include "response_dispatcher.h"
 #include "script_supervisor.h"
+#include "script_payload.h"
 
 /* Where job scripts and their parameters are written: root-owned, never /tmp.
  * Tests point it at a private directory of their own. */
@@ -61,10 +62,7 @@ static const char* g_script_exec_state_dir = OMINULL_SCRIPT_STATE_DIR;
 #define SCRIPT_EXEC_MAX_MAX_OUT       5242880 // 5 MiB
 #define SCRIPT_EXEC_MAX_PARAM_COUNT   64
 
-typedef struct {
-    char name[64];
-    char value[2048];
-} ScriptParamEntry;
+typedef ScriptParam ScriptParamEntry;
 
 typedef struct {
     char script_id[64];
@@ -97,114 +95,7 @@ static inline bool ScriptExec_IsAllowedInterpreter(const char* interpreter) {
 }
 
 /* ---------------------------------------------------------------------------
- * JSON String & Parameter Parser Helpers
- * ------------------------------------------------------------------------- */
-
-static inline bool ScriptExec_UnescapeJSONString(const char* src, size_t src_len, char* dst, size_t dst_cap, size_t* out_len) {
-    size_t d = 0;
-    for (size_t s = 0; s < src_len && d + 1 < dst_cap; s++) {
-        if (src[s] == '\\' && s + 1 < src_len) {
-            s++;
-            switch (src[s]) {
-                case '\"': dst[d++] = '\"'; break;
-                case '\\': dst[d++] = '\\'; break;
-                case '/':  dst[d++] = '/';  break;
-                case 'b':  dst[d++] = '\b'; break;
-                case 'f':  dst[d++] = '\f'; break;
-                case 'n':  dst[d++] = '\n'; break;
-                case 'r':  dst[d++] = '\r'; break;
-                case 't':  dst[d++] = '\t'; break;
-                case 'u': {
-                    if (s + 4 < src_len) {
-                        char hex_buf[5] = { src[s+1], src[s+2], src[s+3], src[s+4], '\0' };
-                        unsigned int codepoint = 0;
-                        if (sscanf(hex_buf, "%x", &codepoint) == 1) {
-                            s += 4;
-                            if (codepoint < 0x80) {
-                                dst[d++] = (char)codepoint;
-                            } else if (codepoint < 0x800 && d + 2 < dst_cap) {
-                                dst[d++] = (char)(0xC0 | (codepoint >> 6));
-                                dst[d++] = (char)(0x80 | (codepoint & 0x3F));
-                            } else if (d + 3 < dst_cap) {
-                                dst[d++] = (char)(0xE0 | (codepoint >> 12));
-                                dst[d++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-                                dst[d++] = (char)(0x80 | (codepoint & 0x3F));
-                            }
-                        } else {
-                            dst[d++] = src[s];
-                        }
-                    } else {
-                        dst[d++] = src[s];
-                    }
-                    break;
-                }
-                default:
-                    dst[d++] = src[s];
-                    break;
-            }
-        } else {
-            dst[d++] = src[s];
-        }
-    }
-    dst[d] = '\0';
-    if (out_len) *out_len = d;
-    return true;
-}
-
-static inline void ScriptExec_ParseParametersObject(const char* json_obj, ScriptParamEntry* entries, size_t max_entries, size_t* out_count) {
-    if (!json_obj || !entries || !out_count) return;
-    *out_count = 0;
-
-    const char* p = strchr(json_obj, '{');
-    if (!p) return;
-    p++;
-
-    while (*p && *p != '}' && *out_count < max_entries) {
-        while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
-        if (*p != '\"') break;
-        p++;
-
-        // Read parameter key
-        const char* key_start = p;
-        while (*p && *p != '\"') p++;
-        if (*p != '\"') break;
-        size_t key_len = p - key_start;
-        p++; // skip closing quote
-
-        while (*p && (isspace((unsigned char)*p) || *p == ':')) p++;
-
-        // Read parameter value
-        char val_buf[2048] = {0};
-        size_t val_len = 0;
-        if (*p == '\"') {
-            p++;
-            const char* val_start = p;
-            while (*p && !(*p == '\"' && *(p - 1) != '\\')) p++;
-            size_t raw_len = p - val_start;
-            if (*p == '\"') p++;
-            ScriptExec_UnescapeJSONString(val_start, raw_len, val_buf, sizeof(val_buf), &val_len);
-        } else {
-            // number or boolean
-            const char* val_start = p;
-            while (*p && *p != ',' && *p != '}' && !isspace((unsigned char)*p)) p++;
-            val_len = p - val_start;
-            if (val_len >= sizeof(val_buf)) val_len = sizeof(val_buf) - 1;
-            strncpy(val_buf, val_start, val_len);
-            val_buf[val_len] = '\0';
-        }
-
-        if (key_len > 0 && key_len < sizeof(entries[*out_count].name)) {
-            snprintf(entries[*out_count].name, sizeof(entries[*out_count].name), "%.*s", (int)key_len, key_start);
-            snprintf(entries[*out_count].value, sizeof(entries[*out_count].value), "%s", val_buf);
-            (*out_count)++;
-        }
-
-        while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
-    }
-}
-
-/* ---------------------------------------------------------------------------
- * Payload Parser
+ * Payload Parser (script_payload.h, shared with Windows)
  * ------------------------------------------------------------------------- */
 
 static inline bool ScriptExec_ParsePayload(const char* json, ScriptExecParams* out) {
@@ -213,142 +104,14 @@ static inline bool ScriptExec_ParsePayload(const char* json, ScriptExecParams* o
     out->timeout_seconds = SCRIPT_EXEC_DEFAULT_TIMEOUT;
     out->max_output_bytes = SCRIPT_EXEC_DEFAULT_MAX_OUT;
     strncpy(out->interpreter, "/bin/sh", sizeof(out->interpreter) - 1);
-
-    // 1. script_id
-    const char* p = strstr(json, "\"script_id\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            p = strchr(p, '\"');
-            if (p) {
-                p++;
-                const char* end = strchr(p, '\"');
-                if (end && (size_t)(end - p) < sizeof(out->script_id)) {
-                    strncpy(out->script_id, p, end - p);
-                    out->script_id[end - p] = '\0';
-                }
-            }
-        }
-    }
-
-    // 2. script_version
-    p = strstr(json, "\"script_version\"");
-    if (!p) p = strstr(json, "\"version\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            out->script_version = atoi(p + 1);
-        }
-    }
-
-    // 3. script_digest
-    p = strstr(json, "\"script_digest\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            p = strchr(p, '\"');
-            if (p) {
-                p++;
-                const char* end = strchr(p, '\"');
-                if (end && (size_t)(end - p) < sizeof(out->script_digest)) {
-                    strncpy(out->script_digest, p, end - p);
-                    out->script_digest[end - p] = '\0';
-                }
-            }
-        }
-    }
-
-    // 4. interpreter
-    p = strstr(json, "\"interpreter\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            p = strchr(p, '\"');
-            if (p) {
-                p++;
-                const char* end = strchr(p, '\"');
-                if (end && (size_t)(end - p) < sizeof(out->interpreter)) {
-                    strncpy(out->interpreter, p, end - p);
-                    out->interpreter[end - p] = '\0';
-                }
-            }
-        }
-    }
-
-    // 5. source (escaped string)
-    p = strstr(json, "\"source\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            p = strchr(p, '\"');
-            if (p) {
-                p++;
-                const char* s = p;
-                while (*s) {
-                    if (*s == '\"' && *(s - 1) != '\\') break;
-                    s++;
-                }
-                if (*s == '\"') {
-                    size_t raw_len = s - p;
-                    ScriptExec_UnescapeJSONString(p, raw_len, out->source, sizeof(out->source), &out->source_len);
-                }
-            }
-        }
-    }
-
-    // 6. parameters
-    p = strstr(json, "\"parameters\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            p++;
-            while (*p && isspace((unsigned char)*p)) p++;
-            if (*p == '{') {
-                const char* obj_start = p;
-                int depth = 0;
-                while (*p) {
-                    if (*p == '{') depth++;
-                    else if (*p == '}') {
-                        depth--;
-                        if (depth == 0) {
-                            p++;
-                            break;
-                        }
-                    }
-                    p++;
-                }
-                size_t obj_len = p - obj_start;
-                if (obj_len < sizeof(out->parameters_json)) {
-                    strncpy(out->parameters_json, obj_start, obj_len);
-                    out->parameters_json[obj_len] = '\0';
-                    out->parameters_len = obj_len;
-                    ScriptExec_ParseParametersObject(out->parameters_json, out->params, SCRIPT_EXEC_MAX_PARAM_COUNT, &out->param_count);
-                }
-            }
-        }
-    }
-
-    // 7. timeout_seconds
-    p = strstr(json, "\"timeout_seconds\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            int t = atoi(p + 1);
-            if (t > 0 && t <= SCRIPT_EXEC_MAX_TIMEOUT) out->timeout_seconds = t;
-        }
-    }
-
-    // 8. max_output_bytes
-    p = strstr(json, "\"max_output_bytes\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            long long mb = atoll(p + 1);
-            if (mb > 0 && (size_t)mb <= SCRIPT_EXEC_MAX_MAX_OUT) out->max_output_bytes = (size_t)mb;
-        }
-    }
-
-    return (out->source_len > 0);
+    ScriptPayloadFields f = {
+        out->script_id, sizeof(out->script_id), &out->script_version, out->script_digest, sizeof(out->script_digest),
+        out->interpreter, sizeof(out->interpreter), out->source, sizeof(out->source), &out->source_len,
+        out->parameters_json, sizeof(out->parameters_json), &out->parameters_len,
+        out->params, SCRIPT_EXEC_MAX_PARAM_COUNT, &out->param_count,
+        &out->timeout_seconds, SCRIPT_EXEC_MAX_TIMEOUT, &out->max_output_bytes, 0, SCRIPT_EXEC_MAX_MAX_OUT,
+    };
+    return ScriptPayload_Parse(json, &f);
 }
 
 /* ---------------------------------------------------------------------------
@@ -671,7 +434,7 @@ static inline int ScriptExec_RunSupervised(
         setenv("OMINULL_SCRIPT_VERSION", ver_buf, 1);
         setenv("OMINULL_PARAMS_FILE", params_path, 1);
 
-        // Export individual parameters as OMINULL_PARAM_<NAME>, OMINULL_PARAM_<UPPER_NAME>, and <NAME>
+        // Export individual parameters as OMINULL_PARAM_<NAME>, OMINULL_PARAM_<UPPER_NAME>, and <NAME> (bare only for a lower-case identifier: ScriptParam_BareExport)
         for (size_t i = 0; i < params->param_count; i++) {
             char env_name[128];
             snprintf(env_name, sizeof(env_name), "OMINULL_PARAM_%s", params->params[i].name);
@@ -685,7 +448,7 @@ static inline int ScriptExec_RunSupervised(
             char upper_env[128];
             snprintf(upper_env, sizeof(upper_env), "OMINULL_PARAM_%s", upper_name);
             setenv(upper_env, params->params[i].value, 1);
-            setenv(params->params[i].name, params->params[i].value, 1);
+            if (ScriptParam_BareExport(params->params[i].name)) setenv(params->params[i].name, params->params[i].value, 1);
         }
 
         // Safe working directory

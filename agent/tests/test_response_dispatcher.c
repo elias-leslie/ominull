@@ -150,6 +150,102 @@ static void test_offer_parser_real_package(void) {
     free(once); free(payload); free(twice); free(reply);
 }
 
+/* 2c. The offer reader is a strict JSON reader: it decodes every escape the
+ * hub's encoder writes, skips unknown values whole (quotes and braces inside
+ * strings included), reads only the top-level response_offers, and refuses a
+ * repeated member instead of picking one. */
+#define T_GRANT "{\"version\":2,\"grant_id\":\"g\",\"tenant_id\":\"default\",\"endpoint_id\":\"ep\",\"action_kind\":\"script_exec\"," \
+    "\"action_digest\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"operator_id\":\"admin\"," \
+    "\"response_session_id\":\"s\",\"issued_at\":1788350400,\"expires_at\":1788354000,\"nonce\":\"n\",\"signer_key_id\":\"k\"," \
+    "\"signature\":\"0123456789abcdef\"}"
+static void test_offer_parser_strict(void) {
+    printf("[*] Testing strict offer reader...\n");
+    static ResponseJobOffer offers[MAX_RESPONSE_OFFERS];
+    int n;
+
+    /* Go's encoder writes <, > and & as <, >, &; the old reader dropped the backslash. */
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"script_exec\",\"grant\":" T_GRANT
+                            ",\"payload_json\":\"{\\\"source\\\":\\\"a \\u003c b \\u0026\\u0026 c\\\\nd\\\"}\"}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("escaped payload decodes exactly", n == 1 && strcmp(offers[0].payload_json, "{\"source\":\"a < b && c\\nd\"}") == 0, true);
+    expect("payload_len is the decoded length", n == 1 && offers[0].payload_len == strlen(offers[0].payload_json), true);
+
+    /* An unknown member whose string holds a brace and a quote, and an unknown nested value, are skipped whole. */
+    n = ParseResponseOffers("{\"response_offers\":[{\"note\":\"} \\\" {\",\"extra\":{\"a\":[\"]}\"]},\"job_id\":\"j\",\"lease_id\":\"l\","
+                            "\"kind\":\"k\",\"grant\":" T_GRANT ",\"payload_json\":\"{}\"}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("unknown values with braces in strings are skipped", n == 1 && strcmp(offers[0].kind, "k") == 0, true);
+
+    /* A response_offers that sits inside another value is not the reply's. */
+    n = ParseResponseOffers("{\"status\":\"\\\"response_offers\\\":[{\\\"job_id\\\":\\\"x\\\"}]\",\"inner\":{\"response_offers\":[{\"job_id\":\"j\","
+                            "\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT ",\"payload_json\":\"{}\"}]}}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("nested or in-string response_offers ignored", n == 0, true);
+    n = ParseResponseOffers("{\"response_offers\":[],\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT
+                            ",\"payload_json\":\"{}\"}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("repeated response_offers refused", n == 0, true);
+
+    /* Repeated members: one offer, one meaning. */
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT
+                            ",\"payload_json\":\"{\\\"a\\\":1}\",\"payload_json\":\"{\\\"a\\\":2}\"}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("repeated payload_json refused", n == 0, true);
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"kind\":\"a\",\"lease_id\":\"l\",\"kind\":\"b\",\"grant\":" T_GRANT "}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("repeated kind refused", n == 0, true);
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":"
+                            "{\"version\":2,\"grant_id\":\"g\",\"endpoint_id\":\"ep\",\"action_kind\":\"a\",\"action_digest\":\"d\","
+                            "\"signature\":\"s1\",\"signature\":\"s2\"}}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("repeated grant member refused", n == 0, true);
+
+    /* A bad offer is dropped, its neighbours still read. */
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"bad\\u0000\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT "},"
+                            "{\"job_id\":\"j2\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT "}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("bad offer dropped, next one kept", n == 1 && strcmp(offers[0].job_id, "j2") == 0, true);
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":{\"version\":\"2\"}}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("grant version as a string refused", n == 0, true);
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT ",\"payload_json\":\"a\nb\"}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("raw control byte in a string refused", n == 0, true);
+    char big[600];
+    memset(big, 'x', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    char reply[2048];
+    snprintf(reply, sizeof(reply), "{\"response_offers\":[{\"job_id\":\"%s\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT "}]}", big);
+    expect("oversize job_id refused, never truncated", ParseResponseOffers(reply, offers, MAX_RESPONSE_OFFERS) == 0, true);
+
+    /* The grant reader moves the cursor past the whole object, unknown members included. */
+    const char* g = "{\"future\":{\"x\":\"}\"},\"version\":2,\"grant_id\":\"g\",\"endpoint_id\":\"ep\",\"action_kind\":\"a\",\"action_digest\":\"d\",\"signature\":\"s\"} tail";
+    const char* q = g;
+    ResponseGrant gr;
+    expect("grant with unknown nested member reads", ExtractGrantObject(&q, &gr), true);
+    expect("cursor ends after the grant object", strcmp(q, " tail") == 0, true);
+}
+
+/* 2d. Forensic collection payloads: strict, one meaning, a safe bundle id. */
+static void test_forensics_payload(void) {
+    printf("[*] Testing forensic payload reader...\n");
+    char bundle[64], profile[32];
+    int64_t mb;
+    int to;
+#define FP(json) (bundle[0] = 0, strcpy(profile, "diagnostic"), mb = 7, to = 60, \
+                  Response_ForensicsPayload(json, bundle, sizeof(bundle), profile, sizeof(profile), &mb, &to))
+    expect("hub payload reads", FP("{\"profile\":\"ir_standard\",\"options\":{\"a\":\"}\"},\"max_bytes\":1024,\"timeout_seconds\":30}") &&
+                                    strcmp(profile, "ir_standard") == 0 && mb == 1024 && to == 30, true);
+    expect("profile inside another value is not the profile", FP("{\"options\":{\"profile\":\"ir_standard\"}}") && strcmp(profile, "diagnostic") == 0, true);
+    expect("repeated profile refused", FP("{\"profile\":\"diagnostic\",\"profile\":\"ir_standard\"}"), false);
+    expect("bundle id with a path or query refused", FP("{\"bundle_id\":\"../x&name=y\"}"), false);
+    expect("plain bundle id kept", FP("{\"bundle_id\":\"b-1.2_x\"}") && strcmp(bundle, "b-1.2_x") == 0, true);
+    expect("max_bytes as text refused", FP("{\"max_bytes\":\"9\"}"), false);
+    expect("negative max_bytes keeps the default", FP("{\"max_bytes\":-5}") && mb == 7, true);
+    expect("trailing bytes refused", FP("{\"profile\":\"diagnostic\"} x"), false);
+#undef FP
+}
+
 /* 3. Test Durable Replay Cache */
 static void test_replay_cache(void) {
     char tmp_cache[64] = "/tmp/ominull_test_replay_XXXXXX";
@@ -518,6 +614,8 @@ int main(void) {
     test_sha256();
     test_offer_parser();
     test_offer_parser_real_package();
+    test_offer_parser_strict();
+    test_forensics_payload();
     test_replay_cache();
     test_grant_verification();
     test_screen_canonical_vectors();

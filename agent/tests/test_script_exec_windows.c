@@ -67,15 +67,15 @@ static void test_json_unescaping(void) {
     size_t out_len = 0;
 
     const char* raw1 = "hello\\nworld";
-    expect("unescape newline", ScriptExec_UnescapeJSONStringWin(raw1, strlen(raw1), dst, sizeof(dst), &out_len));
+    expect("unescape newline", TermJson_DecodeString(raw1, strlen(raw1), dst, sizeof(dst), &out_len));
     expect("newline converted", strcmp(dst, "hello\nworld") == 0);
 
     const char* raw2 = "quote:\\\" backslash:\\\\ tab:\\t";
-    expect("unescape quote/backslash/tab", ScriptExec_UnescapeJSONStringWin(raw2, strlen(raw2), dst, sizeof(dst), &out_len));
+    expect("unescape quote/backslash/tab", TermJson_DecodeString(raw2, strlen(raw2), dst, sizeof(dst), &out_len));
     expect("special chars converted", strcmp(dst, "quote:\" backslash:\\ tab:\t") == 0);
 
     const char* raw3 = "code:\\u0041\\u0042";
-    expect("unescape unicode", ScriptExec_UnescapeJSONStringWin(raw3, strlen(raw3), dst, sizeof(dst), &out_len));
+    expect("unescape unicode", TermJson_DecodeString(raw3, strlen(raw3), dst, sizeof(dst), &out_len));
     expect("unicode converted", strcmp(dst, "code:AB") == 0);
 }
 
@@ -86,7 +86,7 @@ static void test_parameter_parsing(void) {
     ScriptParamEntryWin entries[8];
     size_t count = 0;
 
-    ScriptExec_ParseParametersObjectWin(json, entries, 8, &count);
+    ScriptPayload_Params(json, strlen(json), entries, 8, &count);
     expect("parsed 3 parameters", count == 3);
     expect("param 0 name is target", strcmp(entries[0].name, "target") == 0);
     expect("param 0 value is 10.0.0.1", strcmp(entries[0].value, "10.0.0.1") == 0);
@@ -214,7 +214,7 @@ static void test_parameter_delivery(void) {
     const char* pjson = "{\"TARGET\":\"192.0.2.1\",\"port\":\"9090\"}";
     snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson);
     params.parameters_len = strlen(pjson);
-    ScriptExec_ParseParametersObjectWin(pjson, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    ScriptPayload_Params(pjson, strlen(pjson), params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
 
     char output[4096] = {0};
     bool truncated = false;
@@ -519,7 +519,7 @@ static void test_parameter_once_per_name(void) {
     const char* pjson = "{\"mode\":\"audit\"}";
     snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson);
     params.parameters_len = strlen(pjson);
-    ScriptExec_ParseParametersObjectWin(pjson, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    ScriptPayload_Params(pjson, strlen(pjson), params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
     char output[4096] = {0};
     bool truncated = false, timed_out = false;
     int64_t duration_ms = 0;
@@ -553,7 +553,7 @@ static int run_console_env(const char* pjson, char* output, size_t cap) {
     params.max_output_bytes = 65536;
     snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson);
     params.parameters_len = strlen(pjson);
-    ScriptExec_ParseParametersObjectWin(pjson, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    ScriptPayload_Params(pjson, strlen(pjson), params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
     memset(output, 0, cap);
     bool truncated = false, timed_out = false;
     int64_t duration_ms = 0;
@@ -577,6 +577,26 @@ static void test_console_idle_env(void) {
     g_ConsoleIdleProbe = probe_fail;
 }
 
+/* Bare parameter names never shadow a variable the block already holds
+ * (Windows names ignore case), and the shared reader refuses bad names. */
+static ScriptExecParamsWin g_spw;
+static void test_bare_names(void) {
+    printf("[*] Testing bare parameter names...\n");
+    static const char block[] = "SystemRoot=C:\\Windows\0PATH=C:\\Windows\0TEMP=C:\\t\0";
+    size_t pos = sizeof(block) - 1;
+    expect("block has path (any case)", ScriptExec_EnvBlockHas(block, pos, "path") && ScriptExec_EnvBlockHas(block, pos, "Path"));
+    expect("block has systemroot", ScriptExec_EnvBlockHas(block, pos, "systemroot"));
+    expect("block lacks mode", !ScriptExec_EnvBlockHas(block, pos, "mode"));
+    expect("prefix is not a match", !ScriptExec_EnvBlockHas(block, pos, "PAT") && !ScriptExec_EnvBlockHas(block, pos, "TEMPX"));
+    expect("identifier rule", ScriptParam_Identifier("TARGET", false) && !ScriptParam_Identifier("a-b", false) &&
+                                  !ScriptParam_Identifier("1x", false));
+    expect("value ending in a backslash",
+           ScriptExec_ParsePayloadWin("{\"interpreter\":\"cmd.exe\",\"source\":\"x\",\"parameters\":{\"dir\":\"C:\\\\temp\\\\\",\"mode\":\"audit\"}}", &g_spw) &&
+               g_spw.param_count == 2 && strcmp(g_spw.params[0].value, "C:\\temp\\") == 0);
+    expect("bad parameter name refused",
+           !ScriptExec_ParsePayloadWin("{\"interpreter\":\"cmd.exe\",\"source\":\"x\",\"parameters\":{\"a=b\":\"c\"}}", &g_spw));
+}
+
 int main(void) {
     printf("=== Starting Windows Script Exec Worker C Tests (Slice 5C) ===\n");
     /* Never the real console probe here: it would start this test exe. */
@@ -584,6 +604,7 @@ int main(void) {
 
     test_interpreter_allowlist();
     test_json_unescaping();
+    test_bare_names();
     test_parameter_parsing();
     test_payload_parsing();
     test_cmd_simple_exec();

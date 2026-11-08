@@ -332,26 +332,46 @@ static inline void SkipWhitespace(const char** p) {
     }
 }
 
+/* ParseBoundedString reads one JSON string at *p (after whitespace), fully
+ * decoded (escapes, \u, surrogate pairs) into out, and moves *p past it. False
+ * on a raw control byte, a bad escape, \u0000, or a value that does not fit:
+ * never a truncated or half-decoded copy. */
 static inline bool ParseBoundedString(const char** p, char* out, size_t outCap) {
     SkipWhitespace(p);
     if (**p != '"') return false;
-    (*p)++;
-    size_t i = 0;
-    while (**p && **p != '"') {
-        if (**p == '\\' && *(*p + 1)) {
-            (*p)++;
+    const char* start = *p + 1;
+    const char* q = start;
+    while (*q && *q != '"') {
+        if ((unsigned char)*q < 0x20) return false;
+        if (*q == '\\') {
+            if (!q[1]) return false;
+            q++;
         }
-        if (i + 1 < outCap) {
-            out[i++] = **p;
-        } else {
-            return false;
-        }
-        (*p)++;
+        q++;
     }
-    if (**p != '"') return false;
-    (*p)++;
-    out[i] = '\0';
+    if (*q != '"') return false;
+    if (!TermJson_DecodeString(start, (size_t)(q - start), out, outCap, NULL)) return false;
+    *p = q + 1;
     return true;
+}
+
+/* How deep the heartbeat reply may nest (baseline rules, trust control,
+ * capability manifest); a bound on the reader's recursion, not a format rule. */
+#define RESPONSE_REPLY_MAX_DEPTH 32
+
+/* Response_JsonSpan: the extent of the JSON value at s (a NUL-terminated
+ * reply), read with the strict reader, so braces and quotes inside strings
+ * never move the end. */
+static inline bool Response_JsonSpan(const char* s, size_t* len) {
+    TermJson j = {.s = s, .n = strlen(s), .i = 0, .first = true, .max_depth = RESPONSE_REPLY_MAX_DEPTH};
+    if (!TermJson_SkipValue(&j, 0)) return false;
+    *len = j.i;
+    return true;
+}
+
+/* Response_DecodeMember decodes a string member value; vt must be 's'. */
+static inline bool Response_DecodeMember(char vt, const char* v, size_t vl, char* out, size_t cap) {
+    return vt == 's' && TermJson_DecodeString(v, vl, out, cap, NULL) && out[0] != '\0';
 }
 
 static inline bool ParseInt64Field(const char** p, int64_t* out) {
@@ -380,79 +400,69 @@ static inline bool ParseUint32Field(const char** p, uint32_t* out) {
     return true;
 }
 
+/* Response_Int64 reads a JSON integer span (digits, optional minus). */
+static inline bool Response_Int64(char vt, const char* v, size_t vl, int64_t* out) {
+    if (vt != 'n' || vl == 0 || vl >= 24) return false;
+    char buf[24];
+    memcpy(buf, v, vl);
+    buf[vl] = '\0';
+    const char* q = buf;
+    return ParseInt64Field(&q, out) && *q == '\0';
+}
+
+/* ExtractGrantObject reads the grant object at *p and moves *p past it. Top
+ * level members only, each known member at most once, strings fully decoded;
+ * unknown members (any JSON value) are skipped by the strict reader. */
 static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
     SkipWhitespace(p);
-    if (**p != '{') return false;
-    (*p)++;
     memset(grant, 0, sizeof(*grant));
-
-    int brace_depth = 1;
-    while (**p && brace_depth > 0) {
-        SkipWhitespace(p);
-        if (**p == '}') {
-            brace_depth--;
-            (*p)++;
+    size_t span = 0;
+    if (**p != '{' || !Response_JsonSpan(*p, &span)) return false;
+    TermJson j;
+    if (!TermJson_Begin(&j, *p, span)) return false;
+    enum { G_VERSION, G_GRANT_ID, G_TENANT, G_ENDPOINT, G_KIND, G_DIGEST, G_OPERATOR, G_SESSION, G_ISSUED, G_EXPIRES,
+           G_NONCE, G_JOB, G_SIGNER, G_SIGNATURE, G_N };
+    static const char* const names[G_N] = {"version", "grant_id", "tenant_id", "endpoint_id", "action_kind",
+                                           "action_digest", "operator_id", "response_session_id", "issued_at",
+                                           "expires_at", "nonce", "job_id", "signer_key_id", "signature"};
+    bool seen[G_N] = {false};
+    for (;;) {
+        const char *k = NULL, *v = NULL;
+        size_t kl = 0, vl = 0;
+        char vt = 0;
+        int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
+        if (r == 0) break;
+        if (r < 0) return false;
+        int m = -1;
+        for (int i = 0; i < G_N; i++)
+            if (TermJson_KeyIs(k, kl, names[i])) m = i;
+        if (m < 0) continue;   /* forward compatible */
+        if (seen[m]) return false;
+        seen[m] = true;
+        int64_t x = 0;
+        bool ok = true;
+        switch (m) {
+        case G_VERSION:
+            ok = Response_Int64(vt, v, vl, &x) && x >= 0 && x <= 0xFFFFFFFFLL;
+            grant->version = (uint32_t)x;
             break;
+        case G_GRANT_ID:  ok = Response_DecodeMember(vt, v, vl, grant->grant_id, sizeof(grant->grant_id)); break;
+        case G_TENANT:    ok = vt == 's' && TermJson_DecodeString(v, vl, grant->tenant_id, sizeof(grant->tenant_id), NULL); break;
+        case G_ENDPOINT:  ok = Response_DecodeMember(vt, v, vl, grant->endpoint_id, sizeof(grant->endpoint_id)); break;
+        case G_KIND:      ok = Response_DecodeMember(vt, v, vl, grant->action_kind, sizeof(grant->action_kind)); break;
+        case G_DIGEST:    ok = Response_DecodeMember(vt, v, vl, grant->action_digest, sizeof(grant->action_digest)); break;
+        case G_OPERATOR:  ok = vt == 's' && TermJson_DecodeString(v, vl, grant->operator_id, sizeof(grant->operator_id), NULL); break;
+        case G_SESSION:   ok = vt == 's' && TermJson_DecodeString(v, vl, grant->response_session_id, sizeof(grant->response_session_id), NULL); break;
+        case G_ISSUED:    ok = Response_Int64(vt, v, vl, &grant->issued_at); break;
+        case G_EXPIRES:   ok = Response_Int64(vt, v, vl, &grant->expires_at); break;
+        case G_NONCE:     ok = vt == 's' && TermJson_DecodeString(v, vl, grant->nonce, sizeof(grant->nonce), NULL); break;
+        case G_JOB:       ok = vt == 's' && TermJson_DecodeString(v, vl, grant->job_id, sizeof(grant->job_id), NULL); break;
+        case G_SIGNER:    ok = vt == 's' && TermJson_DecodeString(v, vl, grant->signer_key_id, sizeof(grant->signer_key_id), NULL); break;
+        case G_SIGNATURE: ok = Response_DecodeMember(vt, v, vl, grant->signature, sizeof(grant->signature)); break;
         }
-        if (**p == ',') {
-            (*p)++;
-            continue;
-        }
-        char key[64] = {0};
-        if (!ParseBoundedString(p, key, sizeof(key))) return false;
-        SkipWhitespace(p);
-        if (**p != ':') return false;
-        (*p)++;
-        SkipWhitespace(p);
-
-        if (strcmp(key, "version") == 0) {
-            if (!ParseUint32Field(p, &grant->version)) return false;
-        } else if (strcmp(key, "grant_id") == 0) {
-            if (!ParseBoundedString(p, grant->grant_id, sizeof(grant->grant_id))) return false;
-        } else if (strcmp(key, "tenant_id") == 0) {
-            if (!ParseBoundedString(p, grant->tenant_id, sizeof(grant->tenant_id))) return false;
-        } else if (strcmp(key, "endpoint_id") == 0) {
-            if (!ParseBoundedString(p, grant->endpoint_id, sizeof(grant->endpoint_id))) return false;
-        } else if (strcmp(key, "action_kind") == 0) {
-            if (!ParseBoundedString(p, grant->action_kind, sizeof(grant->action_kind))) return false;
-        } else if (strcmp(key, "action_digest") == 0) {
-            if (!ParseBoundedString(p, grant->action_digest, sizeof(grant->action_digest))) return false;
-        } else if (strcmp(key, "operator_id") == 0) {
-            if (!ParseBoundedString(p, grant->operator_id, sizeof(grant->operator_id))) return false;
-        } else if (strcmp(key, "response_session_id") == 0) {
-            if (!ParseBoundedString(p, grant->response_session_id, sizeof(grant->response_session_id))) return false;
-        } else if (strcmp(key, "issued_at") == 0) {
-            if (!ParseInt64Field(p, &grant->issued_at)) return false;
-        } else if (strcmp(key, "expires_at") == 0) {
-            if (!ParseInt64Field(p, &grant->expires_at)) return false;
-        } else if (strcmp(key, "nonce") == 0) {
-            if (!ParseBoundedString(p, grant->nonce, sizeof(grant->nonce))) return false;
-        } else if (strcmp(key, "job_id") == 0) {
-            if (!ParseBoundedString(p, grant->job_id, sizeof(grant->job_id))) return false;
-        } else if (strcmp(key, "signer_key_id") == 0) {
-            if (!ParseBoundedString(p, grant->signer_key_id, sizeof(grant->signer_key_id))) return false;
-        } else if (strcmp(key, "signature") == 0) {
-            if (!ParseBoundedString(p, grant->signature, sizeof(grant->signature))) return false;
-        } else {
-            // Forward-compatible: skip unknown scalar or nested value
-            if (**p == '"') {
-                char dummy[256];
-                ParseBoundedString(p, dummy, sizeof(dummy));
-            } else if (**p == '{' || **p == '[') {
-                int depth = 1;
-                char open = **p;
-                char close = (open == '{') ? '}' : ']';
-                (*p)++;
-                while (**p && depth > 0) {
-                    if (**p == open) depth++;
-                    else if (**p == close) depth--;
-                    (*p)++;
-                }
-            } else {
-                while (**p && **p != ',' && **p != '}') (*p)++;
-            }
-        }
+        if (!ok) return false;
     }
+    *p += span;
 
     /* V2, or V3 which binds the hub job id (an empty one is no V3 grant). */
     if ((grant->version != 2 && grant->version != 3) || (grant->version == 3 && grant->job_id[0] == '\0') ||
@@ -464,92 +474,130 @@ static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
     return true;
 }
 
-static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOffers, size_t maxOffers) {
-    if (!json || !outOffers || maxOffers == 0) return 0;
-
-    const char* p = json;
-    const char* offers_needle = "\"response_offers\"";
-    const char* found = strstr(p, offers_needle);
-    if (!found) return 0;
-
-    p = found + strlen(offers_needle);
-    SkipWhitespace(&p);
-    if (*p != ':') return 0;
-    p++;
-    SkipWhitespace(&p);
-    if (*p != '[') return 0;
-    p++;
-
-    int count = 0;
-    while (*p && *p != ']' && (size_t)count < maxOffers) {
-        SkipWhitespace(&p);
-        if (*p == ']') break;
-        if (*p == ',') {
-            p++;
-            continue;
+/* Response_ForensicsPayload reads a forensic_collection payload
+ * {"profile","max_bytes","timeout_seconds"[,"bundle_id"][,"options"]} with the
+ * strict reader: top-level members once each, strings decoded, numbers plain
+ * integers. bundle_id goes into evidence URLs and the manifest, so it is
+ * [A-Za-z0-9._-] only. Values out of range keep the caller's defaults. */
+static inline bool Response_ForensicsPayload(const char* json, char* bundle_id, size_t bundle_cap, char* profile,
+                                             size_t profile_cap, int64_t* max_bytes, int* timeout_seconds) {
+    if (!json) return false;
+    TermJson j;
+    if (!TermJson_Begin(&j, json, strlen(json))) return false;
+    bool seen_bundle = false, seen_profile = false, seen_max = false, seen_timeout = false;
+    for (;;) {
+        const char *k = NULL, *v = NULL;
+        size_t kl = 0, vl = 0;
+        char vt = 0;
+        int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
+        if (r == 0) break;
+        if (r < 0) return false;
+        int64_t x = 0;
+        if (TermJson_KeyIs(k, kl, "bundle_id")) {
+            if (seen_bundle || !Response_DecodeMember(vt, v, vl, bundle_id, bundle_cap)) return false;
+            seen_bundle = true;
+            for (const char* c = bundle_id; *c; c++)
+                if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '.' || *c == '_' || *c == '-'))
+                    return false;
+        } else if (TermJson_KeyIs(k, kl, "profile")) {
+            if (seen_profile || !Response_DecodeMember(vt, v, vl, profile, profile_cap)) return false;
+            seen_profile = true;
+        } else if (TermJson_KeyIs(k, kl, "max_bytes")) {
+            if (seen_max || !Response_Int64(vt, v, vl, &x)) return false;
+            seen_max = true;
+            if (x > 0) *max_bytes = x;
+        } else if (TermJson_KeyIs(k, kl, "timeout_seconds")) {
+            if (seen_timeout || !Response_Int64(vt, v, vl, &x)) return false;
+            seen_timeout = true;
+            if (x > 0 && x <= 86400) *timeout_seconds = (int)x;
         }
-        if (*p != '{') return count;
-        p++;
+    }
+    return true;
+}
 
-        ResponseJobOffer offer;
-        memset(&offer, 0, sizeof(offer));
-        bool has_job_id = false, has_lease_id = false, has_kind = false, has_grant = false;
-
-        while (*p && *p != '}') {
-            SkipWhitespace(&p);
-            if (*p == '}') break;
-            if (*p == ',') { p++; continue; }
-
-            char key[64] = {0};
-            if (!ParseBoundedString(&p, key, sizeof(key))) break;
-            SkipWhitespace(&p);
-            if (*p != ':') break;
-            p++;
-            SkipWhitespace(&p);
-
-            if (strcmp(key, "job_id") == 0) {
-                if (ParseBoundedString(&p, offer.job_id, sizeof(offer.job_id))) has_job_id = true;
-            } else if (strcmp(key, "lease_id") == 0) {
-                if (ParseBoundedString(&p, offer.lease_id, sizeof(offer.lease_id))) has_lease_id = true;
-            } else if (strcmp(key, "kind") == 0) {
-                if (ParseBoundedString(&p, offer.kind, sizeof(offer.kind))) has_kind = true;
-            } else if (strcmp(key, "grant") == 0) {
-                if (ExtractGrantObject(&p, &offer.grant)) has_grant = true;
-            } else if (strcmp(key, "payload_json") == 0) {
-                if (*p == '"') {
-                    if (ParseBoundedString(&p, offer.payload_json, sizeof(offer.payload_json))) {
-                        offer.payload_len = strlen(offer.payload_json);
-                    }
-                } else if (*p == '{') {
-                    const char* start = p;
-                    int depth = 1;
-                    p++;
-                    while (*p && depth > 0) {
-                        if (*p == '{') depth++;
-                        else if (*p == '}') depth--;
-                        p++;
-                    }
-                    size_t raw_len = (size_t)(p - start);
-                    if (raw_len < sizeof(offer.payload_json)) {
-                        memcpy(offer.payload_json, start, raw_len);
-                        offer.payload_json[raw_len] = '\0';
-                        offer.payload_len = raw_len;
-                    }
-                }
+/* Response_ReadOffer reads one offer object (len bytes at s) into offer.
+ * False when a member is malformed or repeated, or a required one is missing. */
+static inline bool Response_ReadOffer(const char* s, size_t len, ResponseJobOffer* offer) {
+    memset(offer, 0, sizeof(*offer));
+    TermJson j;
+    if (!TermJson_Begin(&j, s, len)) return false;
+    bool has_job_id = false, has_lease_id = false, has_kind = false, has_grant = false, has_payload = false;
+    for (;;) {
+        const char *k = NULL, *v = NULL;
+        size_t kl = 0, vl = 0;
+        char vt = 0;
+        int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
+        if (r == 0) break;
+        if (r < 0) return false;
+        if (TermJson_KeyIs(k, kl, "job_id")) {
+            if (has_job_id || !Response_DecodeMember(vt, v, vl, offer->job_id, sizeof(offer->job_id))) return false;
+            has_job_id = true;
+        } else if (TermJson_KeyIs(k, kl, "lease_id")) {
+            if (has_lease_id || !Response_DecodeMember(vt, v, vl, offer->lease_id, sizeof(offer->lease_id))) return false;
+            has_lease_id = true;
+        } else if (TermJson_KeyIs(k, kl, "kind")) {
+            if (has_kind || !Response_DecodeMember(vt, v, vl, offer->kind, sizeof(offer->kind))) return false;
+            has_kind = true;
+        } else if (TermJson_KeyIs(k, kl, "grant")) {
+            const char* g = v;
+            if (has_grant || vt != 'x' || !ExtractGrantObject(&g, &offer->grant) || g != v + vl) return false;
+            has_grant = true;
+        } else if (TermJson_KeyIs(k, kl, "payload_json")) {
+            if (has_payload) return false;
+            has_payload = true;
+            if (vt == 's') {   /* the hub's form: the payload as a JSON string */
+                if (!TermJson_DecodeString(v, vl, offer->payload_json, sizeof(offer->payload_json), &offer->payload_len))
+                    return false;
+            } else if (vt == 'x' && v[0] == '{') {   /* an object, kept as written */
+                if (vl >= sizeof(offer->payload_json)) return false;
+                memcpy(offer->payload_json, v, vl);
+                offer->payload_json[vl] = '\0';
+                offer->payload_len = vl;
             } else {
-                if (*p == '"') {
-                    char dummy[256];
-                    ParseBoundedString(&p, dummy, sizeof(dummy));
-                } else {
-                    while (*p && *p != ',' && *p != '}') p++;
-                }
+                return false;
             }
         }
-        if (*p == '}') p++;
+    }
+    return has_job_id && has_lease_id && has_kind && has_grant;
+}
 
-        if (has_job_id && has_lease_id && has_kind && has_grant) {
-            outOffers[count++] = offer;
-        }
+/* ParseResponseOffers reads the heartbeat reply's top-level response_offers
+ * array (never a "response_offers" that sits inside another value). A malformed
+ * offer is dropped and the rest still read; a malformed reply yields none. */
+static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOffers, size_t maxOffers) {
+    if (!json || !outOffers || maxOffers == 0) return 0;
+    TermJson top;
+    if (!TermJson_Begin(&top, json, strlen(json))) return 0;
+    top.max_depth = RESPONSE_REPLY_MAX_DEPTH;
+    const char* arr = NULL;
+    size_t arr_len = 0;
+    for (;;) {
+        const char *k = NULL, *v = NULL;
+        size_t kl = 0, vl = 0;
+        char vt = 0;
+        int r = TermJson_Next(&top, &k, &kl, &vt, &v, &vl);
+        if (r == 0) break;
+        if (r < 0) return 0;
+        if (!TermJson_KeyIs(k, kl, "response_offers")) continue;
+        if (arr || vt != 'x' || v[0] != '[') return 0;
+        arr = v;
+        arr_len = vl;
+    }
+    if (!arr) return 0;
+
+    TermJson a = {.s = arr, .n = arr_len, .i = 1, .first = true, .max_depth = RESPONSE_REPLY_MAX_DEPTH};
+    int count = 0;
+    TermJson_SkipWs(&a);
+    if (a.i < a.n && a.s[a.i] == ']') return 0;
+    while (a.i < a.n && (size_t)count < maxOffers) {
+        TermJson_SkipWs(&a);
+        size_t start = a.i;
+        if (!TermJson_SkipValue(&a, 1)) break;
+        ResponseJobOffer* offer = &outOffers[count];
+        if (arr[start] == '{' && Response_ReadOffer(arr + start, a.i - start, offer)) count++;
+        TermJson_SkipWs(&a);
+        if (a.i >= a.n || a.s[a.i] != ',') break;
+        a.i++;
     }
     return count;
 }

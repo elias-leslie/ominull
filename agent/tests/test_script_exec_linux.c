@@ -60,7 +60,7 @@ static void test_json_unescaping(void) {
     const char* raw = "echo \\\"hello world\\\"\\nexit 0\\n";
     char unescaped[256];
     size_t len = 0;
-    ScriptExec_UnescapeJSONString(raw, strlen(raw), unescaped, sizeof(unescaped), &len);
+    TermJson_DecodeString(raw, strlen(raw), unescaped, sizeof(unescaped), &len);
     expect("unescaped content matches", strcmp(unescaped, "echo \"hello world\"\nexit 0\n") == 0);
     expect("unescaped len matches", len == strlen("echo \"hello world\"\nexit 0\n"));
 }
@@ -71,7 +71,7 @@ static void test_param_parsing(void) {
     const char* params_json = "{\"mode\":\"fast\",\"count\":42,\"flag\":true,\"target\":\"10.0.0.1\"}";
     ScriptParamEntry entries[8];
     size_t count = 0;
-    ScriptExec_ParseParametersObject(params_json, entries, 8, &count);
+    ScriptPayload_Params(params_json, strlen(params_json), entries, 8, &count);
 
     expect("parsed 4 parameters", count == 4);
     if (count == 4) {
@@ -170,7 +170,7 @@ static void test_exec_parameters(void) {
     // Parameters
     strncpy(params.parameters_json, "{\"mode\":\"test_mode\",\"count\":\"99\"}", sizeof(params.parameters_json) - 1);
     params.parameters_len = strlen(params.parameters_json);
-    ScriptExec_ParseParametersObject(params.parameters_json, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    ScriptPayload_Params(params.parameters_json, params.parameters_len, params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
 
     uint8_t hash[32];
     Response_SHA256_Sum((const uint8_t*)params.source, params.source_len, hash);
@@ -711,6 +711,71 @@ static void test_max_output_honoured(void) {
     free(output);
 }
 
+/* The shared strict reader (script_payload.h). The old strstr reader ran a
+ * value that ended in a backslash past its closing quote, cut the parameters
+ * object at a brace inside a value and took the first "source" text anywhere. */
+static ScriptExecParams g_sp;
+static void test_strict_payload_reader(void) {
+    printf("[*] Testing the strict payload reader...\n");
+    expect("value ending in a backslash ends at its quote",
+           ScriptExec_ParsePayload("{\"source\":\"echo C:\\\\\",\"parameters\":{\"dir\":\"C:\\\\temp\\\\\",\"mode\":\"audit\"},\"timeout_seconds\":30}", &g_sp) &&
+               strcmp(g_sp.source, "echo C:\\") == 0 && g_sp.param_count == 2 && strcmp(g_sp.params[0].value, "C:\\temp\\") == 0 &&
+               strcmp(g_sp.params[1].value, "audit") == 0 && g_sp.timeout_seconds == 30);
+    expect("brace and quote inside a parameter value",
+           ScriptExec_ParsePayload("{\"source\":\"x\",\"parameters\":{\"msg\":\"a}b\\\"c\",\"mode\":\"audit\"}}", &g_sp) &&
+               g_sp.param_count == 2 && strcmp(g_sp.params[0].value, "a}b\"c") == 0 && strcmp(g_sp.params[1].name, "mode") == 0);
+    expect("a nested source is not the source",
+           ScriptExec_ParsePayload("{\"parameters\":{\"source\":\"evil\"},\"source\":\"good\"}", &g_sp) && strcmp(g_sp.source, "good") == 0);
+    expect("repeated source refused", !ScriptExec_ParsePayload("{\"source\":\"a\",\"source\":\"b\"}", &g_sp));
+    expect("repeated parameter refused (any case)", !ScriptExec_ParsePayload("{\"source\":\"a\",\"parameters\":{\"mode\":\"a\",\"MODE\":\"b\"}}", &g_sp));
+    expect("parameter name outside [A-Za-z0-9_-] refused",
+           !ScriptExec_ParsePayload("{\"source\":\"a\",\"parameters\":{\"BASH_FUNC_echo%%\":\"() { id; }\"}}", &g_sp));
+    expect("nested parameter value refused", !ScriptExec_ParsePayload("{\"source\":\"a\",\"parameters\":{\"m\":{\"x\":1}}}", &g_sp));
+    expect("non-numeric timeout refused", !ScriptExec_ParsePayload("{\"source\":\"a\",\"timeout_seconds\":\"30\"}", &g_sp));
+    expect("out-of-range timeout keeps the default",
+           ScriptExec_ParsePayload("{\"source\":\"a\",\"timeout_seconds\":999999}", &g_sp) && g_sp.timeout_seconds == SCRIPT_EXEC_DEFAULT_TIMEOUT);
+    expect("trailing bytes refused", !ScriptExec_ParsePayload("{\"source\":\"a\"} x", &g_sp));
+    expect("no source refused", !ScriptExec_ParsePayload("{\"script_id\":\"a\"}", &g_sp));
+    expect("legacy version read when script_version is absent",
+           ScriptExec_ParsePayload("{\"source\":\"a\",\"version\":7}", &g_sp) && g_sp.script_version == 7);
+    expect("\\u escapes decode to UTF-8 (BMP, pair)",
+           ScriptExec_ParsePayload("{\"source\":\"\\u003c\\u00e9\\ud83d\\ude00&\"}", &g_sp) &&
+               strcmp(g_sp.source, "<\xc3\xa9\xf0\x9f\x98\x80&") == 0);
+    expect("lone surrogate refused", !ScriptExec_ParsePayload("{\"source\":\"\\ud83d\"}", &g_sp));
+    expect("\\u0000 refused", !ScriptExec_ParsePayload("{\"source\":\"a\\u0000b\"}", &g_sp));
+    expect("source past the buffer refused, not cut", ({
+        static char big[SCRIPT_EXEC_MAX_SOURCE_BYTES + 64];
+        int n = snprintf(big, sizeof(big), "{\"source\":\"");
+        memset(big + n, 'a', SCRIPT_EXEC_MAX_SOURCE_BYTES);
+        snprintf(big + n + SCRIPT_EXEC_MAX_SOURCE_BYTES, 8, "\"}");
+        !ScriptExec_ParsePayload(big, &g_sp);
+    }));
+    expect("bare export only for lower-case identifiers",
+           ScriptParam_BareExport("mode") && ScriptParam_BareExport("log_keep") && !ScriptParam_BareExport("PATH") &&
+               !ScriptParam_BareExport("LD_PRELOAD") && !ScriptParam_BareExport("Mode") && !ScriptParam_BareExport("a-b") &&
+               !ScriptParam_BareExport("9x"));
+}
+
+/* A parameter named PATH reaches the script only as OMINULL_PARAM_PATH. */
+static void test_param_cannot_set_path(void) {
+    printf("[*] Testing that a parameter cannot set PATH...\n");
+    const char* payload = "{\"script_id\":\"scr-path\",\"script_version\":1,\"interpreter\":\"/bin/sh\","
+                          "\"source\":\"echo \\\"P=$PATH U=$OMINULL_PARAM_PATH M=$mode\\\"\\n\","
+                          "\"parameters\":{\"PATH\":\"/evil\",\"mode\":\"m1\"},\"timeout_seconds\":10,\"max_output_bytes\":4096}";
+    if (!ScriptExec_ParsePayload(payload, &g_sp)) { expect("PATH payload parses", false); return; }
+    uint8_t hash[32];
+    Response_SHA256_Sum((const uint8_t*)g_sp.source, g_sp.source_len, hash);
+    Response_BytesToHex(hash, 32, g_sp.script_digest);
+    char output[2048] = {0};
+    bool truncated = false, timed_out = false;
+    int64_t duration_ms = 0;
+    int code = ScriptExec_RunContained(&g_sp, "job-path-1", output, sizeof(output), &truncated, &timed_out, &duration_ms);
+    expect("PATH script exit 0", code == 0);
+    expect("PATH stays the agent's", strstr(output, "P=/usr/bin:/bin:/usr/sbin:/sbin ") != NULL);
+    expect("PATH parameter as OMINULL_PARAM_PATH", strstr(output, "U=/evil") != NULL);
+    expect("lower-case parameter still bare", strstr(output, "M=m1") != NULL);
+}
+
 int main(void) {
     printf("=== Starting Linux Script Execution Worker C Tests ===\n");
     /* A private state directory of the test's own; the agent's is root-owned. */
@@ -725,6 +790,8 @@ int main(void) {
     test_json_unescaping();
     test_param_parsing();
     test_payload_parser();
+    test_strict_payload_reader();
+    test_param_cannot_set_path();
     test_exec_simple();
     test_exec_parameters();
     test_digest_tampering();

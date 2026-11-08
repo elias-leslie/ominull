@@ -24,6 +24,7 @@ typedef struct {
     size_t n;
     size_t i;
     bool first;
+    int max_depth;   /* 0: TERMINAL_JSON_MAX_DEPTH */
 } TermJson;
 
 static inline void TermJson_SkipWs(TermJson* j) {
@@ -54,7 +55,7 @@ static inline bool TermJson_String(TermJson* j, const char** out, size_t* out_le
 }
 
 static inline bool TermJson_SkipValue(TermJson* j, int depth) {
-    if (depth > TERMINAL_JSON_MAX_DEPTH) return false;
+    if (depth > (j->max_depth > 0 ? j->max_depth : TERMINAL_JSON_MAX_DEPTH)) return false;
     TermJson_SkipWs(j);
     if (j->i >= j->n) return false;
     char c = j->s[j->i];
@@ -108,6 +109,7 @@ static inline bool TermJson_Begin(TermJson* j, const char* s, size_t n) {
     j->n = n;
     j->i = 0;
     j->first = true;
+    j->max_depth = 0;
     TermJson_SkipWs(j);
     if (j->i >= j->n || j->s[j->i] != '{') return false;
     j->i++;
@@ -196,6 +198,85 @@ static inline bool TermJson_CopyString(const char* raw, size_t raw_len, char* ou
     }
     if (out_max == 0) return false;
     out[o] = '\0';
+    return true;
+}
+
+/* Decodes a raw JSON string span (as TermJson_String returns it) into UTF-8:
+ * every JSON escape, \u pairs for characters past the BMP. Refuses \u0000
+ * (it would end the C string early), a lone surrogate, a raw control byte, an
+ * unknown escape and anything that does not fit; never truncates. */
+static inline int TermJson_Hex4(const char* p) {
+    int v = 0;
+    for (int h = 0; h < 4; h++) {
+        char x = p[h];
+        int d = (x >= '0' && x <= '9') ? x - '0' : (x >= 'a' && x <= 'f') ? x - 'a' + 10 : (x >= 'A' && x <= 'F') ? x - 'A' + 10 : -1;
+        if (d < 0) return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+static inline bool TermJson_DecodeString(const char* raw, size_t raw_len, char* out, size_t out_max, size_t* out_len) {
+    if (!out || out_max == 0) return false;
+    size_t o = 0;
+    for (size_t i = 0; i < raw_len; i++) {
+        unsigned char c = (unsigned char)raw[i];
+        if (c < 0x20) return false;
+        if (c != '\\') {
+            if (o + 1 >= out_max) return false;
+            out[o++] = (char)c;
+            continue;
+        }
+        if (++i >= raw_len) return false;
+        char e = raw[i], d = 0;
+        switch (e) {
+        case '"': d = '"'; break;
+        case '\\': d = '\\'; break;
+        case '/': d = '/'; break;
+        case 'b': d = '\b'; break;
+        case 'f': d = '\f'; break;
+        case 'n': d = '\n'; break;
+        case 'r': d = '\r'; break;
+        case 't': d = '\t'; break;
+        case 'u': break;
+        default: return false;
+        }
+        if (e != 'u') {
+            if (o + 1 >= out_max) return false;
+            out[o++] = d;
+            continue;
+        }
+        if (i + 4 >= raw_len) return false;
+        long cp = TermJson_Hex4(raw + i + 1);
+        if (cp < 0) return false;
+        i += 4;
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (i + 6 >= raw_len || raw[i + 1] != '\\' || raw[i + 2] != 'u') return false;
+            long lo = TermJson_Hex4(raw + i + 3);
+            if (lo < 0xDC00 || lo > 0xDFFF) return false;
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            i += 6;
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            return false;
+        }
+        if (cp == 0) return false;
+        unsigned char u[4];
+        size_t n;
+        if (cp < 0x80) { u[0] = (unsigned char)cp; n = 1; }
+        else if (cp < 0x800) { u[0] = (unsigned char)(0xC0 | (cp >> 6)); u[1] = (unsigned char)(0x80 | (cp & 0x3F)); n = 2; }
+        else if (cp < 0x10000) {
+            u[0] = (unsigned char)(0xE0 | (cp >> 12)); u[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+            u[2] = (unsigned char)(0x80 | (cp & 0x3F)); n = 3;
+        } else {
+            u[0] = (unsigned char)(0xF0 | (cp >> 18)); u[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+            u[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F)); u[3] = (unsigned char)(0x80 | (cp & 0x3F)); n = 4;
+        }
+        if (o + n >= out_max) return false;
+        memcpy(out + o, u, n);
+        o += n;
+    }
+    out[o] = '\0';
+    if (out_len) *out_len = o;
     return true;
 }
 

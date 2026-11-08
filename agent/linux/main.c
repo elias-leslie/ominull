@@ -3005,7 +3005,7 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
         // 4. Action Dispatcher: Check if action kind is recognized and supported
         if (strcmp(offer->kind, "forensic_collection") == 0) {
             ForensicCollectionParams params;
-            Forensics_ParsePayload(offer->payload_json, &params);
+            bool params_ok = Forensics_ParsePayload(offer->payload_json, &params);   /* malformed: the worker reports failure */
             const char* bundle_id = params.bundle_id[0] ? params.bundle_id : offer->job_id;
 
             int pipefd[2];
@@ -3056,7 +3056,7 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
                 setrlimit(RLIMIT_CPU, &rl);
 
                 char manifest_sha[65] = {0};
-                bool success = Forensics_RunCollection(
+                bool success = params_ok && Forensics_RunCollection(
                     params.profile,
                     config->hub_url,
                     config->api_key,

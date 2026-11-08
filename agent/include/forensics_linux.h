@@ -111,64 +111,18 @@ typedef struct {
  * Payload Parsing
  * ------------------------------------------------------------------------- */
 
+/* Forensics_ParsePayload: false on a malformed payload (the job is then refused). */
 static inline bool Forensics_ParsePayload(const char* json, ForensicCollectionParams* out) {
     if (!json || !out) return false;
     memset(out, 0, sizeof(*out));
     out->max_bytes = FORENSICS_DEFAULT_MAX_BUNDLE_BYTES;
     out->timeout_seconds = 60;
     strncpy(out->profile, "diagnostic", sizeof(out->profile) - 1);
-
-    const char* p = strstr(json, "\"bundle_id\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            p = strchr(p, '"');
-            if (p) {
-                p++;
-                const char* end = strchr(p, '"');
-                if (end && (size_t)(end - p) < sizeof(out->bundle_id)) {
-                    strncpy(out->bundle_id, p, end - p);
-                    out->bundle_id[end - p] = '\0';
-                }
-            }
-        }
-    }
-
-    p = strstr(json, "\"profile\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            p = strchr(p, '"');
-            if (p) {
-                p++;
-                const char* end = strchr(p, '"');
-                if (end && (size_t)(end - p) < sizeof(out->profile)) {
-                    strncpy(out->profile, p, end - p);
-                    out->profile[end - p] = '\0';
-                }
-            }
-        }
-    }
-
-    p = strstr(json, "\"max_bytes\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            long long mb = atoll(p + 1);
-            if (mb > 0) out->max_bytes = mb;
-        }
-    }
-
-    p = strstr(json, "\"timeout_seconds\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            int to = atoi(p + 1);
-            if (to > 0) out->timeout_seconds = to;
-        }
-    }
-
-    return true;
+    if (Response_ForensicsPayload(json, out->bundle_id, sizeof(out->bundle_id), out->profile, sizeof(out->profile),
+                                  &out->max_bytes, &out->timeout_seconds))
+        return true;
+    out->bundle_id[0] = '\0';
+    return false;
 }
 
 /* ---------------------------------------------------------------------------

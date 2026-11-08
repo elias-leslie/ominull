@@ -168,6 +168,8 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_cert_renewal" "${ROOT_DIR}/agent/tests/test_cert_renewal.c"
     "${ROOT_DIR}/build/test_cert_renewal"
+    echo "[*] Replaying the hub-input fuzz seeds and fixed crashes under ASan/UBSan."
+    "${ROOT_DIR}/scripts/fuzz-agent.sh" --regress
 fi
 
 if [ "${DO_HUB}" -eq 1 ]; then
