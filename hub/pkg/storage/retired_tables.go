@@ -5,10 +5,10 @@ import (
 	"log"
 )
 
-// retiredTables are tables the hub no longer reads or writes (the third trim,
-// docs/DESIGN_HISTORY.md). Each is dropped at startup only while it is empty:
-// a table that still holds rows is history nobody has looked at yet, so it is
-// left in place and named in the log rather than deleted.
+// retiredTables are tables the hub no longer reads or writes (the third
+// trim). Each is dropped at startup only while it is empty: a table that still
+// holds rows is history nobody has looked at yet, so it is left in place and
+// named in the log rather than deleted.
 var retiredTables = []string{
 	"rules",          // legacy firewall rules; no code since the feature reduction
 	"dns_rules",      // legacy DNS allow/block list; no code since the DNS incident

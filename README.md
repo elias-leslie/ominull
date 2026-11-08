@@ -48,12 +48,12 @@ Ominull is an endpoint telemetry, detection, and containment hub for operators m
   [`hub/pkg/storage/destination_history_test.go`](hub/pkg/storage/destination_history_test.go):
   `cd hub && go test ./pkg/storage -run '^$' -bench BenchmarkFirstSeenDestination`.
 - Baseline policy resolution with 1,000 unrelated policies dropped from 9.0 ms
-  to 27 µs per request. Method and the full table are in
-  [docs/evidence/HUB-PREPARATION-REFACTOR.md](docs/evidence/HUB-PREPARATION-REFACTOR.md).
+  to 27 µs per request: `BenchmarkBaselineResolution` in
+  [`hub/pkg/storage/baseline_resolution_performance_test.go`](hub/pkg/storage/baseline_resolution_performance_test.go).
 
 ## Current scope
 
-Supported products are the Debian-family Linux hub `.deb`, Linux agent `.deb`, and Windows agent `.msi`. The hub is written in Go and embeds its operator console and SQLite store; the agents are written in C. macOS and other retired paths are outside the supported release; the [design history](docs/DESIGN_HISTORY.md) explains what was cut and why.
+Supported products are the Debian-family Linux hub `.deb`, Linux agent `.deb`, and Windows agent `.msi`. The hub is written in Go and embeds its operator console and SQLite store; the agents are written in C. macOS and other retired paths are outside the supported release; Git history records what was cut and why.
 
 The release scripts (`scripts/release.sh`, `scripts/sign-release.sh`) build and sign these packages, but signed packages are not published as GitHub releases. To run your own fleet, build from source, replace the public key in `agent/include/release_key.h`, and sign with the matching private key through `OMINULL_SIGNING_KEY`.
 
@@ -90,5 +90,4 @@ Package lifecycle, signing, canary convergence, and runtime acceptance require t
 - [Hub setup](docs/SETUP.md), [collection semantics](docs/UDP_OBSERVATION.md), and [topology workspace](docs/TOPOLOGY_WORKSPACE.md).
 - [Agent TLS](docs/AGENT_TLS.md), [self-update](docs/AGENT_SELFUPDATE.md), and [trust fabric](docs/TRUST_FABRIC.md).
 - [Router collection](scripts/router/README.md), [OIDC](docs/OIDC.md), [Cloudflare](docs/CLOUDFLARE.md), and [license](LICENSE).
-- [Design history](docs/DESIGN_HISTORY.md) and dated verification records in [docs/evidence](docs/evidence), where real host names and addresses are replaced with placeholders.
 - [Security policy](SECURITY.md), including how to report a vulnerability.

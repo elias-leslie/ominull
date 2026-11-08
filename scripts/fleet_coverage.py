@@ -10,7 +10,7 @@ Aico Status on this machine (POST /api/status/rows on loopback):
 
 Two kinds of machine row are not counted:
   - the hub's own (row ominull.machine): the hub is the detection backend, not an endpoint; its co-installed agent was
-    retired on purpose (docs/DESIGN_HISTORY.md) and the hub reports its own health on that row.
+    retired on purpose and the hub reports its own health on that row.
   - a machine Aico shows as off (shown "off": on demand and stopped, parked, or powered off). Nothing runs there to
     protect; the meaning names it, and it counts again as soon as it runs.
 
