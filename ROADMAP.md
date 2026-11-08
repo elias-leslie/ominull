@@ -3,7 +3,6 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 
 ## Now
 - Console: browser-check and accessibility-check the Topology rewrite (700fe82; shipped, never checked past a render)
-- Windows agent: confirm ESTATS byte counts stay clean after 1.8.99 (32-bit wraps unconfirmed), fix any left in agent/src/service.c
 ## Next
 - M5: Aico owns machine inventory, intent and liveness (plan: docs/audit-2026-11-06.md)
 - M8: Tripwires: canary credentials, decoy addresses, bad-domain matching on stored DNS (plan: docs/audit-2026-11-06.md)
