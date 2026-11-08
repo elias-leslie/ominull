@@ -301,6 +301,10 @@ type AutoIsolateRequest struct {
 	Baselines []response.IsolationBaseline `json:"baselines,omitempty"`
 }
 
+// autoIsolateBook is the brake on automatic isolation. The M6 plan listed it for
+// deletion with the rest of the old authority; it stays on purpose (2026-11-08), so
+// one wrong threat-list entry can't cut off the whole fleet in one pass. It costs a
+// few lines and only ever holds back the detector, never an operator.
 type autoIsolateBook struct {
 	mu         sync.Mutex
 	byTenant   map[string][]time.Time

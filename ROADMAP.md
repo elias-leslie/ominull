@@ -8,12 +8,11 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - Trust fabric: IP and CIDR rules enforced end to end, including older agents that refuse ranges (plan: docs/TRUST_FABRIC.md)
 - Trust fabric: FQDN rules with hub-side resolution, and close the blanket DNS egress
 ## Later
-- Console and posture small gaps: a direct link to a machine with no agent doesn't paint until a list is open; a non-admin login tied to a tenant with no asset rows sees an empty list; the posture collector script has only been checked live, with no automated test
+- Console and posture small gaps: a direct link to a machine with no agent doesn't paint until a list is open; a non-admin login tied to a tenant with no asset rows sees an empty list
 - Evaluate BloodHound CE and OpenGraph, then build the AI weak-point finder
 - Household: back up the router and repair the approved parental, DNS and Ominull config; then IoT segmentation and DNS filtering (vault proposal direction-2026-10)
 - Phase 2: AI-agent egress policy with agent-session attribution, and data inventory contract v4 (vault proposal direction-2026-10)
 - Phase 3: measured agent move from C to Go, portable Go collector (Windows first), labeled Neri-lab drill harness, time-boxed Velociraptor benchmark
 - Phase 4: business line with paid certs, licensing, multi-tenant and macOS
 - Umbrella direction: a lean sensor-and-response fleet (vault proposal direction-2026-10)
-- Agent reading cost: docs/project-guide.md "CLI and API" (25 KB, read 43 times in 4 sessions) holds route and policy detail agents page through; put each rule next to its code or in ominullctl --help and keep the guide to pointers (usage-burn lane 7 report, Nov 8)
-- Audit leftovers (Nov 8): rerun `scripts/update-linux-agents.sh` when linux-agent-work, linux-blackbox-vault and linux-neri-hunters start; Linux agent forensics list still names the old service (`agent/include/forensics_linux.h`); no health finding for failing domain feeds or for endpoints matching no Aico machine; served-flow rule is port-inferred; host authority pinned on two hosts with no way to deliver it; decide on the kept routes `/api/v1/maintenance/escalate` and `/api/v1/scripts/digest` and on the grants auto-isolate brake (the plan said delete it); a fresh Windows MSI install leaves the service stopped; `curl --cacert` on Windows fails with exit 60 with the hub CA
+- Audit leftovers (Nov 8): rerun `scripts/update-linux-agents.sh` when linux-agent-work, linux-blackbox-vault and linux-neri-hunters start; a fresh Windows MSI install leaves the service stopped

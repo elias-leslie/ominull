@@ -906,6 +906,12 @@ func (e *Engine) InvalidateCollectorWindows(endpointID string) {
 // to one inside it is the listener's side (tuning ephemeral_port_from); an
 // agent that marks a flow INBOUND needs no inference, since only OUTBOUND
 // flows are judged.
+//
+// This is inference from ports, and a known limit: agents report no listeners, so a
+// program that binds a port below the range and sends to ports inside it also reads
+// as served, and its sweep of those high ports goes unjudged. Sweeps of ports below
+// the range, the ones that matter most, are not hidden this way. Closing it takes
+// listener reports from agents.
 func servedFlow(ev storage.Event, cfg storage.DetectionTuning) bool {
 	from := uint16(cfg.EphemeralPortFrom)
 	return ev.SrcPort > 0 && ev.SrcPort < from && ev.DstPort >= from

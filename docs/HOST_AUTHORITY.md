@@ -10,6 +10,11 @@ Since 2026-10-24 the hub signs ordinary hub actions on the first request, with n
 authority are therefore the part that holds against a compromised hub or a leaked admin key: the agent refuses
 what they forbid even when the response key signed it.
 
+Current state (2026-11-08): the workstation and the Proxmox host pin keys, but the signer retired with Nightshift, so no
+grant reaches them. Each pin now works as a lock: the hub can't run scripts there, and both take them by hand over root
+SSH (`scripts/posture-collect.sh` does for the baseline). The pins stay on purpose. Removing one on the workstation, whose
+level is `engagement`, would hand the hub script rights on it.
+
 Agents from 1.8.81 implement everything here. Code: `agent/include/agent_trust.h` (ceilings, host files, offer
 checks, report), `agent/include/response_canonical.h` (grant bytes), `agent/include/response_dispatcher.h` (grant
 parsing, replay cache), `hub/pkg/response/dto.go` (grant bytes).
