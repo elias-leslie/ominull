@@ -400,6 +400,8 @@ type Store struct {
 	// flowWriter caches flow dictionary ids and open minute aggregates
 	// (flows.go); guarded by mu.
 	flowWriter *flowWriter
+	// retentionInForce is the policy the retention sweep runs with.
+	retentionInForce atomic.Pointer[RetentionPolicy]
 	// coldDir overrides where cold segments go (cold.go).
 	coldDir string
 	// dataReport is the last computed data size report (datasize.go).

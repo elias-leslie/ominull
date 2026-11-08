@@ -361,6 +361,32 @@
    assert(result&&result.ok,'Result not returned');
   } finally {window.fetch=original;a.state.demo=true;}
  });
+ await check('Posture card scores packs, opens a control and answers a confirmation', async () => {
+  const saved={sec:a.state.section,tab:a.state.maintTab,p:a.state.posture,o:a.state.postureOpen};
+  a.state.posture=await a.request('/api/v1/posture');
+  a.state.postureOpen={'ir-readiness':true};
+  a.state.maintTab='security'; a.state.section='maintenance'; document.getElementById('view').dataset.section=''; a.render();
+  const packs=[...document.querySelectorAll('.pst-pack')];
+  assert(packs.length===2,'Packs on the card: '+packs.length);
+  assert(/%/.test(packs[0].querySelector('summary').textContent),'A pack has no percent');
+  const dot=document.querySelector('.pst-dot');
+  assert(dot&&dot.title&&dot.getAttribute('aria-label')===dot.title,'A status dot has no words');
+  assert(packs[1].open&&!packs[0].open,'Which packs are open did not survive a repaint');
+  const mfa=[...document.querySelectorAll('.pst-open')].find(b=>/second step/.test(b.textContent));
+  mfa.click(); await wait();
+  const answer=[...document.querySelectorAll('.sheet button')].find(b=>/^Answer/.test(b.textContent));
+  assert(answer&&!answer.disabled,'A control nobody can see has no Answer button');
+  answer.click(); await wait();
+  const note=document.querySelector('.sheet input[type=text]');
+  note.value='Owner confirmed'; note.dispatchEvent(new Event('input',{bubbles:true}));
+  [...document.querySelectorAll('.sheet button')].find(b=>b.textContent==='Save').click(); await wait(); await wait();
+  assert(!document.querySelector('.sheet'),'Saving left a sheet or discard prompt open');
+  const after=await a.request('/api/v1/posture');
+  const r=after.packs[1].controls.find(c=>c.id==='ir.console_mfa').results[0];
+  assert(r.state==='pass'&&r.actual==='Owner confirmed','Answer not kept: '+JSON.stringify(r));
+  await a.request('/api/v1/posture/attest','POST',{control:'ir.console_mfa',state:'clear'});
+  a.state.section=saved.sec;a.state.maintTab=saved.tab;a.state.posture=saved.p;a.state.postureOpen=saved.o;a.render();
+ });
  a.state.section='assets';a.render();
  return results;
 })()

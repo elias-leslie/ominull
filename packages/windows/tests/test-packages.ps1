@@ -5,7 +5,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 $Dir = Split-Path -Parent $PSScriptRoot
-$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit', 'maintenance-mode', 'software-removal', 'reboot'
+$Names = 'updates', 'cleanup', 'privacy', 'debloat', 'performance', 'audit', 'maintenance-mode', 'software-removal', 'reboot', 'security-baseline'
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Passed = 0
 function Check([string]$What, [bool]$Ok) {

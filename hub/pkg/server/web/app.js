@@ -531,6 +531,9 @@
     maintDecisions: null,
     maintTab: "maintenance",
     maintCardTab: "maintenance",
+    posture: null,
+    postureByEndpoint: {},
+    postureOpen: {},
     /* The hub has kept a rolling communication profile per endpoint since the
        first release and the console never read it, so "what does this host
        normally talk to" could only be answered by scrolling raw flows. */
@@ -1278,6 +1281,51 @@
       appx: { appx: "remove the Store app for all users", manual: "needs someone at the screen" } },
     flags: ["/S", "/SILENT", "/VERYSILENT /NORESTART", "/quiet", "/quiet /norestart", "/uninstall /quiet", "-uninstall", "--uninstall", "--force-uninstall"]
   };
+  /* Posture in demo mode: a hardening pack and the readiness pack over the demo
+     machines, with every answer a real hub can give. */
+  var DEMO_ATTEST = null;
+  function demoPosture(path) {
+    var only = (/[?&]endpoint_id=([^&]+)/.exec(path || "") || [])[1];
+    only = only && decodeURIComponent(only);
+    var eps = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return !only || e.id === only; }).slice(0, 8);
+    var at = new Date(Date.now() - 3 * 3600000).toISOString(), old = new Date(Date.now() - 20 * 86400000).toISOString();
+    var score = function (rs, sev) {
+      var s = { pass: 0, fail: 0, accepted: 0, na: 0, unknown: 0, percent: null };
+      rs.forEach(function (r) { s[r.state]++; if (r.state === "fail") s.worst = sev; });
+      if (s.pass + s.fail) s.percent = Math.round(100 * s.pass / (s.pass + s.fail));
+      return s;
+    };
+    var ctl = function (id, title, sev, why, refs, states, expected, actual) {
+      var rs = eps.map(function (e, i) {
+        var st = states[i % states.length];
+        return { endpoint_id: e.id, host: e.hostname, state: st, key: id, expected: expected, actual: st === "unknown" ? "no result yet" : st === "na" ? "does not apply here" : actual[st === "pass" ? 0 : 1],
+          at: st === "unknown" ? undefined : (i === 3 ? old : at), stale: st !== "unknown" && i === 3, reason: st === "accepted" ? "Lab machine" : undefined };
+      });
+      return { id: id, title: title, severity: sev, why: why, refs: refs, results: rs, score: score(rs, sev) };
+    };
+    var fleetCtl = function (id, title, sev, why, attest, r) {
+      return { id: id, title: title, severity: sev, why: why, fleet: true, attest: attest, results: [r], score: score([r], sev) };
+    };
+    var att = DEMO_ATTEST;
+    var packs = [
+      { id: "cisa-nsa-hardening", title: "CISA and NSA hardening", source_name: "CISA", source_url: "https://www.cisa.gov/",
+        controls: [
+          ctl("ssh.password_auth_off", "SSH refuses password logins", "high", "A guessed password gets a shell. Keys cannot be guessed.", ["CISA AA23-278A"], ["pass", "fail", "pass", "accepted"], "password login off", ["password no", "password yes"]),
+          ctl("accounts.least_privilege", "Only root has full rights", "high", "Extra full-rights accounts are the first thing an intruder looks for.", ["CISA AA23-278A"], ["pass", "pass", "unknown"], "only root has user id 0", ["only root", "user id 0: toor"])
+        ] },
+      { id: "ir-readiness", title: "Ready for an incident", source_name: "NIST SP 800-61", source_url: "https://csrc.nist.gov/",
+        controls: [
+          ctl("ir.endpoint_logs", "Machines keep their logs", "medium", "Logs that are gone cannot tell you what happened.", ["NIST AU-11"], ["fail", "pass", "pass", "na"], "30 days of logs", ["reaches back 45 days", "reaches back 14 days"]),
+          fleetCtl("ir.console_mfa", "Console login asks for a second step", "high", "A stolen password should not open the console.", true,
+            att ? { state: att.state, actual: att.note, by: "demo", at: at, expected: "two-step login" } : { state: "unknown", actual: "nobody has confirmed this", expected: "two-step login" })
+        ] }
+    ];
+    packs.forEach(function (p) {
+      if (only) p.controls = p.controls.filter(function (c) { return !c.fleet; });
+      p.score = score(p.controls.reduce(function (all, c) { return all.concat(c.results); }, []), "high");
+    });
+    return { generated_at: new Date().toISOString(), stale_days: 14, packs: packs };
+  }
   var DEMO_DECISIONS = null;
   function demoDecisions() {
     if (!DEMO_DECISIONS) {
@@ -1469,6 +1517,7 @@
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }
         if (base === "/api/v1/maintenance") { resolve(demoMaintenance(path)); return; }
         if (base === "/api/v1/maintenance/settings") { resolve(demoMaintSettings(path)); return; }
+        if (base === "/api/v1/posture") { resolve(demoPosture(path)); return; }
         if (base === "/api/v1/maintenance/windows") { resolve(demoWindows(path)); return; }
         if (base === "/api/v1/fleet/trust") { resolve(demoFleetTrust()); return; }
         if (base === "/api/v1/remote-access/settings") { resolve({ off: Object.keys(demoRemoteOff()).filter(function (k) { return demoRemoteOff()[k]; }).sort() }); return; }
@@ -1724,6 +1773,10 @@
         if (wep) wst.endpoints[wep] = nw; else wst.fleet = nw;
       }
       return Object.assign(demoWindows(wep ? "?endpoint_id=" + encodeURIComponent(wep) : ""), { changed: true });
+    }
+    if (base === "/api/v1/posture/attest") {
+      DEMO_ATTEST = body.state === "clear" ? null : { state: body.state, note: body.note };
+      return { control: body.control, state: body.state };
     }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
@@ -8419,6 +8472,7 @@
         catSel ? h("label", { cls: "uf uf-g1" }, h("span", { cls: "dim-2", text: "Scheduled runs" }), catSel) : null,
         catNote,
         cat ? maintOverrideNote(cat.override) : null),
+      tab === "security" ? assetPostureLine(asset) : null,
       acceptedRisksLine(asset, settings && settings.accepted_risks),
       pkgs.length ? stackOnPhone(simpleTable(["Package", "Last result", "When", "Reboot needed", "Schedule here", ""], rows, { sortable: false }))
         : emptyBox(tab === "security" ? "No security packages in the script library yet." : "No maintenance packages in the script library yet.")), null, true,
@@ -8765,23 +8819,25 @@
 
   /* An accepted risk: the owner says a failing check is fine on this one
      machine. It reads Accepted, leaves the score and asks nothing. */
-  function putAcceptedRisk(asset, control, accepted, reason) {
+  function putAcceptedRisk(asset, control, accepted, reason, done) {
     var change = { endpoint_id: asset.endpoint.id, accept_risk: control, accepted: accepted };
     if (accepted && reason) change.reason = reason;
     return putMaintSetting(change, function () {
-      requestCloseSheet();
+      closeSheet();
       loadMaintenance(asset.endpoint.id);
+      if (done) done();
       toast(accepted ? "Risk accepted on " + asset.name : "No longer accepted on " + asset.name, "ok");
     }).catch(function () {});
   }
 
-  function openAcceptRiskSheet(asset, control) {
+  function openAcceptRiskSheet(asset, control, opts) {
+    opts = opts || {};
     var reason = h("input", { type: "text", maxlength: "160", placeholder: "e.g. Kids' gaming laptop, no sensitive data", "aria-label": "Reason (optional)" });
     var go = h("button", { cls: "btn btn-primary", type: "button", text: "Accept risk", on: { click: function () {
       go.disabled = true;
-      putAcceptedRisk(asset, control, true, reason.value.trim()).then(function () { go.disabled = false; });
+      putAcceptedRisk(asset, control, true, reason.value.trim(), opts.done).then(function () { go.disabled = false; });
     } } });
-    openSheet("Accept " + control + " on " + asset.name, h("div", { cls: "stack" },
+    openSheet("Accept " + (opts.label || control) + " on " + asset.name, h("div", { cls: "stack" },
       h("p", { text: "This check stops counting against " + asset.name + ": no failure, no score deduction, no fix suggested. You can undo it any time." }),
       h("label", { cls: "field" }, h("span", { text: "Reason (optional)" }), reason)),
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
@@ -9038,6 +9094,182 @@
       [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
   }
 
+  /* Posture: the control packs, scored from package runs, what the hub knows
+     about itself and people's confirmations. GET /api/v1/posture. */
+  var POSTURE_STATES = {
+    pass: ["ok", "Pass"], fail: ["crit", "Fail"], accepted: ["info", "Accepted"],
+    na: ["idle", "Not applicable"], unknown: ["idle", "No answer"]
+  };
+  var POSTURE_SEVERITY = { critical: "crit", high: "crit", medium: "warn", low: "idle" };
+  function loadPosture() {
+    return request("/api/v1/posture").then(function (d) { state.posture = d || null; }, function (e) {
+      state.posture = { error: (e && e.message) || "request failed" };
+    });
+  }
+  function loadAssetPosture(epID) {
+    var cur = state.postureByEndpoint[epID];
+    if (cur && (cur.loading || Date.now() - cur.at < 10000)) return;
+    state.postureByEndpoint[epID] = { loading: true, at: Date.now(), view: cur && cur.view };
+    request("/api/v1/posture?endpoint_id=" + encodeURIComponent(epID)).then(function (d) {
+      state.postureByEndpoint[epID] = { at: Date.now(), view: d || null };
+    }, function (e) {
+      state.postureByEndpoint[epID] = { at: Date.now(), error: (e && e.message) || "request failed" };
+    }).then(function () { if (state.routeKey) renderRoute(); });
+  }
+  function postureRefresh(epID) {
+    if (epID) delete state.postureByEndpoint[epID];
+    if (epID) loadAssetPosture(epID);
+    loadPosture().then(function () { if (state.section === "maintenance") { $("view").dataset.section = ""; renderBody(); } });
+  }
+  function tipped(node, text) { node.title = text; return node; }
+  function postureScoreChip(score) {
+    var s = score || {};
+    if (s.percent === null || s.percent === undefined) return tipped(chip("idle", "—"), "No pass or fail answers yet");
+    var tone = !s.fail ? "ok" : (s.worst === "critical" || s.worst === "high") ? "crit" : "warn";
+    return tipped(chip(tone, s.percent + "%"), s.pass + " of " + (s.pass + s.fail) + " answers pass");
+  }
+  function postureCounts(s) {
+    s = s || {};
+    return [
+      s.fail ? tipped(chip("crit", s.fail + " fail"), s.fail + " failing, worst is " + (s.worst || "unknown") + " severity") : null,
+      s.unknown ? tipped(chip("idle", s.unknown + " no answer"), "Nothing has answered these yet. They are not counted in the percent.") : null,
+      s.accepted ? tipped(chip("info", s.accepted + " accepted"), "Failing, with the risk accepted. Not counted in the percent.") : null
+    ].filter(Boolean);
+  }
+  function postureResultWords(r) {
+    var st = POSTURE_STATES[r.state] || ["idle", r.state];
+    var at = r.at ? ", " + maintDateText(r.at) : "";
+    return (r.host ? r.host + ": " : "") + st[1] + (r.actual ? " (" + r.actual + ")" : "") + at + (r.stale ? ", old answer" : "");
+  }
+  function postureDots(results) {
+    return h("span", { cls: "pst-dots" }, arrayOf(results).map(function (r) {
+      var words = postureResultWords(r);
+      return h("span", { cls: "pst-dot", "data-state": r.state, "data-stale": r.stale ? "true" : "false", role: "img", "aria-label": words, title: words });
+    }));
+  }
+  /* Accept or stop accepting one machine's failing answer, then read again. */
+  function postureAcceptButton(r, control, epID) {
+    if (!IS_ADMIN || !r.endpoint_id || !r.key || (r.state !== "fail" && r.state !== "accepted")) return "";
+    var asset = { name: r.host || r.endpoint_id, endpoint: { id: r.endpoint_id } };
+    var done = function () { postureRefresh(epID); };
+    if (r.state === "fail") return h("button", { cls: "btn mini", type: "button", text: "Accept risk…", disabled: READ_ONLY,
+      "aria-label": "Accept the risk of " + control.title + " on " + asset.name,
+      on: { click: function () { openAcceptRiskSheet(asset, r.key, { label: control.title, done: done }); } } });
+    return h("button", { cls: "btn mini", type: "button", text: "Stop accepting", disabled: READ_ONLY,
+      "aria-label": "Stop accepting " + control.title + " on " + asset.name,
+      on: { click: function () { putAcceptedRisk(asset, r.key, false, "", done); } } });
+  }
+  function postureFound(r) {
+    return h("div", {}, h("span", { text: r.actual || "—" }),
+      r.state === "accepted" && r.reason ? h("div", { cls: "dim-2", text: "Accepted: " + r.reason }) : null,
+      r.by ? h("div", { cls: "dim-2", text: r.by + (r.expires ? ", good until " + maintDateText(r.expires) : "") }) : null);
+  }
+  function postureResultChips(r) {
+    var st = POSTURE_STATES[r.state] || ["idle", r.state];
+    return h("div", { cls: "uf uf-wrap uf-g1" }, chip(st[0], st[1]),
+      r.stale ? tipped(chip("warn", "Old"), "This answer is older than the posture's stale limit. The machine may have changed since.") : null);
+  }
+  function postureWhen(r) {
+    if (!r.at) return h("span", { cls: "dim-2", text: "—" });
+    var when = stamp(parseTime(r.at));
+    return r.job_id ? h("a", { href: "/console/jobs?id=" + encodeURIComponent(r.job_id), title: "Open this run" }, when) : when;
+  }
+  function openPostureConfirm(c) {
+    var state_ = h("select", { "aria-label": "Answer" }, h("option", { value: "pass", text: "Yes, this holds" }), h("option", { value: "fail", text: "No, this does not hold" }));
+    var note = h("input", { type: "text", maxlength: "300", "aria-label": "What shows it" });
+    var days = h("input", { type: "number", min: "1", max: "365", value: "90", "aria-label": "Good for how many days" });
+    var send = function (body) {
+      return request("/api/v1/posture/attest", "POST", body).then(function () { closeSheet(); postureRefresh(); toast("Saved", "ok"); },
+        function (e) { toast((e && e.message) || "Could not save", "crit"); });
+    };
+    var results = arrayOf(c.results), had = results[0] && results[0].by;
+    openSheet(c.title, h("div", { cls: "stack" },
+      c.why ? h("p", { text: c.why }) : null,
+      h("label", { cls: "field" }, h("span", { text: "Answer" }), state_),
+      h("label", { cls: "field" }, h("span", { text: "What shows it" }), note),
+      h("label", { cls: "field" }, h("span", { text: "Good for how many days" }), days)),
+      [h("button", { cls: "btn btn-primary", type: "button", text: "Save", on: { click: function () {
+        send({ control: c.id, state: state_.value, note: note.value.trim(), days: parseInt(days.value, 10) || 0 });
+      } } }),
+      had ? h("button", { cls: "btn", type: "button", text: "Clear answer", on: { click: function () { send({ control: c.id, state: "clear" }); } } }) : null,
+      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })].filter(Boolean));
+    note.focus();
+  }
+  function openPostureControl(c) {
+    var fleet = !!c.fleet;
+    var head = fleet ? ["Expected", "Found", "Result", "When"] : ["Machine", "Expected", "Found", "Result", "When", ""];
+    var rows = arrayOf(c.results).map(function (r) {
+      var row = [r.expected || "—", postureFound(r), postureResultChips(r), postureWhen(r)];
+      return fleet ? row : [h("b", { text: r.host || r.endpoint_id })].concat(row, [postureAcceptButton(r, c, "")]);
+    });
+    openSheet(c.title, h("div", { cls: "stack" },
+      h("div", { cls: "uf uf-wrap uf-g1" }, tipped(chip(POSTURE_SEVERITY[c.severity] || "idle", c.severity), "How much this matters"),
+        arrayOf(c.refs).map(function (ref) { return tipped(chip("idle", ref), "Where this control comes from"); })),
+      c.why ? h("p", { text: c.why }) : null,
+      stackOnPhone(simpleTable(head, rows, { sortable: false }))),
+      [IS_ADMIN && c.attest ? h("button", { cls: "btn btn-primary", type: "button", text: "Answer…", disabled: READ_ONLY,
+        on: { click: function () { requestCloseSheet(); openPostureConfirm(c); } } }) : null,
+      h("button", { cls: "btn", type: "button", text: "Close", on: { click: function () { requestCloseSheet(); } } })].filter(Boolean), "sheet-wide");
+  }
+  function posturePackBlock(p) {
+    var rows = arrayOf(p.controls).map(function (c) {
+      return [
+        h("button", { cls: "pst-open", type: "button", text: c.title, title: c.why || c.title, on: { click: function () { openPostureControl(c); } } }),
+        tipped(chip(POSTURE_SEVERITY[c.severity] || "idle", c.severity), "How much this matters"),
+        postureScoreChip(c.score),
+        postureDots(c.results)
+      ];
+    });
+    var block = h("details", { cls: "pst-pack", on: { toggle: function (e) { state.postureOpen[p.id] = e.target.open; } } },
+      h("summary", {}, h("b", { text: p.title }), postureScoreChip(p.score), postureCounts(p.score),
+        p.source_url ? h("a", { cls: "dim-2 pst-src", href: p.source_url, target: "_blank", rel: "noopener noreferrer", text: p.source_name || "Source",
+          title: (p.source_name || "Source") + (p.source_version ? " " + p.source_version : "") }) : null),
+      stackOnPhone(simpleTable(["Control", "Severity", "Score", "Machines"], rows, { sortable: false })));
+    block.open = !!state.postureOpen[p.id];
+    return block;
+  }
+  function postureCard() {
+    var d = state.posture;
+    var body;
+    if (!d) body = emptyBox("Reading posture…");
+    else if (d.error) body = emptyBox("Could not read posture: " + d.error);
+    else if (!arrayOf(d.packs).length) body = emptyBox("No control applies to a machine here yet.");
+    else body = h("div", { cls: "card-body stack" }, arrayOf(d.packs).map(posturePackBlock));
+    var exportBtn = h("button", { cls: "btn mini", type: "button", text: "Export", title: "Download every pack with its evidence as JSON", disabled: !d || !!d.error,
+      on: { click: function () {
+        request("/api/v1/posture").then(function (v) {
+          downloadText("ominull-posture-" + new Date().toISOString().slice(0, 10) + ".json", JSON.stringify(v, null, 2));
+        }, function (e) { toast((e && e.message) || "Could not export", "crit"); });
+      } } });
+    return card("Posture", body, [exportBtn], true,
+      "Each pack's percent counts pass against fail. Anything with no answer, not applicable or accepted is left out. Open a control for what each machine reported.");
+  }
+  /* One machine's packs on its asset card. */
+  function openAssetPosturePack(p, asset) {
+    var rows = [];
+    arrayOf(p.controls).forEach(function (c) {
+      arrayOf(c.results).forEach(function (r) {
+        rows.push([h("span", { title: c.why || c.title }, h("b", { text: c.title })), r.expected || "—", postureFound(r), postureResultChips(r), postureWhen(r), postureAcceptButton(r, c, asset.endpoint.id)]);
+      });
+    });
+    openSheet(p.title + " on " + asset.name, h("div", { cls: "stack" },
+      h("div", { cls: "uf uf-wrap uf-g1" }, postureScoreChip(p.score), postureCounts(p.score)),
+      stackOnPhone(simpleTable(["Control", "Expected", "Found", "Result", "When", ""], rows, { sortable: false }))),
+      [h("button", { cls: "btn", type: "button", text: "Close", on: { click: function () { requestCloseSheet(); } } })], "sheet-wide");
+  }
+  function assetPostureLine(asset) {
+    var epID = asset.endpoint.id;
+    loadAssetPosture(epID);
+    var cur = state.postureByEndpoint[epID];
+    var packs = arrayOf(cur && cur.view && cur.view.packs);
+    if (cur && cur.error) return h("div", { cls: "card-body dim-2", text: "Could not read posture: " + cur.error });
+    if (!packs.length) return null;
+    return h("div", { cls: "card-body uf uf-wrap uf-g2" }, packs.map(function (p) {
+      return h("button", { cls: "pst-chip", type: "button", title: "Open " + p.title + " on " + asset.name,
+        on: { click: function () { openAssetPosturePack(p, asset); } } }, h("span", { text: p.title }), postureScoreChip(p.score), postureCounts(p.score));
+    }));
+  }
+
   function renderMaintenanceSection() {
     var view = $("view");
     /* Same as Access: a poll must not rebuild under an open control. */
@@ -9054,7 +9286,10 @@
     var openDecisions = arrayOf(state.maintDecisions && state.maintDecisions.open).length;
 
     var status = h("div", { cls: "uf uf-wrap uf-g2" },
-      maintTabs(tab, function (id) { state.maintTab = id; view.dataset.section = ""; renderBody(); }),
+      maintTabs(tab, function (id) {
+        state.maintTab = id; view.dataset.section = ""; renderBody();
+        if (id === "security") postureRefresh();
+      }),
       chip(cat.fleet_enabled ? "ok" : "idle", cat.fleet_enabled ? "Schedule on" : "Schedule off"),
       win ? chip("info", "Window " + (wd.ranges.length > 1 ? maintRangesText(wd.ranges.slice(0, 1)) + " +" + (wd.ranges.length - 1) : win)) : null,
       openDecisions ? chip("warn", openDecisions + (openDecisions === 1 ? " decision" : " decisions")) : null);
@@ -9095,6 +9330,7 @@
     view.appendChild(h("div", { cls: "pad stack" },
       tools,
       maintDecisionsCard(),
+      tab === "security" ? postureCard() : null,
       tab === "maintenance" ? maintRunsCard() : null,
       tab === "maintenance" ? maintPlaybooksCard() : null,
       card((tab === "security" ? "Security packages" : "Maintenance packages") + " · " + pkgs.length,
@@ -10869,6 +11105,7 @@
       }));
     }
     if (state.section === "maintenance") {
+      if (state.maintTab === "security") jobs.push(loadPosture());
       jobs.push(request("/api/v1/maintenance/settings").then(function (d) { state.maintSettings = d || null; }));
       jobs.push(loadMaintWindows().catch(function () {}));
       jobs.push(request("/api/v1/maintenance/decisions").then(function (d) { state.maintDecisions = d || null; },

@@ -401,6 +401,10 @@ func (s *Store) retentionSweep(policy RetentionPolicy) {
 	}
 }
 
+// RetentionInForce is the policy the retention sweep runs with, or nil before
+// it has started.
+func (s *Store) RetentionInForce() *RetentionPolicy { return s.retentionInForce.Load() }
+
 // StartRetention prunes once at startup and then on a ticker, and returns a
 // function that stops it. Startup matters: a hub that has been running without
 // retention has the whole backlog to clear. It also starts the background
@@ -411,6 +415,7 @@ func (s *Store) StartRetention(policy RetentionPolicy, every time.Duration) func
 	}
 	stop := make(chan struct{})
 	s.coldDir = policy.ColdDir
+	s.retentionInForce.Store(&policy)
 
 	go func() {
 		s.migrateLegacyEvents(policy, stop)

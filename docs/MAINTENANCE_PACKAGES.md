@@ -25,7 +25,8 @@ packages but small: a handful of machines, one owner, no new stores.
   `.sh`) and `"role"` (`maintenance_mode` or `reboot`, below). A package runs only on
   hosts of its platform.
   Security compliance packages are the same system with `category:
-  "security"`; none ship yet.
+  "security"`: `windows-audit`, `windows-security-baseline` and
+  `linux-security-baseline` (see "Posture").
 - **Execution = an ordinary `script_exec` job**, authorized like any other
   script run: from the console, from `ominullctl maint run` or from the
   schedule, the hub signs the grants on the
@@ -597,3 +598,40 @@ latest runs (`ominull.decisions.playbook.<id>`,
 
 Tagging detector events raised while a package runs ("during maintenance"):
 the agent has to mark the job's process tree, which needs an agent release.
+
+## Posture
+
+The control packs in `hub/pkg/posture/packs_seed.json` say what to check and why;
+the packages above do the checking. A pack is data: `PUT /api/v1/posture/packs`
+replaces it on a hub (validated, audited) and `DELETE` goes back to the shipped
+rows; a new control needs no hub release unless a package has to learn a new check.
+
+A control's answer comes from one of three places, per platform where it differs:
+
+- **A package control**: the latest run that reported that control id. Results
+  stay in the run records; posture stores no results of its own.
+- **Something the hub knows** (`hub` in the row): agent reporting, isolation ready,
+  checked recently, evidence retention, the detection floor drill.
+- **A person** (`attest`): `POST /api/v1/posture/attest`, with what shows it and how
+  many days it holds; a lapsed answer reads as no answer.
+
+`GET /api/v1/posture[?endpoint_id=][&download=1]` scores every pack: pass against
+fail. No answer, not applicable and an accepted risk stay out of the percent, and a
+pack with neither pass nor fail has no percent rather than zero. A machine's failing
+answer takes the same accepted risk as any other control (a hub answer's id is
+`hub.<kind>`, e.g. `hub.isolation_ready`). Answers about the hub itself (retention,
+the drill) have no machine to accept them on, so they are fixed or changed in the
+pack. The Security tab and the asset card show
+it, and `ominull.posture` adds one Status row. That row only rises (to the board,
+never a page) when a critical control fails.
+
+**Machines that take no hub-signed scripts.** Nearly all the Linux fleet runs the
+`respond` profile or a host lock, so the hub cannot run a package there, and posture
+does not widen a profile to get an answer. `scripts/posture-collect.sh` runs
+`linux-security-baseline` daily over the same root routes as
+`scripts/update-linux-agents.sh` and posts each result to
+`POST /api/v1/maintenance/host-run` (admin, audited). The hub keeps it only as an
+audit of the library's current version, on a machine that package fits, stored as an
+ordinary finished job. `linux-security-baseline` stays off in the hub's schedule,
+because a scheduled run there would only be refused. A machine that is off is
+skipped, and its last answer goes stale after `stale_days`.

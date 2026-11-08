@@ -4144,6 +4144,23 @@ td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywh
 .role-note { margin: var(--s-2) 0 0; }
 /* Maintenance: a package's description opens from its name. */
 .pkg-desc summary { cursor: pointer; list-style: none; }
+.pst-pack summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2, 8px); cursor: pointer; list-style: none; padding: 4px 0; }
+.pst-pack summary::-webkit-details-marker { display: none; }
+.pst-pack summary::before { content: "\25B8"; color: var(--ink-3); }
+.pst-pack[open] summary::before { content: "\25BE"; }
+.pst-src { margin-left: auto; }
+.pst-dots { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.pst-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--ink-3); flex: none; }
+.pst-dot[data-state="pass"] { background: var(--ok); border-color: var(--ok); }
+.pst-dot[data-state="fail"] { background: var(--crit); border-color: var(--crit); }
+.pst-dot[data-state="accepted"] { background: var(--info); border-color: var(--info); }
+.pst-dot[data-state="unknown"] { border-style: dashed; }
+.pst-dot[data-state="na"] { opacity: 0.45; }
+.pst-dot[data-stale="true"] { opacity: 0.55; }
+.pst-open, .pst-chip { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.pst-open:hover { text-decoration: underline; }
+.pst-chip { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pst-chip:hover > span:first-child { text-decoration: underline; }
 .pkg-desc summary::-webkit-details-marker { display: none; }
 .pkg-desc summary > div::after { content: "\25B8"; color: var(--ink-3); font-size: var(--t-2); }
 .pkg-desc[open] summary > div::after { content: "\25BE"; }

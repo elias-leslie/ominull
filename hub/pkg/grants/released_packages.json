@@ -19,6 +19,10 @@
   "name": "windows-privacy",
   "risk": "safe"
  },
+ "3180d979a1293dc1c385265066f74ae045d916ec9863704eb2f9ec94bfe89fc8": {
+  "name": "linux-security-baseline",
+  "risk": "safe"
+ },
  "31a7dbf97414c8b2ccdbc2570f7523b0c09d4f3f5ce96f6285fe3b23f61e92df": {
   "name": "windows-performance",
   "risk": "safe"
@@ -30,6 +34,10 @@
  "3fdbb1cbcbb54b200e3a1dea4a2a5a4547c01dad659bf695c23f7fa8fae71f41": {
   "name": "windows-debloat",
   "risk": "careful"
+ },
+ "854211d00ad8c783f6689850cf8289ed56591bebb6631427e2079de3f0d80c7d": {
+  "name": "windows-security-baseline",
+  "risk": "safe"
  },
  "8ec796a45937f7c70f5dd1ba4e11fed9c60ebab6c5d147e3ee858fc2ceefd575": {
   "name": "linux-maintenance-mode",

@@ -105,22 +105,23 @@ type settingsParamView struct {
 }
 
 type settingsPackageView struct {
-	ScriptID    string                    `json:"script_id"`
-	Name        string                    `json:"name"`
-	Title       string                    `json:"title"`
-	Description string                    `json:"description"`
-	Category    string                    `json:"category"`
-	Platform    string                    `json:"platform"`
-	Role        string                    `json:"role,omitempty"`
-	Risk        string                    `json:"risk"`
-	Reboot      bool                      `json:"reboot"`
-	Version     int                       `json:"version"`
-	Interval    string                    `json:"default_interval"`
-	Params      []settingsParamView       `json:"params"`
-	Fleet       *scripts.PackageSetting   `json:"fleet,omitempty"`
-	Endpoint    *scripts.PackageSetting   `json:"endpoint,omitempty"`
-	FleetEff    scripts.EffectiveSetting  `json:"fleet_effective"`
-	Effective   *scripts.EffectiveSetting `json:"effective,omitempty"`
+	DigestSHA256 string                    `json:"digest_sha256"`
+	ScriptID     string                    `json:"script_id"`
+	Name         string                    `json:"name"`
+	Title        string                    `json:"title"`
+	Description  string                    `json:"description"`
+	Category     string                    `json:"category"`
+	Platform     string                    `json:"platform"`
+	Role         string                    `json:"role,omitempty"`
+	Risk         string                    `json:"risk"`
+	Reboot       bool                      `json:"reboot"`
+	Version      int                       `json:"version"`
+	Interval     string                    `json:"default_interval"`
+	Params       []settingsParamView       `json:"params"`
+	Fleet        *scripts.PackageSetting   `json:"fleet,omitempty"`
+	Endpoint     *scripts.PackageSetting   `json:"endpoint,omitempty"`
+	FleetEff     scripts.EffectiveSetting  `json:"fleet_effective"`
+	Effective    *scripts.EffectiveSetting `json:"effective,omitempty"`
 }
 
 type settingsCategoryView struct {
@@ -199,7 +200,7 @@ func (s *Server) getMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 	pkgs := make([]settingsPackageView, 0, len(defs))
 	for _, d := range defs {
 		h := d.Header
-		v := settingsPackageView{ScriptID: d.Script.ID, Name: h.Name, Title: h.Title, Description: h.Description,
+		v := settingsPackageView{ScriptID: d.Script.ID, DigestSHA256: d.Version.DigestSHA256, Name: h.Name, Title: h.Title, Description: h.Description,
 			Category: h.Category, Platform: h.PlatformName(), Role: h.Role, Risk: h.Risk, Reboot: h.Reboot, Version: d.Version.Version, Interval: h.Interval,
 			Fleet: rowPtr(st, h.Name, ""), FleetEff: st.Effective(h, "")}
 		for i := range h.Params {

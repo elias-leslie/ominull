@@ -187,6 +187,60 @@ o=$(mm audit); check "mm: audit with no lock held is ok and off" '[ "$(echo "$o"
 o=$(mm revert); check "mm: revert with nothing held is ok" '[ "$(echo "$o" | field "d[\"state\"]")" = ok ]'
 o=$(mm enforce OMINULL_PARAM_HOURS=25) && rc=0 || rc=$?; check "mm: hours out of range fails before anything starts" '[ $rc -eq 1 ] && [ "$(echo "$o" | field "d[\"state\"]")" = failed ]'
 
+# ---------------------------------------------------------------- security-baseline.sh
+sb="$tmp/sb"; mkdir -p "$sb/bin" "$sb/journal"; touch "$sb/journal/x"
+relocate "$pkgdir/security-baseline.sh" "$sb/pkg.sh" "$sb/bin" -e "s|/etc/passwd|$sb/passwd|g" -e "s|/etc/shadow|$sb/shadow|g" -e "s|/var/log/journal|$sb/journal|g" -e "s|/etc/ssh/|$sb/ssh/|g"
+mkdir -p "$sb/ssh/sshd_config.d"; echo "Port 22" >"$sb/ssh/sshd_config"
+printf '#!/bin/sh\ncase "$1" in -V) echo "OpenSSH_${SB_VER:-9.6}p1 Ubuntu" >&2 ;; -T) printf "port 22\\npasswordauthentication %%s\\nkbdinteractiveauthentication no\\n" "${SB_PW:-no}" ;; esac\n' >"$sb/bin/sshd"
+printf '#!/bin/sh\necho "LISTEN 0 128 ${SB_LISTEN:-10.0.0.5:22} 0.0.0.0:*"\n' >"$sb/bin/ss"
+printf '#!/bin/sh\n[ -z "${SB_NOIP:-}" ] || exit 1\necho "1: lo inet 8.8.8.8/32 scope global"\n' >"$sb/bin/ip"
+printf '#!/bin/sh\necho "$(( $(/usr/bin/date +%%s) - ${SB_JOURNAL:-40} * 86400 )).000 host unit: line"\n' >"$sb/bin/journalctl"
+printf '#!/bin/sh\necho "${SB_VIRT:-none}"\n' >"$sb/bin/systemd-detect-virt"
+printf '#!/bin/sh\necho /\n' >"$sb/bin/findmnt"
+printf '#!/bin/sh\n[ -n "${SB_NOSNAP:-}" ] || echo "ID 5 gen 9 cgen 9 top level 5 otime $(/usr/bin/date "+%%F %%T") path snap"\n' >"$sb/bin/btrfs"
+chmod +x "$sb"/bin/*
+printf 'root:x:0:0::/root:/bin/sh\nme:x:1000:1000::/home/me:/bin/sh\n' >"$sb/passwd"
+printf 'root:!:1::::::\nme:$6$x:1::::::\n' >"$sb/shadow"
+sb_run() { env "$@" sh "$sb/pkg.sh" 2>/dev/null; }
+sb_state() { python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(next((c["state"] for c in d["detail"]["controls"] if c["id"]==sys.argv[2]),"missing"))' "$1" "$2"; }
+out=$(sb_run A=1)
+check "sb: a clean machine is ok" 'echo "$out" | grep -q "^{\"v\":1,\"state\":\"ok\""'
+for c in ssh.protocol_1_off ssh.password_auth_off ssh.trusted_networks accounts.least_privilege logs.journal_retention backups.read_only_recent; do
+	check "sb: $c passes" '[ "$(sb_state "$out" '"$c"')" = pass ]'
+done
+out=$(sb_run SB_PW=yes)
+check "sb: password login fails and drifts" '[ "$(sb_state "$out" ssh.password_auth_off)" = fail ] && echo "$out" | grep -q "\"state\":\"drift\""'
+printf 'Match User deploy\n\tPasswordAuthentication yes\n' >"$sb/ssh/sshd_config.d/x.conf"; out=$(sb_run A=1); rm "$sb/ssh/sshd_config.d/x.conf"
+check "sb: password login back on in a Match block fails" '[ "$(sb_state "$out" ssh.password_auth_off)" = fail ] && echo "$out" | grep -q "Match block"'
+out=$(sb_run SB_VER=7.5)
+check "sb: OpenSSH before 7.6 fails" '[ "$(sb_state "$out" ssh.protocol_1_off)" = fail ]'
+out=$(sb_run SB_LISTEN=8.8.8.8:22)
+check "sb: SSH on a public address fails" '[ "$(sb_state "$out" ssh.trusted_networks)" = fail ]'
+out=$(sb_run SB_LISTEN=0.0.0.0:22)
+check "sb: SSH on all addresses with a public one fails" '[ "$(sb_state "$out" ssh.trusted_networks)" = fail ]'
+out=$(sb_run SB_LISTEN=0.0.0.0:22 SB_NOIP=1)
+check "sb: addresses that cannot be read fail" '[ "$(sb_state "$out" ssh.trusted_networks)" = fail ] && echo "$out" | grep -q "check failed"'
+out=$(sb_run SB_LISTEN=10.0.0.5:2222)
+check "sb: SSH not listening does not apply" '[ "$(sb_state "$out" ssh.trusted_networks)" = na ]'
+out=$(sb_run SB_JOURNAL=14)
+check "sb: a short journal fails" '[ "$(sb_state "$out" logs.journal_retention)" = fail ] && echo "$out" | grep -q "reaches back 14 days"'
+out=$(sb_run SB_JOURNAL=14 OMINULL_PARAM_JOURNAL_MIN_DAYS=7)
+check "sb: the journal target is a parameter" '[ "$(sb_state "$out" logs.journal_retention)" = pass ]'
+rm "$sb/journal/x"; out=$(sb_run A=1); touch "$sb/journal/x"
+check "sb: a journal in memory only fails" '[ "$(sb_state "$out" logs.journal_retention)" = fail ]'
+out=$(sb_run SB_VIRT=lxc)
+check "sb: a guest does not answer for its backups" '[ "$(sb_state "$out" backups.read_only_recent)" = na ]'
+out=$(sb_run SB_NOSNAP=1)
+check "sb: no read-only snapshot fails" '[ "$(sb_state "$out" backups.read_only_recent)" = fail ]'
+cp "$sb/passwd" "$sb/passwd.ok"; echo 'toor:x:0:0::/root:/bin/sh' >>"$sb/passwd"; out=$(sb_run A=1); cp "$sb/passwd.ok" "$sb/passwd"
+check "sb: a second user id 0 fails" '[ "$(sb_state "$out" accounts.least_privilege)" = fail ] && echo "$out" | grep -q toor'
+cp "$sb/shadow" "$sb/shadow.ok"; echo 'nopw::1::::::' >>"$sb/shadow"; out=$(sb_run A=1); cp "$sb/shadow.ok" "$sb/shadow"
+check "sb: an empty password fails" '[ "$(sb_state "$out" accounts.least_privilege)" = fail ] && echo "$out" | grep -q nopw'
+out=$(sb_run OMINULL_PARAM_MODE=enforce)
+check "sb: enforce changes nothing and answers na" 'echo "$out" | grep -q "\"state\":\"na\"" && echo "$out" | grep -q "\"controls\":\[\]"'
+if sb_run OMINULL_PARAM_JOURNAL_MIN_DAYS=0x >"$sb/bad"; then rc=0; else rc=$?; fi
+check "sb: a bad parameter fails the run" '[ "$rc" = 1 ] && grep -q "\"state\":\"failed\"" "$sb/bad"'
+
 # ---------------------------------------------------------------- manifest and guard
 man=$(python3 -I "$pkgdir/../../scripts/package-manifest.py" "$pkgdir")
 check "manifest lists every Linux package with the sha256 of its file" 'for f in "$pkgdir"/*.sh; do n=$(basename "$f"); s=$(sha256sum "$f" | cut -d" " -f1); echo "$man" | grep -q "\"sha256\": \"$s\"" || exit 1; done'

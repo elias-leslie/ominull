@@ -341,6 +341,31 @@ var ruleNames = map[string]string{
 	"ENDPOINT_SILENT":       "agent went quiet",
 }
 
+// agentWatch says whether an agent should be reporting now, how long it may be
+// quiet and how long it has been. newest maps a short hostname to its newest
+// endpoint: Aico's word on a machine applies only to that one.
+func agentWatch(ep storage.Endpoint, now time.Time, newest map[string]string, fleet storage.AicoFleet, cfg storage.DetectionTuning) (allowance, age time.Duration, watched bool) {
+	base := feedWorkstationQuiet
+	if ep.RoleTag == "server" {
+		base = feedServerQuiet
+	}
+	age = now.Sub(ep.LastSeenAt)
+	allowance, watched = ep.QuietAllowance(base)
+	if newest[storage.ShortHost(ep.Hostname)] == ep.ID {
+		// Aico owns whether the machine should be running.
+		switch m, word := fleet.Word(ep.Hostname, now, cfg); word {
+		case storage.AicoSaysOff:
+			watched = false
+		case storage.AicoSaysUp:
+			allowance, watched = base, true
+			if m.UpSince.After(ep.LastSeenAt) { // a machine just up has its grace
+				age = now.Sub(m.UpSince)
+			}
+		}
+	}
+	return allowance, age, watched
+}
+
 func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 	list, err := s.store.ListEndpoints("")
 	if err != nil {
@@ -362,26 +387,9 @@ func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 		if ep.Presence != "" && ep.Presence != storage.PresenceAlwaysOn {
 			presence[ep.ID] = ep.Presence
 		}
-		age := now.Sub(ep.LastSeenAt)
 		res := feedResource{Type: "endpoint", Name: ep.Hostname, UID: ep.ID}
 		server := ep.RoleTag == "server"
-		base := feedWorkstationQuiet
-		if server {
-			base = feedServerQuiet
-		}
-		allowance, watched := ep.QuietAllowance(base)
-		if newest[storage.ShortHost(ep.Hostname)] == ep.ID {
-			// Aico owns whether the machine should be running.
-			switch m, word := fleet.Word(ep.Hostname, now, cfg); word {
-			case storage.AicoSaysOff:
-				watched = false
-			case storage.AicoSaysUp:
-				allowance, watched = base, true
-				if m.UpSince.After(ep.LastSeenAt) { // a machine just up has its grace
-					age = now.Sub(m.UpSince)
-				}
-			}
-		}
+		allowance, age, watched := agentWatch(ep, now, newest, fleet, cfg)
 		switch {
 		case !watched || age < allowance:
 			continue
@@ -575,6 +583,8 @@ func (s *Server) healthFindings(now time.Time) []feedFinding {
 	add("maintenance_runs", rnf, err)
 	cpf, err := s.complianceFindings(now)
 	add("maintenance_compliance", cpf, err)
+	pst, err := s.postureFinding(now)
+	add("posture", []feedFinding{pst}, err)
 	// An unsound tuning row is reported even when the change log cannot be read.
 	df, err := s.detectionPolicySection(now)
 	findings = append(findings, df...)
