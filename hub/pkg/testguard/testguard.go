@@ -1,7 +1,8 @@
 // Package testguard keeps tests off the machine's real privilege and service
 // paths. A test that reaches systemd-run, a changing systemctl verb, pkexec,
 // sudo, su, doas or run0 pops password dialogs on a workstation (and could
-// change real units). Install puts look-alikes first in PATH: they record the
+// change real units); tmux, ssh and the like reach real sessions and machines.
+// Install puts look-alikes first in PATH: they record the
 // call and exit 99. Read-only systemctl verbs (is-active, is-enabled, show,
 // status, list-*), after any leading options, pass through to the real one.
 // TestMain calls Install and then exits with Finish(code), which turns a
@@ -16,13 +17,17 @@ import (
 	"strings"
 )
 
-var blocked = []string{"systemd-run", "pkexec", "sudo", "su", "doas", "run0", "machinectl"}
+var blocked = []string{"systemd-run", "pkexec", "sudo", "su", "doas", "run0", "machinectl",
+	"tmux", "ssh", "scp", "rsync", "qm", "pct", "reboot", "shutdown", "poweroff"}
 
 var hits string
 
 // Install prepends the guard directory to PATH and returns a function that
 // removes it. Call it before running tests.
 func Install() (cleanup func()) {
+	// A plain tmux inside a session reaches that session's server through $TMUX.
+	_ = os.Unsetenv("TMUX")
+	_ = os.Unsetenv("TMUX_PANE")
 	dir, err := os.MkdirTemp("", "ominull-testguard-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "testguard:", err)

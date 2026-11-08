@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
+// Every probe is harmless even if the guard breaks: made-up units, read-only commands.
 func TestGuardBlocksAndRecords(t *testing.T) {
 	cleanup := Install()
 	defer cleanup()
-	for _, c := range [][]string{{"systemd-run", "--unit=x", "true"}, {"sudo", "-n", "true"}, {"pkexec", "true"}, {"systemctl", "stop", "x.service"}, {"systemctl", "--no-ask-password", "restart", "x.service"}} {
+	for _, c := range [][]string{{"systemd-run", "--unit=x", "true"}, {"sudo", "-n", "true"}, {"pkexec", "true"}, {"systemctl", "stop", "x.service"}, {"systemctl", "--no-ask-password", "restart", "x.service"}, {"tmux", "-V"}, {"ssh", "-V"}} {
 		err := exec.Command(c[0], c[1:]...).Run()
 		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 99 {
 			t.Errorf("%v: want exit 99, got %v", c, err)
