@@ -1,0 +1,8 @@
+# Offline, vendored supply chain, as for the screen crates: exact versions in
+# Cargo.lock, all sources under ./vendor (ignored by git; scripts/build-hub-input.sh
+# fetches them on a fresh CI checkout), no network at build time.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

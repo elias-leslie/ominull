@@ -1,0 +1,35 @@
+# Hub-input parsing and signature verification for the C agent, linked as a
+# static library through a C ABI (agent/include/hub_input.h). Standalone
+# workspace; scripts/build-hub-input.sh builds it for Linux and Windows.
+[package]
+name = "ominull-hubinput"
+version = "0.1.0"
+edition = "2021"
+publish = false
+rust-version = "1.82"
+
+[lib]
+name = "ominull_hubinput"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+ecdsa = { version = "=0.16.9", default-features = false, features = ["der", "verifying"] }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast"] }
+p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "ecdsa", "sha256"] }
+sha2 = { version = "=0.10.9", default-features = false, features = ["compress"] }
+
+[workspace]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+debug = false
+strip = "debuginfo"
+
