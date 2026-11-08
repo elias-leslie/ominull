@@ -29,6 +29,7 @@
 #define OMINULL_AGENT_TRUST_H
 
 #include "response_dispatcher.h"
+#include "hub_input.h"
 #include <strings.h>
 #include <stdarg.h>
 #include <time.h>
@@ -101,6 +102,9 @@ static inline const char* TJ_Ws(const char* p, const char* end) {
 }
 
 static inline const char* TJ_SkipString(const char* p, const char* end) {
+#ifdef HI_TRUST
+    return hi_tj_skip_string(p, end);
+#else
     if (p >= end || *p != '"') return NULL;
     p++;
     while (p < end) {
@@ -114,9 +118,13 @@ static inline const char* TJ_SkipString(const char* p, const char* end) {
         p++;
     }
     return NULL;
+#endif
 }
 
 static inline const char* TJ_SkipValue(const char* p, const char* end, int depth) {
+#ifdef HI_TRUST
+    return hi_tj_skip_value(p, end, depth);
+#else
     p = TJ_Ws(p, end);
     if (p >= end || depth > 16) return NULL;
     if (*p == '"') return TJ_SkipString(p, end);
@@ -146,12 +154,16 @@ static inline const char* TJ_SkipValue(const char* p, const char* end, int depth
     const char* s = p;
     while (p < end && (isalnum((unsigned char)*p) || *p == '-' || *p == '+' || *p == '.')) p++;
     return p > s ? p : NULL;
+#endif
 }
 
 /* TJ_Member finds key in the object starting at obj (which must point at '{').
  * Returns 1 and the value span when found, 0 when absent, -1 when the object
  * is malformed or breaks the key rules above. */
 static inline int TJ_Member(const char* obj, const char* end, const char* key, const char** v, const char** vend) {
+#ifdef HI_TRUST
+    return hi_tj_member(obj, end, key, v, vend);
+#else
     const char* p = TJ_Ws(obj, end);
     if (p >= end || *p != '{') return -1;
     p = TJ_Ws(p + 1, end);
@@ -189,10 +201,14 @@ static inline int TJ_Member(const char* obj, const char* end, const char* key, c
         if (*p == '}') return found;
         return -1;
     }
+#endif
 }
 
 /* A string with no escapes, copied out; false for anything else. */
 static inline bool TJ_Plain(const char* v, const char* vend, char* out, size_t cap) {
+#ifdef HI_TRUST
+    return hi_tj_plain(v, vend, out, cap);
+#else
     if (!v || v >= vend || *v != '"') return false;
     const char* e = TJ_SkipString(v, vend);
     if (!e) return false;
@@ -201,10 +217,14 @@ static inline bool TJ_Plain(const char* v, const char* vend, char* out, size_t c
     memcpy(out, v + 1, len);
     out[len] = '\0';
     return true;
+#endif
 }
 
 /* An array of plain strings; null reads as empty. Returns the count or -1. */
 static inline int TJ_PlainArray(const char* v, const char* vend, char out[][64], int cap) {
+#ifdef HI_TRUST
+    return hi_tj_plain_array(v, vend, out, cap);
+#else
     const char* p = TJ_Ws(v, vend);
     if (vend - p >= 4 && strncmp(p, "null", 4) == 0) return 0;
     if (p >= vend || *p != '[') return -1;
@@ -222,9 +242,13 @@ static inline int TJ_PlainArray(const char* v, const char* vend, char out[][64],
         if (*p == ']') return n;
         return -1;
     }
+#endif
 }
 
 static inline bool TJ_Int(const char* v, const char* vend, int64_t* out) {
+#ifdef HI_TRUST
+    return hi_tj_int(v, vend, out);
+#else
     const char* p = TJ_Ws(v, vend);
     bool neg = false;
     if (p < vend && *p == '-') { neg = true; p++; }
@@ -236,6 +260,7 @@ static inline bool TJ_Int(const char* v, const char* vend, int64_t* out) {
     }
     *out = neg ? -x : x;
     return true;
+#endif
 }
 
 static inline bool TJ_MemberPlain(const char* obj, const char* end, const char* key, char* out, size_t cap) {
@@ -293,6 +318,9 @@ static inline bool Trust_UpdateVersionAdmissible(const char* offered, const char
 }
 
 static inline bool Trust_IsIPLiteral(const char* s) {
+#ifdef HI_TRUST
+    return hi_trust_is_ip_literal(s);
+#else
     if (!s || !*s || strlen(s) >= 64) return false;
     bool colon = strchr(s, ':') != NULL;
     for (const char* p = s; *p; p++) {
@@ -329,6 +357,7 @@ static inline bool Trust_IsIPLiteral(const char* s) {
         }
     }
     return colons >= 2 && colons <= 7 && (doubles == 1 || colons == 7);
+#endif
 }
 
 /* Trust_IsAllowEntry: one isolation allow-list entry, an address or an
@@ -341,6 +370,9 @@ static inline bool Trust_IsIPLiteral(const char* s) {
 #define TRUST_ALLOW_MIN_V4 8
 #define TRUST_ALLOW_MIN_V6 32
 static inline bool Trust_IsAllowEntry(const char* s) {
+#ifdef HI_TRUST
+    return hi_trust_is_allow_entry(s);
+#else
     if (!s || !*s || strlen(s) >= 64) return false;
     const char* slash = strchr(s, '/');
     if (!slash) return Trust_IsIPLiteral(s);
@@ -371,6 +403,7 @@ static inline bool Trust_IsAllowEntry(const char* s) {
     if (!global && !ula) return false;
     if (g0 == 0x2002 || (g0 == 0x2001 && g1 == 0)) return false;
     return true;
+#endif
 }
 
 /* Trust_PublicAddress: a globally routable unicast address. Threat
@@ -379,6 +412,9 @@ static inline bool Trust_IsAllowEntry(const char* s) {
  * link-local, CGNAT, multicast or reserved ranges, where a hub could cut a
  * host off its own LAN, gateway or resolver. */
 static inline bool Trust_PublicAddress(const char* s) {
+#ifdef HI_TRUST
+    return hi_trust_public_address(s);
+#else
     if (!Trust_IsIPLiteral(s)) return false;
     if (!strchr(s, ':')) {
         unsigned a = 0, b = 0, c = 0, d = 0;
@@ -403,6 +439,7 @@ static inline bool Trust_PublicAddress(const char* s) {
     if ((g & 0xe000) != 0x2000) return false;                    /* only 2000::/3 is global unicast */
     if (g == 0x2001 && g2 == 0x0db8) return false;               /* documentation */
     return true;
+#endif
 }
 
 static inline bool Trust_HexKey(const char* hex, uint8_t out[32]) {
@@ -427,6 +464,7 @@ typedef struct {
     char  signer_key_id[65];
     char  signature[129];
 } TrustManifest;
+_Static_assert(sizeof(TrustManifest) == 664, "TrustManifest differs from agent/hubinput/src/abi.rs");
 
 typedef struct {
     char    ip[64];
@@ -442,6 +480,7 @@ typedef struct {
     char protocol[8];
     int  port;
 } TrustRule;
+_Static_assert(sizeof(TrustRule) == 92, "TrustRule differs from agent/hubinput/src/abi.rs");
 
 /* One pinned host-authority key. role tap: any script_exec; auto: only
  * packages on the host's allow-list, in an allowed mode. */
@@ -472,6 +511,7 @@ typedef struct {
     char    id[17];
     uint8_t xy[64];          /* raw uncompressed point, X then Y, no 0x04 */
 } TrustRoutineKey;
+_Static_assert(sizeof(TrustRoutineKey) == 81, "TrustRoutineKey differs from agent/hubinput/src/abi.rs");
 
 /* Trust_ReleaseVerifier checks a DER ECDSA-P256/SHA-256 signature over msg
  * against the release key compiled into this agent (openssl on Linux, CNG on
@@ -706,6 +746,9 @@ static inline bool Trust_ManifestVerify(const TrustContext* t, const TrustManife
 /* Trust_ParseManifest reads the wire object (heartbeat "capability_manifest"
  * or the pinned copy, which is the same JSON). */
 static inline bool Trust_ParseManifest(const char* v, const char* ve, TrustManifest* m) {
+#ifdef HI_TRUST
+    return hi_trust_parse_manifest(v, ve, m);
+#else
     memset(m, 0, sizeof(*m));
     const char *cv, *cve, *x, *xe;
     int64_t ver = 0;
@@ -728,6 +771,7 @@ static inline bool Trust_ParseManifest(const char* v, const char* ve, TrustManif
     m->capCount = n;
     m->have = true;
     return true;
+#endif
 }
 
 static inline void Trust_ManifestJSON(const TrustManifest* m, char* out, size_t cap) {
@@ -954,18 +998,25 @@ static inline void Trust_LoadHostAuthority(TrustContext* t) {
  * ------------------------------------------------------------------------- */
 
 static inline bool Trust_RuleValid(const TrustRule* r) {
+#ifdef HI_TRUST
+    return hi_trust_rule_valid(r);
+#else
     if (!r->service[0]) return false;
     for (const char* c = r->service; *c; c++)
         if (!(islower((unsigned char)*c) || isdigit((unsigned char)*c) || *c == '-' || *c == '_')) return false;
     if (!Trust_IsIPLiteral(r->destination)) return false;
     if (strcmp(r->protocol, "udp") != 0 && strcmp(r->protocol, "tcp") != 0) return false;
     return r->port >= 1 && r->port <= 65535;
+#endif
 }
 
 /* Trust_ParseRules reads [{"destination","port","protocol","service"},...].
  * Returns the count, or -1 when anything in it is unreadable or invalid: an
  * exception list is taken whole or not at all. */
 static inline int Trust_ParseRules(const char* v, const char* ve, TrustRule* out, int cap) {
+#ifdef HI_TRUST
+    return hi_trust_parse_rules(v, ve, out, cap);
+#else
     const char* p = TJ_Ws(v, ve);
     if (p >= ve || *p != '[') return -1;
     p = TJ_Ws(p + 1, ve);
@@ -992,6 +1043,7 @@ static inline int Trust_ParseRules(const char* v, const char* ve, TrustRule* out
         if (*p == ']') return n;
         return -1;
     }
+#endif
 }
 
 static inline bool Trust_SaveStateFrom(TrustContext* t, TrustState* s) {
@@ -1371,6 +1423,9 @@ static inline bool Trust_LowerHexN(const char* s, size_t n) {
  * it; anything else (upper case, spaces, a fifth key, unsorted or repeated
  * ids, a wrong length) is refused. */
 static inline bool Trust_ParseRoutineList(const char* s, TrustRoutineKey out[TRUST_MAX_ROUTINE_KEYS], int* count) {
+#ifdef HI_TRUST
+    return hi_trust_parse_routine_list(s, out, count);
+#else
     *count = 0;
     if (!s) return false;
     if (!*s) return true;
@@ -1391,11 +1446,15 @@ static inline bool Trust_ParseRoutineList(const char* s, TrustRoutineKey out[TRU
         p += TRUST_ROUTINE_ENTRY_LEN + 1;
         if (!*p) return false;   /* a trailing comma */
     }
+#endif
 }
 
 /* A JSON number that is exactly a decimal integer >= 1 (no sign, fraction or
  * exponent). */
 static inline bool Trust_PositiveInt(const char* v, const char* ve, int64_t* out) {
+#ifdef HI_TRUST
+    return hi_trust_positive_int(v, ve, out);
+#else
     const char* p = TJ_Ws(v, ve);
     while (ve > p && (ve[-1] == ' ' || ve[-1] == '\t' || ve[-1] == '\n' || ve[-1] == '\r')) ve--;
     if (p >= ve || *p == '0') return false;
@@ -1406,6 +1465,7 @@ static inline bool Trust_PositiveInt(const char* v, const char* ve, int64_t* out
     }
     *out = x;
     return x >= 1;
+#endif
 }
 
 /* Trust_RoutineVerify: the statement for epoch and list verifies against the
@@ -1644,6 +1704,7 @@ typedef struct {
     char ip[64];
     char version[64];
 } TrustAction;
+_Static_assert(sizeof(TrustAction) == 8076, "TrustAction differs from agent/hubinput/src/abi.rs");
 
 /* Trust_ParseBaselines finds this host's isolation exceptions in the signed
  * payload: "baselines":[{"endpoints":[...],"rules":[...]}]. The hub binds them
@@ -1651,6 +1712,9 @@ typedef struct {
  * the heartbeat's copy is never used for a signed isolation. No entry for this
  * host means none: hub and loopback only. */
 static inline const char* Trust_ParseBaselines(const char* payload, const char* end, const char* self, TrustAction* a) {
+#ifdef HI_TRUST
+    return hi_trust_parse_baselines(payload, end, self, a);
+#else
     const char *v, *ve;
     int r = TJ_Member(payload, end, "baselines", &v, &ve);
     if (r < 0) return "payload unreadable";
@@ -1684,6 +1748,7 @@ static inline const char* Trust_ParseBaselines(const char* payload, const char* 
         if (*p == ']') return NULL;
         return "isolation exceptions unreadable";
     }
+#endif
 }
 
 /* Trust_ParseAction reads the payload the authority signed and works out what it
@@ -1691,6 +1756,9 @@ static inline const char* Trust_ParseBaselines(const char* payload, const char* 
  * belong to it, so a grant for one kind can never carry another's action. */
 static inline const char* Trust_ParseAction(const char* payload, size_t len, const char* kind, const char* grantEndpoint,
                                             const char* self, TrustAction* a) {
+#ifdef HI_TRUST
+    return hi_trust_parse_action(payload, len, kind, grantEndpoint, self, a);
+#else
     memset(a, 0, sizeof(*a));
     const char* end = payload + len;
     const char *bv, *bve, *tv, *tve;
@@ -1757,6 +1825,7 @@ static inline const char* Trust_ParseAction(const char* payload, size_t len, con
         return Trust_ParseBaselines(payload, end, self, a);
     }
     return NULL;
+#endif
 }
 
 /* Trust_VerifyGrantCore checks one grant against its payload bytes and the key
@@ -1792,6 +1861,9 @@ static inline const char* Trust_VerifyGrantCore(const TrustContext* t, const Res
 
 /* Trust_ReadGrantObject parses {"grant":{...},"payload_b64":"..."}. */
 static inline bool Trust_ReadGrantObject(const char* v, const char* ve, ResponseGrant* g, uint8_t* payload, size_t* plen) {
+#ifdef HI_TRUST
+    return hi_trust_read_grant_object(v, ve, g, payload, plen);
+#else
     const char *gv, *gve;
     char b64[(TRUST_MAX_PAYLOAD / 3 + 2) * 4 + 4];
     if (TJ_Member(v, ve, "grant", &gv, &gve) != 1) return false;
@@ -1807,6 +1879,7 @@ static inline bool Trust_ReadGrantObject(const char* v, const char* ve, Response
     if (n == 0 || n >= TRUST_MAX_PAYLOAD) return false;
     *plen = n;
     return true;
+#endif
 }
 
 static inline TrustMeshSlot* Trust_MeshSlot(TrustState* s, const char* ip, bool create) {
