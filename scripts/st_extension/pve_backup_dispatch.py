@@ -58,6 +58,7 @@ SECRET_REQUIRED = {"var/lib/ominull/evidence.key", "var/lib/ominull/evidence/rec
                    "var/lib/ominull/grants/keys/default#auto-isolate.key",
                    "var/lib/ominull/grants/keys/default#policy.key",
                    "var/lib/ominull/grants/trust_epochs.json",
+                   "var/lib/ominull/grants/manifests.json",
                    "opt/ominull/bin/certs/ca.key", "opt/ominull/bin/certs/server.key",
                    "etc/ominull/hub.env", "etc/ominull/admin.key"}
 OPTIONAL_WAL = {"var/lib/ominull/ominull.db-wal"}

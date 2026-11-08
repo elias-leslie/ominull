@@ -101,6 +101,23 @@ func Open(cfg Config) (*Signer, error) {
 			}
 		}
 	}
+	for _, name := range []string{manifestsFile, trustEpochsFile} {
+		path := filepath.Join(cfg.StateDir, name)
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if cfg.RequireKeys {
+			return nil, fmt.Errorf("a trust bundle is signed but %s is missing: restore it; starting its numbers over would have agents refuse what the hub signs", path)
+		}
+		// Written on the first run, so a later loss is a loss and never a first run.
+		empty := "{}"
+		if name == manifestsFile {
+			empty = "[]"
+		}
+		if err := writeDurable(path, []byte(empty)); err != nil {
+			return nil, fmt.Errorf("create %s: %w", path, err)
+		}
+	}
 	return s, nil
 }
 

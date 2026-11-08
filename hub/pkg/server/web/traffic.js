@@ -391,16 +391,21 @@
         el("span", { class: "tf-stat", "data-tone": tone || "", title: tip }, iconId ? icon(iconId) : null, el("span", { text }), el("span", { class: "tf-sr", text: " — " + tip }));
       const f = filter();
       const narrowed = !!(cv && (f.q || f.mark || f.dir || f.session));
+      // No flow with a byte counter means the amount is unknown, not zero.
+      const amount = (n, measured) => (measured ? bytes(n) : "?");
+      const unmeasured = "No flow here has a byte counter, so the amount is unknown";
       if (narrowed) {
+        const m = Number(cv.matching_measured_flows) || 0;
         summary.append(
-          item(null, "↓ " + bytes(cv.matching_bytes_in), "Received by the conversations shown (flows with a byte counter)"),
-          item(null, "↑ " + bytes(cv.matching_bytes_out), "Sent by the conversations shown (flows with a byte counter)"),
+          item(null, "↓ " + amount(cv.matching_bytes_in, m), m ? "Received by the conversations shown (flows with a byte counter)" : unmeasured),
+          item(null, "↑ " + amount(cv.matching_bytes_out, m), m ? "Sent by the conversations shown (flows with a byte counter)" : unmeasured),
           item(null, plural(Number(cv.matching_flows) || 0, "flow", "flows"), "Flows in the conversations shown"),
         );
       } else if (data.overview) {
+        const m = Number(ov.measured_flow_coverage) > 0;
         summary.append(
-          item(null, "↓ " + bytes(t.bytes_in), "Received in this window (flows with a byte counter)"),
-          item(null, "↑ " + bytes(t.bytes_out), "Sent in this window (flows with a byte counter)"),
+          item(null, "↓ " + amount(t.bytes_in, m), m ? "Received in this window (flows with a byte counter)" : unmeasured),
+          item(null, "↑ " + amount(t.bytes_out, m), m ? "Sent in this window (flows with a byte counter)" : unmeasured),
           item(null, plural(Number(ov.total_flows) || 0, "flow", "flows"), "Flows reported by agents and the router in this window"),
         );
         const cov = Number(ov.measured_flow_coverage) || 0;

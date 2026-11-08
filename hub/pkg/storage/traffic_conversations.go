@@ -99,6 +99,7 @@ type TrafficConversations struct {
 	Matching     int                       `json:"matching"`
 	// The matching rows' totals, for a summary that follows the filters.
 	MatchingFlows    int64                 `json:"matching_flows"`
+	MatchingMeasured int64                 `json:"matching_measured_flows"`
 	MatchingBytesIn  int64                 `json:"matching_bytes_in"`
 	MatchingBytesOut int64                 `json:"matching_bytes_out"`
 	Truncated        bool                  `json:"truncated"`
@@ -231,6 +232,7 @@ func (s *Store) QueryTrafficConversations(filter TrafficFilter, q ConversationQu
 			continue
 		}
 		out.MatchingFlows += int64(c.Flows)
+		out.MatchingMeasured += int64(c.MeasuredFlows)
 		out.MatchingBytesIn += int64(c.BytesIn)
 		out.MatchingBytesOut += int64(c.BytesOut)
 		out.Conversations = append(out.Conversations, c)

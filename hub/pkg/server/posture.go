@@ -140,6 +140,7 @@ type postureEval struct {
 	scripts  map[string][]*scripts.Script
 	latest   map[string]map[string]*response.JobRecord
 	runs     map[string]*packageRun // endpoint|package
+	lapsed   map[string]bool        // endpoint|package: a newer run failed after that one
 }
 
 func endpointPlatform(ep storage.Endpoint) string {
@@ -182,6 +183,10 @@ func (e *postureEval) packageRunFor(ep storage.Endpoint, name string) (*packageR
 			if run, err = e.s.latestControlsRun(ep, sc, latest[sc.ID], e.now, e.accepted[ep.ID]); err != nil {
 				return nil, err
 			}
+			if run != nil && latest[sc.ID].ID != run.JobID {
+				newest := derivePackageRun(latest[sc.ID], e.now).State
+				e.lapsed[key] = newest == "failed" || newest == "no_result"
+			}
 			break
 		}
 	}
@@ -206,6 +211,11 @@ func (e *postureEval) packageResult(ep storage.Endpoint, ev posture.Evidence) (p
 		switch c.State {
 		case "pass", "fixed":
 			res.State = posture.Pass
+			// A later run broke: the old pass says nothing about now. An old fail stays a fail.
+			if e.lapsed[ep.ID+"|"+ev.Package] {
+				res.State = posture.Unknown
+				res.Actual = "the latest run did not finish; the one before read " + c.Actual
+			}
 		case "fail":
 			res.State = posture.Fail
 		case "accepted":
@@ -473,7 +483,7 @@ func (s *Server) postureReport(tenant, endpointID string, now time.Time) (postur
 		return view, err
 	}
 	fleet, _ := s.store.AicoFleet()
-	e := &postureEval{s: s, now: now, catalog: catalog, accepted: s.allAcceptedRisks(), attest: s.postureAttestations(),
+	e := &postureEval{s: s, now: now, lapsed: map[string]bool{}, catalog: catalog, accepted: s.allAcceptedRisks(), attest: s.postureAttestations(),
 		newest: storage.NewestEndpoints(eps), fleet: fleet, cfg: s.store.GetDetectionTuning(),
 		scripts: map[string][]*scripts.Script{}, latest: map[string]map[string]*response.JobRecord{}, runs: map[string]*packageRun{}}
 	active := eps[:0:0]
@@ -538,6 +548,9 @@ func (s *Server) postureFinding(now time.Time) (feedFinding, error) {
 		word := p.Title + " no answers yet"
 		if p.Score.Percent != nil {
 			word = fmt.Sprintf("%s %d%%", p.Title, *p.Score.Percent)
+			if p.Score.Unknown > 0 {
+				word += fmt.Sprintf(" (%d without an answer)", p.Score.Unknown)
+			}
 		}
 		parts = append(parts, word)
 		packs[p.ID] = map[string]any{"percent": p.Score.Percent, "fail": p.Score.Fail, "unknown": p.Score.Unknown}

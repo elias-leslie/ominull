@@ -118,10 +118,6 @@ func main() {
 		err = client.cmdAgents([]string{"versions"})
 	case "agent-update":
 		err = client.cmdAgents(append([]string{"update"}, rest...))
-	case "install":
-		err = client.cmdInstall(rest)
-	case "install-errors", "reports":
-		err = client.cmdInstall(append([]string{"reports"}, rest...))
 	case "response":
 		err = client.cmdResponse(rest)
 	case "response-auth":
@@ -582,34 +578,6 @@ func (c *APIClient) cmdAgents(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("usage: ominullctl agents versions|update")
-}
-
-func (c *APIClient) cmdInstall(args []string) error {
-	id := ""
-	if len(args) > 1 {
-		id = args[1]
-	} else if len(args) == 1 && args[0] != "reports" && args[0] != "errors" && args[0] != "list" {
-		id = args[0]
-	}
-	endpoint := "/api/v1/enrolment/install-errors"
-	if id != "" {
-		endpoint += "?id=" + url.QueryEscape(id)
-	}
-	raw, err := c.doRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-	var res interface{}
-	_ = json.Unmarshal(raw, &res)
-	c.printOutput(res, func() {
-		if id != "" {
-			fmt.Printf("=== Installer Error Report: %s ===\n", id)
-		} else {
-			fmt.Println("=== Recent Installer Error Reports ===")
-		}
-		fmt.Println(string(raw))
-	})
-	return nil
 }
 
 func (c *APIClient) cmdResponse(args []string) error {
@@ -1485,7 +1453,6 @@ Fleet & CyberOps Commands:
   maint settings [ENDPOINT]               Effective package settings (fleet, or one host)
   maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]
                                           Change a fleet default or a host override
-  install reports [list|show]             Inspect bootstrap error reports
   enrol list|open|close                   LAN self-enrolment windows 
 
 Forensics & Response Commands:

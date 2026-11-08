@@ -219,11 +219,6 @@ func TestOminullctl_CommandParity(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"published"}`))
 	})
 
-	mux.HandleFunc("/api/v1/enrolment/install-errors", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"err-1","message":"curl failed"}]`))
-	})
-
 	mux.HandleFunc("/api/v1/response/jobs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"job_id":"job-1","state":"succeeded"}]`))
@@ -287,11 +282,6 @@ func TestOminullctl_CommandParity(t *testing.T) {
 	}
 	if err := client.cmdAgents([]string{"update", "all", "1.8.3"}); err != nil {
 		t.Fatalf("cmdAgents update all failed: %v", err)
-	}
-
-	// Test 7: install reports
-	if err := client.cmdInstall([]string{"reports"}); err != nil {
-		t.Fatalf("cmdInstall reports failed: %v", err)
 	}
 
 	// Test 8: response jobs list & cancel

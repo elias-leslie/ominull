@@ -158,3 +158,15 @@ func TestEgressPolicyPatchKeepsWhatItDoesNotName(t *testing.T) {
 		t.Fatalf("a named list replaces the old one: %+v", p)
 	}
 }
+
+func TestTheTenantKeyCannotListAgentSessions(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/agent-sessions", nil)
+	r.Header.Set("X-Role", "tenant")
+	w := httptest.NewRecorder()
+	srv.handleAgentSessions(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("got %d", w.Code)
+	}
+}

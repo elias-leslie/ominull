@@ -456,3 +456,36 @@ func TestHostRunFailedExit(t *testing.T) {
 		t.Fatalf("job: %v %+v", err, jobs)
 	}
 }
+
+func finishJobsFailed(t *testing.T, srv *Server, ep string) {
+	t.Helper()
+	offers, err := srv.responseStore.OfferPendingJobs("default", ep, 20, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range offers {
+		_ = srv.responseStore.AcknowledgeJob("default", ep, o.JobID, o.LeaseID, true, "")
+		if err := srv.responseStore.CompleteJob("default", ep, o.JobID, o.LeaseID, &response.JobResult{
+			JobID: o.JobID, LeaseID: o.LeaseID, State: response.StateFailed, Stderr: "script stopped"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A pass from before a broken run is not an answer about now; a fail stays a fail.
+func TestPostureALaterBrokenRunLapsesAPass(t *testing.T) {
+	t.Parallel()
+	srv := postureFixture(t)
+	w := postAdmin(srv, "/api/v1/maintenance/run", `{"endpoint_ids":["windows-lap"],"packages":["windows-security-baseline"],"mode":"audit"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("run: %d %s", w.Code, w.Body.String())
+	}
+	finishJobsFailed(t, srv, "windows-lap")
+	v := postureOf(t, srv, "")
+	if r := resultOn(t, postureControl(t, v, "remote.rdp_protected"), "windows-lap"); r.State != posture.Unknown || !strings.Contains(r.Actual, "did not finish") {
+		t.Fatalf("old pass: %+v", r)
+	}
+	if r := resultOn(t, postureControl(t, v, "auth.wdigest_off"), "windows-lap"); r.State != posture.Fail {
+		t.Fatalf("old fail: %+v", r)
+	}
+}

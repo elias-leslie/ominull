@@ -20,6 +20,11 @@ const maxAgentSessionsPosted = 500
 func (s *Server) handleAgentSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// What the owner's agent windows are called is for operators, not the tenant key.
+		if r.Header.Get("X-Role") == "tenant" {
+			writeJSONError(w, http.StatusForbidden, "operator role required")
+			return
+		}
 		list, err := s.store.ListAgentSessions()
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())

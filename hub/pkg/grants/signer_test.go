@@ -33,6 +33,7 @@ func TestOpenKeepsExistingKeys(t *testing.T) {
 	response := writeKeyFile(t, dir, "default", 1)
 	autoIso := writeKeyFile(t, dir, "default#auto-isolate", 2)
 	policy := writeKeyFile(t, dir, "default#policy", 3)
+	writeBooks(t, dir)
 	s, err := grants.Open(grants.Config{StateDir: dir, RequireKeys: true})
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +78,43 @@ func TestOpenRefusesMissingKeysOnceABundleIsSigned(t *testing.T) {
 	}
 	if _, err := grants.Open(grants.Config{StateDir: t.TempDir()}); err != nil {
 		t.Fatalf("a first run should open: %v", err)
+	}
+}
+
+func writeBooks(t *testing.T, dir string) {
+	t.Helper()
+	for name, body := range map[string]string{"manifests.json": "[]", "trust_epochs.json": "{}"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Lost manifest or epoch numbers start over at one, and every agent that pinned
+// the keys refuses what the hub signs. A first run writes them, so losing one
+// later never looks like a first run.
+func TestOpenRefusesLostBooksOnceABundleIsSigned(t *testing.T) {
+	first := t.TempDir()
+	if _, err := grants.Open(grants.Config{StateDir: first}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"manifests.json", "trust_epochs.json"} {
+		if _, err := os.Stat(filepath.Join(first, name)); err != nil {
+			t.Fatalf("a first run should write %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"manifests.json", "trust_epochs.json"} {
+		dir := t.TempDir()
+		writeKeyFile(t, dir, "default", 1)
+		writeKeyFile(t, dir, "default#auto-isolate", 2)
+		writeKeyFile(t, dir, "default#policy", 3)
+		writeBooks(t, dir)
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := grants.Open(grants.Config{StateDir: dir, RequireKeys: true}); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("a lost %s should be refused: %v", name, err)
+		}
 	}
 }
 

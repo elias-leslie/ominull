@@ -27,6 +27,9 @@ import (
 )
 
 const (
+	manifestsFile   = "manifests.json"
+	trustEpochsFile = "trust_epochs.json"
+
 	keySlotAutoIsolate = "#auto-isolate"
 	keySlotPolicy      = "#policy"
 
@@ -205,7 +208,7 @@ func newTrustEpochs(stateDir string, floor int64) *trustEpochs {
 	if stateDir == "" {
 		return e
 	}
-	e.path = filepath.Join(stateDir, "trust_epochs.json")
+	e.path = filepath.Join(stateDir, trustEpochsFile)
 	raw, err := os.ReadFile(e.path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -419,7 +422,7 @@ func newManifestBook(stateDir string) (*manifestBook, error) {
 	if stateDir == "" {
 		return b, nil
 	}
-	b.path = filepath.Join(stateDir, "manifests.json")
+	b.path = filepath.Join(stateDir, manifestsFile)
 	raw, err := os.ReadFile(b.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return b, nil
