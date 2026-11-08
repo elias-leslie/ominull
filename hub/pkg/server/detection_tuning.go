@@ -238,6 +238,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("agent baseline days", before.AgentBaselineDays, after.AgentBaselineDays)
 	add("agent upload floor", before.AgentUploadFloorMB, after.AgentUploadFloorMB)
 	add("agent upload factor", before.AgentUploadFactor, after.AgentUploadFactor)
+	add("agent upload baseline days", before.AgentUploadDays, after.AgentUploadDays)
 	add("container networks", strings.Join(before.ContainerCIDRs, ","), strings.Join(after.ContainerCIDRs, ","))
 	add("silence threshold (minutes)", before.SilenceAfterMinutes, after.SilenceAfterMinutes)
 	add("silence detection", before.SilenceOn, after.SilenceOn)

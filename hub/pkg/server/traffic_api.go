@@ -157,6 +157,7 @@ func (s *Server) handleTrafficConversations(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.settleBlockVerdicts(result)
 	writeJSON(w, http.StatusOK, result)
 }
 

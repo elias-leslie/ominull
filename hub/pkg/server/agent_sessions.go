@@ -71,6 +71,53 @@ func (s *Server) agentSessionBlocks(endpointID string) []string {
 	return policy.BlockEntries(endpointID)
 }
 
+// firstSessionBlockAgent is the first Linux agent release that holds session
+// blocks. No Windows agent holds them.
+const firstSessionBlockAgent = "1.8.122"
+
+// egressBlockHeld says whether a block rule on this endpoint really blocks: the
+// hub still sends it and the machine's agent acts on it.
+func (s *Server) egressBlockHeld(t storage.DetectionTuning, id string) bool {
+	if s.egressBlockRefusal(t, id) != nil {
+		return false
+	}
+	ep, err := s.store.GetEndpoint(id)
+	if err != nil || ep == nil || !strings.Contains(strings.ToLower(ep.OS), "linux") {
+		return false
+	}
+	return ep.DriverVersion != "" && compareVersions(ep.DriverVersion, firstSessionBlockAgent) >= 0
+}
+
+// settleBlockVerdicts turns a saved block rule's "blocks this" into "would block
+// this" on rows from a machine that isn't holding it.
+func (s *Server) settleBlockVerdicts(result *storage.TrafficConversations) {
+	t := s.store.GetDetectionTuning()
+	held := map[string]bool{}
+	settle := func(endpointID string, v *storage.EgressVerdict) *storage.EgressVerdict {
+		if v == nil || v.Action != storage.EgressBlock || !v.Live {
+			return v
+		}
+		ok, seen := held[endpointID]
+		if !seen {
+			ok = s.egressBlockHeld(t, endpointID)
+			held[endpointID] = ok
+		}
+		if ok {
+			return v
+		}
+		would := *v
+		would.Live = false
+		return &would
+	}
+	for i := range result.Conversations {
+		c := &result.Conversations[i]
+		c.Verdict = settle(c.EndpointID, c.Verdict)
+		for j := range c.Sessions {
+			c.Sessions[j].Verdict = settle(c.EndpointID, c.Sessions[j].Verdict)
+		}
+	}
+}
+
 // egressBlockTargetsLab refuses a change that would hold blocks on a machine
 // that is not a lab machine. Blocking is only proven on a throwaway lab guest; a
 // block on a machine agents work from can stop the work itself. Lab addresses are

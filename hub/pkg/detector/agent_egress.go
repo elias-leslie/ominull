@@ -53,10 +53,7 @@ import (
 // a shared CDN (OpenAI, Cloudflare) has no rule: an address any site can be fronted
 // from proves nothing.
 
-const (
-	agentUploadDays  = 14
-	agentDNSCooldown = time.Hour
-)
+const agentDNSCooldown = time.Hour
 
 // firstContactUpload is the new-place line from the tuning: what a new
 // destination must be sent (new_dest_upload_mb) within how long of first
@@ -252,7 +249,7 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 		log.Printf("[-] agent upload accounting failed for %s/%s: %v", ev.EndpointID, runtime, err)
 		return
 	}
-	p95, hours, err := e.store.AgentUploadBaseline(ev.TenantID, ev.EndpointID, runtime, now, agentUploadDays)
+	p95, hours, err := e.store.AgentUploadBaseline(ev.TenantID, ev.EndpointID, runtime, now, cfg.AgentUploadDays)
 	if err != nil {
 		return
 	}
@@ -273,7 +270,7 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 			ID: uuid.New().String(), TenantID: ev.TenantID, EndpointID: ev.EndpointID, Hostname: endpoint.Hostname,
 			AnomalyType: "AGENT_UPLOAD_VOLUME", Technique: "T1567", Severity: "HIGH",
 			Title:       fmt.Sprintf("%s has sent %s this hour", runtime, humanBytes(total)),
-			Description: fmt.Sprintf("Agent runtime %s uploaded %s in one hour; its 95th-percentile hour over the last %d days is %s (%d hours with uploads), and the threshold is %s.", runtime, humanBytes(total), agentUploadDays, humanBytes(p95), hours, humanBytes(threshold)),
+			Description: fmt.Sprintf("Agent runtime %s uploaded %s in one hour; its 95th-percentile hour over the last %d days is %s (%d hours with uploads), and the threshold is %s.", runtime, humanBytes(total), cfg.AgentUploadDays, humanBytes(p95), hours, humanBytes(threshold)),
 			Details:     fmt.Sprintf("Runtime: %s | Hour total: %s | Baseline p95: %s over %d hours | Threshold: %s | Last destination: %s:%d (%s)", runtime, humanBytes(total), humanBytes(p95), hours, humanBytes(threshold), ev.DstIP, ev.DstPort, firstNonEmpty(dest, "-")),
 			ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
 		})

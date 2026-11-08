@@ -179,7 +179,7 @@ func (s *Store) PruneOldData(policy RetentionPolicy) (map[string]int64, error) {
 	}
 
 	// agent_egress_hourly keys its row as an epoch hour; the baseline reads
-	// two weeks of it, and it goes with the profiles it summarises.
+	// agent_upload_days of it, and it goes with the profiles it summarises.
 	if policy.CommProfiles > 0 {
 		n, err := s.PruneAgentUploads(policy.CommProfiles)
 		if err != nil {

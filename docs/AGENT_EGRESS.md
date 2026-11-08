@@ -39,7 +39,7 @@ Proven on a lab VM with real Codex and a real tmux window on 2026-11-08: the blo
 
 - A session started since the last heartbeat isn't blocked until the next one.
 - A process moved out of the session's cgroup (`systemd-run`, `docker run`) escapes the block, and a socket is matched by the cgroup it was created in.
-- A Traffic row says **blocks this** from the saved rule. An old agent ignores blocks without saying so, and a refusal shows only on the machine page.
+- A Traffic row says **blocks this** only for a Linux machine on 1.8.122 or later that the hub still sends the rule to; otherwise it says **would block this**. That reads the agent's version, not its answer: a refusal shows only on the machine page.
 - Cold storage keeps hourly flow totals without the session, so which session made a connection is only known while the raw flows are kept.
 - Flows are seen on the machine that made them, so what an agent does over `ssh` on another host has no session there unless the agent's own connection is the row you're reading.
 - This is attribution, not authentication. A process that scrubs its environment or installs itself at an agent's path can change what it's called. It's for seeing and limiting our own agents, not for containing a hostile one.

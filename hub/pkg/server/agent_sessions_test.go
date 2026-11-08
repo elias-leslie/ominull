@@ -170,3 +170,39 @@ func TestTheTenantKeyCannotListAgentSessions(t *testing.T) {
 		t.Fatalf("got %d", w.Code)
 	}
 }
+
+func TestTrafficSaysBlocksOnlyWhereTheBlockIsHeld(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	lab := storage.Endpoint{ID: "lab-1", TenantID: "default", Hostname: "lab", IP: "10.20.0.9", Status: "online",
+		RoleTag: "lab", OS: "Linux", DriverVersion: firstSessionBlockAgent}
+	if err := store.UpsertEndpoint(lab); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := tuningBody(t, srv, http.MethodPost, `{"agent_egress_policy":{"mode":"enforce","block_endpoints":["lab-1"],"rules":[{"id":"b","action":"block","cidrs":["203.0.113.0/24"]}]}}`); code != http.StatusOK {
+		t.Fatalf("save: %d %v", code, body)
+	}
+	saysBlocks := func() bool {
+		row := storage.TrafficConversation{EndpointID: "lab-1", Verdict: &storage.EgressVerdict{Action: storage.EgressBlock, Rule: "b", Live: true}}
+		result := &storage.TrafficConversations{Conversations: []storage.TrafficConversation{row}}
+		srv.settleBlockVerdicts(result)
+		return result.Conversations[0].Verdict.Live
+	}
+	if !saysBlocks() {
+		t.Fatal("a lab Linux agent that holds blocks should read as blocking")
+	}
+	for name, change := range map[string]func(e *storage.Endpoint){
+		"old agent":    func(e *storage.Endpoint) { e.DriverVersion = "1.8.121" },
+		"Windows":      func(e *storage.Endpoint) { e.OS = "Windows 11" },
+		"left the lab": func(e *storage.Endpoint) { e.RoleTag = "agent" },
+	} {
+		ep := lab
+		change(&ep)
+		if err := store.UpsertEndpoint(ep); err != nil {
+			t.Fatal(err)
+		}
+		if saysBlocks() {
+			t.Errorf("%s: must read as would block", name)
+		}
+	}
+}

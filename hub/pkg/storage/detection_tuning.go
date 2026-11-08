@@ -81,6 +81,8 @@ type DetectionTuning struct {
 	// AgentEgressPolicy says what each agent session may reach (agent_egress_policy.go).
 	AgentEgressPolicy AgentEgressPolicy `json:"agent_egress_policy"`
 	AgentUploadFactor int               `json:"agent_upload_factor"`
+	// AgentUploadDays is how far back an ordinary hour's upload is read from.
+	AgentUploadDays int `json:"agent_upload_days"`
 
 	// AgentHeavyEndpoints and AgentHeavyRoles name the endpoints (by id) and
 	// role tags where AI agents run programs and open connections all day.
@@ -213,6 +215,7 @@ func defaultDetectionTuning() DetectionTuning {
 		AgentBaselineDays:  7,
 		AgentUploadFloorMB: 100,
 		AgentUploadFactor:  5,
+		AgentUploadDays:    14,
 
 		BeaconOn:          true,
 		BeaconMinSamples:  12,
@@ -473,6 +476,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AgentBaselineDays = clampInt(t.AgentBaselineDays, 1, 90, 7)
 	t.AgentUploadFloorMB = clampInt(t.AgentUploadFloorMB, 1, 100000, 100)
 	t.AgentUploadFactor = clampInt(t.AgentUploadFactor, 2, 100, 5)
+	t.AgentUploadDays = clampInt(t.AgentUploadDays, 1, 90, 14)
 	t.LabCIDRs = tidyList(t.LabCIDRs)
 	t.InfraCIDRs = tidyList(t.InfraCIDRs)
 	t.DecoyAddrs = tidyList(t.DecoyAddrs)
