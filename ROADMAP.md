@@ -5,13 +5,14 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 ## Next
 - M8 rest: confirm the abuse.ch ThreatFox and URLhaus feeds load once the owner puts an abuse.ch Auth-Key in /etc/ominull/abusech.key on the hub (asked in Aico); decoys, decoy names and planted credentials are live (plan: docs/audit-2026-11-06.md)
 - M4, M7: Agent release with one key, Linux updates through Aico fleet, and the extra keys; then cut the remaining docs to the README, project-guide.md, the threat model and one release runbook as M6 and M10-M12 remove what they describe (code cites HOST_AUTHORITY, REMOTE_SCREEN, RESPONSE_SUPERVISOR, MAINTENANCE_PACKAGES and TRUST_FABRIC; memory cites MAINTENANCE_PACKAGES). M7 done so far: Nightshift routes, page budget note, legacy settings keys, shared-key agent login, docs/history, docs/evidence and five stale design docs (plan: docs/audit-2026-11-06.md)
-- M10-M12: Remote-admin kept everywhere (tidy only), console trim, Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
+- M10, M12: Remote-admin kept everywhere (tidy only), Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
 - Rust static library for hub-input parsing and signature verification (C ABI, both platforms) after the grant fix
 - Trust fabric: IP and CIDR rules enforced end to end, including older agents that refuse ranges (plan: docs/TRUST_FABRIC.md)
 - Trust fabric: FQDN rules with hub-side resolution, and close the blanket DNS egress
 - Platform-native code signing on top of the portable release signature
 - Port posture data from SHA: 17 controls as data, IR-readiness pack, Nightshift pack scoring, archive SHA
 ## Later
+- Console: what the M11 trim left. These routes have no caller, but each is the only way to do its job, so decide keep or give them a screen: creating a tenant, setting topology networks, retiring an endpoint, allow-isolation and host capabilities. `/api/v1/assets/correct` has lost its only console caller. `legacyAssetGraph` still runs when the assets list is empty and the browser fixture depends on it, so check a just-enrolled hub first. Hub request logs would settle the routes outside tools might call, which were not touched
 - Evaluate BloodHound CE and OpenGraph, then build the AI weak-point finder
 - Household: back up the router and repair the approved parental, DNS and Ominull config; then IoT segmentation and DNS filtering (vault proposal direction-2026-10)
 - Phase 2: AI-agent egress policy with agent-session attribution, and data inventory contract v4 (vault proposal direction-2026-10)
