@@ -64,8 +64,25 @@ func (s *Server) deviceOrLegacyMiddleware(next http.HandlerFunc) http.HandlerFun
 	}
 }
 
+// deviceOrAuthMiddleware is for a route agents and operators share: a device
+// credential takes the device path, with its route allow-list, and anything else
+// the operator path, where the tenant key is still good.
+func (s *Server) deviceOrAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	device := s.deviceOrLegacyMiddleware(next)
+	operator := s.authMiddleware(next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get(deviceCredentialHeader)) != "" {
+			device(w, r)
+			return
+		}
+		operator(w, r)
+	}
+}
+
 func isAllowedDeviceRoute(method, path string) bool {
 	switch {
+	case method == http.MethodPost && path == "/api/v1/software":
+		return true
 	case method == http.MethodPost && path == "/api/v1/events":
 		return true
 	case method == http.MethodGet && path == "/api/v1/agent/config":

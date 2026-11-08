@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
@@ -222,4 +223,21 @@ func TestAuthorizeAgentLabelSessionAndAskFirst(t *testing.T) {
 func digestOf(p []byte) string {
 	h := sha256.Sum256(p)
 	return hex.EncodeToString(h[:])
+}
+
+func TestALongRequesterStillFitsTheAgent(t *testing.T) {
+	auth := newTestAuthority(t)
+	if _, _, err := auth.GetOrCreateTenantKey("default"); err != nil {
+		t.Fatal(err)
+	}
+	in := isolateRequestFor("ep-1")
+	in.Requester = strings.Repeat("é", 40) // 80 bytes, cut inside a letter at 63
+	au, err := auth.Authorize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := au.Grants[0].OperatorID
+	if len(id) > 63 || !utf8.ValidString(id) {
+		t.Fatalf("operator id %q is %d bytes", id, len(id))
+	}
 }

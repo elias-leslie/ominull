@@ -11,6 +11,9 @@ import (
 	"ominull/hub/pkg/vuln"
 )
 
+// softwareReportMaxBytes is twice what an agent sends (its 2 MiB report buffer).
+const softwareReportMaxBytes = 4 << 20
+
 // handleSoftwareInventory handles reporting and querying endpoint software packages.
 func (s *Server) handleSoftwareInventory(w http.ResponseWriter, r *http.Request) {
 	tenantID := s.tenantFromRequest(r)
@@ -68,8 +71,13 @@ func (s *Server) handleSoftwareInventory(w http.ResponseWriter, r *http.Request)
 			Packages   []vuln.InstalledSoftware `json:"packages"`
 			Items      []vuln.InstalledSoftware `json:"items,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.EndpointID == "" {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, softwareReportMaxBytes)).Decode(&req); err != nil || req.EndpointID == "" {
 			writeJSONError(w, http.StatusBadRequest, "invalid software payload: endpoint_id is required")
+			return
+		}
+		// A machine reports only its own software.
+		if device := r.Header.Get("X-Device-Endpoint-ID"); device != "" && device != req.EndpointID {
+			writeJSONError(w, http.StatusForbidden, "device credential does not match endpoint_id")
 			return
 		}
 

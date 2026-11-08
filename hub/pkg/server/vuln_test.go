@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"ominull/hub/pkg/storage"
 	"strings"
 	"testing"
 	"time"
@@ -480,5 +482,38 @@ func TestServer_VulnMatchingAndPrioritization(t *testing.T) {
 	_ = json.NewDecoder(wNotAff.Body).Decode(&notAffResp)
 	if len(notAffResp.Vulnerabilities) != 1 || notAffResp.Vulnerabilities[0].CVEID != "CVE-2021-3156" {
 		t.Fatalf("expected 1 not_affected item (sudo), got %+v", notAffResp)
+	}
+}
+
+func TestAMachineReportsOnlyItsOwnSoftware(t *testing.T) {
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-own"})
+	cred, _, err := store.IssueDeviceCredential("ep-own")
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(endpoint string) int {
+		body := fmt.Sprintf(`{"endpoint_id":%q,"packages":[{"source":"dpkg","vendor":"x","product":"openssh-server","version":"1"}]}`, endpoint)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/software", strings.NewReader(body))
+		r.Header.Set(deviceCredentialHeader, cred)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		return w.Code
+	}
+	if got := post("ep-own"); got != http.StatusCreated {
+		t.Fatalf("a device reporting itself got %d", got)
+	}
+	if got := post("ep-other"); got != http.StatusForbidden {
+		t.Fatalf("a device reporting another machine got %d", got)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		r := httptest.NewRequest(method, "/api/v1/software?endpoint_id=ep-other", nil)
+		r.Header.Set(deviceCredentialHeader, cred)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%s with a device credential got %d", method, w.Code)
+		}
 	}
 }

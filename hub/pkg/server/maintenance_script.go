@@ -26,12 +26,13 @@ import (
 // that carries a package header into a library package.
 
 const (
-	oneOffRunsSetting = "maintenance.oneoff_runs"
-	oneOffRunsKept    = 200
-	oneOffMaxSource   = 64 * 1024
-	oneOffMaxOutput   = 1024 * 1024
-	oneOffDefaultTime = 600
-	promoteMaxSource  = 32 * 1024 // the library's package bound (ominullctl scripts sync)
+	oneOffRunsSetting   = "maintenance.oneoff_runs"
+	oneOffRunsKept      = 200
+	oneOffMaxSource     = 64 * 1024
+	oneOffMaxOutput     = 1024 * 1024
+	oneOffMaxJobPayload = 64 * 1024 // MAX_PAYLOAD_JSON_LEN in the agent's response_dispatcher.h
+	oneOffDefaultTime   = 600
+	promoteMaxSource    = 32 * 1024 // the library's package bound (ominullctl scripts sync)
 )
 
 var oneOffMu sync.Mutex
@@ -122,6 +123,10 @@ func (s *Server) oneOffPlan(tenantID string, body []byte) (*oneOffRequest, strin
 	})
 	if err != nil {
 		return nil, "", nil, err
+	}
+	// The source's escapes and the fields around it count against the agent's buffer.
+	if len(raw) >= oneOffMaxJobPayload {
+		return nil, "", nil, fmt.Errorf("this script comes to %d bytes as a job; an agent takes under %d. Shorten it", len(raw), oneOffMaxJobPayload)
 	}
 	payload, _ := json.Marshal(grants.PackageRunPayload{
 		Route: grants.OneOffScriptRoute, Items: []string{string(raw)}, Targets: req.EndpointIDs,

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"ominull/hub/pkg/response"
@@ -102,6 +103,20 @@ func cleanText(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if len([]rune(s)) > max {
 		s = string([]rune(s)[:max])
+	}
+	return s
+}
+
+// agentOperatorID is the requester as a grant carries it: an agent keeps 63 bytes
+// (operator_id in response_dispatcher.h) and drops a grant with a longer one.
+func agentOperatorID(s string) string {
+	const max = 63
+	if len(s) <= max {
+		return s
+	}
+	s = s[:max]
+	for !utf8.ValidString(s) {
+		s = s[:len(s)-1]
 	}
 	return s
 }
@@ -258,7 +273,7 @@ func (a *Signer) signAuthorized(au *authorized, now time.Time) ([]*response.Endp
 			EndpointID:        ep,
 			ActionKind:        au.Kind,
 			ActionDigest:      au.Digest,
-			OperatorID:        au.Requester,
+			OperatorID:        agentOperatorID(au.Requester),
 			ResponseSessionID: "approval:" + au.ID,
 			IssuedAt:          issued,
 			ExpiresAt:         issued + ttl,

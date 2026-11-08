@@ -567,7 +567,7 @@ func (a *Signer) signPackageGrants(au *authorized, now time.Time) ([]*response.E
 				EndpointID:        ep,
 				ActionKind:        au.Kind,
 				ActionDigest:      it.Digest,
-				OperatorID:        au.Requester,
+				OperatorID:        agentOperatorID(au.Requester),
 				ResponseSessionID: "approval:" + au.ID,
 				IssuedAt:          now.Unix(),
 				ExpiresAt:         now.Unix() + ttl,

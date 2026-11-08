@@ -505,3 +505,83 @@ func TestMonitorScriptsProfile(t *testing.T) {
 		t.Fatalf("respond -> monitor-scripts was signed by the manifest request alone: %+v %v", got, err)
 	}
 }
+
+func TestAnUpdateThatOutlivesItsGrantIsSignedAgain(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-a", ResponseCapabilities: `{"isolate":true}`})
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-b", ResponseCapabilities: `{"isolate":true}`})
+	ep, err := store.GetEndpoint("ep-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := authorityOf(t, srv).auth.TrustKeys("default")
+	if err := store.RequestAgentUpdate("ep-a", "9.9.9"); err != nil {
+		t.Fatal(err)
+	}
+	if srv.updateGrantFor("ep-a", "9.9.9") != nil {
+		t.Fatal("the setup should have no live grant")
+	}
+	g := srv.renewUpdateGrant(context.Background(), ep, "9.9.9")
+	if g == nil || g.Grant.ActionKind != response.ActionKindAgentUpdate || g.Grant.Verify(keyOf(t, keys.ResponseKey), time.Now()) != nil {
+		t.Fatalf("renewed grant %+v", g)
+	}
+	payload, _ := base64.StdEncoding.DecodeString(g.PayloadB64)
+	if !strings.Contains(string(payload), `"route":"/api/v1/agents/update"`) || !strings.Contains(string(payload), `"version":"9.9.9"`) {
+		t.Fatalf("payload %s", payload)
+	}
+
+	// No job, or a job for another version: nothing signs. A staged rollout's
+	// held machine has no job until its canaries pass.
+	other, _ := store.GetEndpoint("ep-b")
+	if srv.renewUpdateGrant(context.Background(), other, "9.9.9") != nil {
+		t.Fatal("signed an update nobody queued for this machine")
+	}
+	if srv.renewUpdateGrant(context.Background(), ep, "9.9.8") != nil {
+		t.Fatal("signed a version the job does not name")
+	}
+}
+
+func TestAReleaseThatOutlivesItsGrantIsSignedAgain(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-a", ResponseCapabilities: `{"isolate":true}`})
+	keys, _ := authorityOf(t, srv).auth.TrustKeys("default")
+	held := func(source string) *response.AgentTrustReport {
+		return &response.AgentTrustReport{V: 1, Keys: "pinned", ResponseKey: true, AutoIsolateKey: true, PolicyKey: true,
+			IsoSeen: 1000, Isolated: true, IsolationSource: source}
+	}
+
+	// Isolated by the agent's own administrator: not the hub's to lift.
+	if g := grantsIn(t, trustBeat(t, srv, "ep-a", held("local"))); len(g) != 0 {
+		t.Fatalf("a local isolation got %+v", g)
+	}
+
+	// The hub shows it free and the machine still holds it: a new release.
+	got := grantsIn(t, trustBeat(t, srv, "ep-a", held("owner")))
+	if len(got) != 1 || got[0].Grant.ActionKind != response.ActionKindIsolationChange || got[0].Grant.Verify(keyOf(t, keys.ResponseKey), time.Now()) != nil {
+		t.Fatalf("grants %+v", got)
+	}
+	payload, _ := base64.StdEncoding.DecodeString(got[0].PayloadB64)
+	if !strings.Contains(string(payload), `"route":"/api/v1/endpoints/unisolate"`) {
+		t.Fatalf("payload %s", payload)
+	}
+
+	// While that grant lives, no second one: a refused release cannot pile up.
+	report := held("owner")
+	report.IsoSeen = got[0].Grant.IssuedAt
+	if g := grantsIn(t, trustBeat(t, srv, "ep-a", report)); len(g) != 0 {
+		t.Fatalf("signed again while a grant lives: %+v", g)
+	}
+
+	// Isolated on the hub too: the two agree, nothing to release.
+	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-b", ResponseCapabilities: `{"isolate":true}`})
+	if err := store.SetEndpointIsolation("ep-b", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if g := grantsIn(t, trustBeat(t, srv, "ep-b", held("owner"))); len(g) != 0 {
+		t.Fatalf("an isolation the hub holds got %+v", g)
+	}
+}

@@ -3650,7 +3650,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/maintenance/wait", s.authMiddleware(s.responseGate(s.handleMaintenanceWait)))
 
 	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)
-	mux.HandleFunc("/api/v1/software", s.authMiddleware(s.responseGate(s.handleSoftwareInventory)))
+	// Agents report with their device credential; operators read and clear with a key.
+	mux.HandleFunc("/api/v1/software", s.deviceOrAuthMiddleware(s.responseGate(s.handleSoftwareInventory)))
 	mux.HandleFunc("/api/v1/vulnerabilities", s.authMiddleware(s.responseGate(s.handleVulnerabilities)))
 	mux.HandleFunc("/api/v1/vulnerabilities/snapshots/", s.authMiddleware(s.responseGate(s.handleVulnerabilitySnapshots)))
 	mux.HandleFunc("/api/v1/vulnerabilities/sync", s.authMiddleware(requireAdmin(s.responseGate(s.handleVulnerabilities))))

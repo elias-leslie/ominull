@@ -157,7 +157,11 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 	s.observeAgentCert(r, batch.EndpointID, batch.CertRenewal, resp, now)
 	s.addTrustControl(r.Context(), resp, persisted, batch.Trust)
 	if desc, ok := resp["agent_update"].(map[string]string); ok && batch.Trust != nil {
-		if g := s.updateGrantFor(batch.EndpointID, desc["version"]); g != nil {
+		g := s.updateGrantFor(batch.EndpointID, desc["version"])
+		if g == nil {
+			g = s.renewUpdateGrant(r.Context(), persisted, desc["version"])
+		}
+		if g != nil {
 			resp["agent_update_grant"] = g
 		}
 	}

@@ -252,6 +252,7 @@ func (s *Server) addTrustControl(ctx context.Context, resp map[string]interface{
 	}
 
 	now := time.Now().Unix()
+	s.renewReleaseGrant(ctx, ep, report, now)
 	var grants []*response.EnforcementGrant
 	if g, err := s.store.LatestIsolationGrant(ep.ID, report.IsoSeen, now); err == nil && g != nil {
 		if w, err := storedToWire(g); err == nil {
@@ -383,6 +384,94 @@ func (s *Server) updateGrantFor(endpointID, version string) *response.Enforcemen
 		}
 	}
 	return nil
+}
+
+// signStanding signs one grant the owner's earlier action still calls for, after
+// the first one ran out while the machine was away, and hands it to agents.
+func (s *Server) signStanding(ctx context.Context, ep *storage.Endpoint, kind response.ActionKind, route, requester string, body any) error {
+	if s.responseAuth == nil {
+		return fmt.Errorf("the grant signer is not available")
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	canon, err := canonicalJSON(raw)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{"route": route, "body": json.RawMessage(canon), "targets": []string{ep.ID}})
+	if err != nil {
+		return err
+	}
+	au, err := s.responseAuth.Authorize(ctx, &grants.AuthorizeInput{
+		TenantID: endpointTenant(ep), Requester: requester, Kind: kind, Targets: []string{ep.ID}, Payload: payload,
+	})
+	if err != nil {
+		return err
+	}
+	kept, err := s.keepApprovalGrants(route, kind, payload, au.Grants)
+	if err != nil {
+		return err
+	}
+	return s.store.MarkGrantsDeliverable(kept)
+}
+
+// renewUpdateGrant re-signs the grant of an update still queued for a machine
+// that was away past the grant's life. Only a queued job gets one: a staged
+// rollout's held machines have no job until their canaries pass, and a halted
+// rollout's never do.
+func (s *Server) renewUpdateGrant(ctx context.Context, ep *storage.Endpoint, version string) *response.EnforcementGrant {
+	if ep == nil {
+		return nil
+	}
+	job, err := s.store.GetAgentUpdateJob(ep.ID)
+	if err != nil || job == nil || job.CompletedAt != nil || job.DesiredVersion != version {
+		return nil
+	}
+	err = s.signStanding(ctx, ep, grants.ActionKindAgentUpdate, "/api/v1/agents/update", "hub (a queued update outlived its grant)",
+		map[string]any{"endpoint_ids": []string{ep.ID}, "version": version})
+	s.auditRenewal(ep, "AGENT_UPDATE_GRANT_RENEWED", "v"+version, err)
+	if err != nil {
+		return nil
+	}
+	return s.updateGrantFor(ep.ID, version)
+}
+
+// renewReleaseGrant signs a new release for a machine that still holds an
+// isolation the owner has lifted: it was away past the release grant's life, so
+// it would stay cut off while the hub shows it free. Isolation it took or lifted
+// locally is its administrator's, and a live grant means the agent has its answer.
+func (s *Server) renewReleaseGrant(ctx context.Context, ep *storage.Endpoint, report *response.AgentTrustReport, now int64) {
+	if !report.Isolated || report.IsolationSource == "local" {
+		return
+	}
+	s.isolationMu.Lock()
+	defer s.isolationMu.Unlock()
+	if isolated, _, err := s.store.GetEndpointIsolation(ep.ID); err != nil || isolated {
+		return
+	}
+	if live, err := s.store.LatestIsolationGrant(ep.ID, 0, now); err != nil || live != nil {
+		return
+	}
+	err := s.signStanding(ctx, ep, grants.ActionKindIsolation, "/api/v1/endpoints/unisolate", "hub (a release outlived its grant)",
+		map[string]any{"endpoint_id": ep.ID})
+	s.auditRenewal(ep, "ISOLATION_RELEASE_RENEWED", "the owner's release", err)
+}
+
+func (s *Server) auditRenewal(ep *storage.Endpoint, action, what string, failed error) {
+	details := what + " signed again: the machine was away past the first grant's life"
+	if failed != nil {
+		action += "_FAILED"
+		details = what + " could not be signed again: " + failed.Error()
+		log.Printf("[!] %s on %s: %s", action, ep.ID, details)
+	}
+	if err := s.store.RecordAudit(storage.AuditEntry{
+		ID: uuid.New().String(), TenantID: endpointTenant(ep), Username: "hub", Action: action,
+		Resource: ep.ID, Details: details, Timestamp: time.Now().UTC(),
+	}); err != nil {
+		log.Printf("[!] audit %s: %v", action, err)
+	}
 }
 
 // reconcilePendingGrants settles grants whose action outcome was never

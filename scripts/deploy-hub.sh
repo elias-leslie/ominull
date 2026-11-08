@@ -92,7 +92,9 @@ deploy)
     if build="$(health)"; then echo "live build $build"; exit 0; fi
     echo "the hub did not report build $want within 120 s; putting the previous binaries back" >&2
     journalctl -u ominull-hub.service -n 20 --no-pager >&2 || true
+    install -d -m 0700 "$STAGE"
     swap_back
+    rm -rf "$STAGE"
     want=""; health >/dev/null && echo "previous build is back" >&2
     exit 1
     ;;

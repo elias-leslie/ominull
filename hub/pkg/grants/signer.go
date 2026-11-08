@@ -186,7 +186,7 @@ func (a *Signer) SignGrant(req *SignGrantRequest) (*response.EndpointGrant, erro
 		EndpointID:        req.EndpointID,
 		ActionKind:        req.ActionKind,
 		ActionDigest:      req.ActionDigest,
-		OperatorID:        req.OperatorID,
+		OperatorID:        agentOperatorID(req.OperatorID),
 		ResponseSessionID: "approval:" + strings.ReplaceAll(id, "-", ""),
 		IssuedAt:          now,
 		ExpiresAt:         now + ttl,

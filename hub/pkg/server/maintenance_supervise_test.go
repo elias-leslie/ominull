@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -253,5 +254,22 @@ func TestOneOffScript(t *testing.T) {
 	// Every run is signed on its own: the same request runs again under a new id.
 	if w2 := postAdmin(srv, "/api/v1/maintenance/script", body("")); w2.Code != http.StatusCreated || strings.Contains(w2.Body.String(), run.RunID) {
 		t.Fatalf("a second run: %d %s", w2.Code, w2.Body.String())
+	}
+}
+
+func TestAOneOffScriptTheAgentCannotHoldIsRefused(t *testing.T) {
+	t.Parallel()
+	srv := playbookTestServer(t)
+	authorityOf(t, srv)
+	if err := srv.store.UpsertEndpoint(storage.Endpoint{ID: "ep-lin", TenantID: "default", Hostname: "box-1", OS: "Ubuntu 24.04", Status: "online", LastSeenAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	// Fits the request and the source limit, but each & takes six bytes once the
+	// hub has written the job.
+	body := fmt.Sprintf(`{"endpoint_ids":["ep-lin"],"name":"big","shell":"bash","source":"echo hi %s","reason":"too big once written"}`,
+		strings.Repeat("&", 15000))
+	w := postAdmin(srv, "/api/v1/maintenance/script", body)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "as a job") {
+		t.Fatalf("got %d %s", w.Code, w.Body.String())
 	}
 }
