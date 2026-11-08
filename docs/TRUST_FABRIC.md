@@ -80,14 +80,32 @@ or `/32` (IPv6); the hub and the agent both refuse wider ones. A request may
 name a range only for one endpoint (bulk isolation names addresses).
 
 An older agent refuses a grant naming a range and then applies nothing, while
-the hub would report it isolated. So the hub treats an agent as taking ranges
-only if its version is at least 1.8.65 and it reports the capability; a report
+the hub would report it isolated, and a Windows agent before 1.8.120 reports the
+capability and then drops every range. So the hub treats an agent as taking ranges
+only if its version is at least 1.8.65 (Windows 1.8.120) and it reports the capability; a report
 is dropped when the agent changes version and has not repeated it, because a
 downgraded agent left a capability behind that it did not have. For such an
 agent a range of up to 16 addresses is spelled out, wider ranges are listed as
 not enforced and stay closed, and a request naming a range is refused before the
-hub signs it. Port- or direction-scoped allows are withheld on every agent,
-since the allow list carries addresses only.
+hub signs it. Spelled-out addresses take up list entries, so several small ranges
+can push a name's answers off an older agent's list; those are listed as not
+enforced like anything else that does not fit. Port- or direction-scoped allows
+are withheld on every agent, since the allow list carries addresses only.
+
+### On the agent
+
+A new grant replaces the rules in one step, so changing the list never opens the
+host: Linux builds new chains and swaps them in, keeping the old ones if the new
+ones are refused, and Windows replaces its filters in one transaction. A Linux
+rule set missing its loopback or DHCP permit is not swapped in. An entry or permit
+the agent cannot install is reported rather than dropped in silence: the hub
+audits each change (`AGENT_APPLY_REPORT`) and shows the report in
+`trust/effective` (`agent_report`) and on the machine page. The `enforced` list is
+what the hub signed; only this report says what the agent could not do with it.
+
+The rules outlive the agent. After a restart it recognises the isolation from its
+own rules and keeps it. When the dead-man timer lifts an isolation it removes only
+the default deny, so a block on a peer stays where it was.
 
 ### Names
 
