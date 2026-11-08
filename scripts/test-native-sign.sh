@@ -46,6 +46,7 @@ cat >a.wxs <<'XML'
 XML
 wixl --arch x64 -o a.msi a.wxs
 mkdir -p d/DEBIAN d/opt
+chmod 755 d/DEBIAN  # a default ACL on TMPDIR would make it 700, which dpkg-deb refuses
 printf 'Package: t\nVersion: 1.0\nArchitecture: amd64\nMaintainer: t <t@example.invalid>\nDescription: t\n' >d/DEBIAN/control
 echo payload >d/opt/payload
 dpkg-deb --root-owner-group --build d a.deb >/dev/null
