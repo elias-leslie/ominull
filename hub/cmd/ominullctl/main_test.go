@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -680,5 +682,15 @@ func TestOminullctl_AgentsUpdateNeedsNoApproval(t *testing.T) {
 	want := []string{"/api/v1/agents/update "}
 	if strings.Join(sends, "|") != strings.Join(want, "|") {
 		t.Fatalf("the command is one request with no approval id: %v", sends)
+	}
+}
+
+func TestRefusedDefaultURLSaysHowToReachAHub(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	if got := requestFailed(CLIConfig{HubURL: defaultHubURL}, refused).Error(); !strings.Contains(got, "set OMINULL_HUB_URL") {
+		t.Errorf("default URL refused: %q", got)
+	}
+	if got := requestFailed(CLIConfig{HubURL: "https://hub.example:9443"}, refused).Error(); strings.Contains(got, "OMINULL_HUB_URL") {
+		t.Errorf("an explicit URL keeps the plain error: %q", got)
 	}
 }

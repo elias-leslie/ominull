@@ -175,7 +175,9 @@ sudo ominullctl setup-status
 ```
 
 For fleet operations and CyberOps control, `ominullctl` reads `OMINULL_HUB_URL`
-and `OMINULL_API_KEY_FILE` (or `--api-key-file /etc/ominull/admin.key`). Never commit credentials.
+and `OMINULL_API_KEY_FILE` (or `--api-key-file /etc/ominull/admin.key`); without them it calls
+`http://127.0.0.1:9999`, which answers only on the hub itself. Production values live in the private
+operations brief. Never commit credentials.
 An https hub with its own CA takes `--ca` or `OMINULL_HUB_CA` (e.g. `/etc/ominull/ca.crt`).
 
 ### Remote commands for agents

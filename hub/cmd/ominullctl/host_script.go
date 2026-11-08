@@ -179,7 +179,7 @@ func (c *APIClient) doRaw(method, endpoint string, body []byte) ([]byte, int, er
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, 0, requestFailed(c.cfg, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

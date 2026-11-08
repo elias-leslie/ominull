@@ -40,6 +40,24 @@ Options:
   --hub-only       deploy the hub only (runs scripts/deploy-hub.sh: no version, no signing)
   --agents-only    skip build/deploy; roll agents against an already-live hub
   --no-wait        queue the update and return without claiming convergence
+
+Batching: refuses when nothing the agents ship (agent, packaging, screen, the build
+scripts; tests and docs excluded) changed since the last "Release X.Y.Z" commit.
+
+Gates (skipped by --skip-tests): gofmt, hub go test -race and vet, topology and router
+script tests, release header/convergence/batching tests, bash -n on the release scripts,
+BPF build and the Linux collector feedback loops, fuzz-agent.sh --regress; then build,
+sign, fresh-install verify, package lifecycle, deploy-hub.sh, publish-agents.sh, rollout.
+
+Environment:
+  OMINULL_SIGNING_ROUTINE=1     routine key: canaries first (OMINULL_ROUTINE_CANARIES,
+                                default linux-ominull-target-linux)
+  OMINULL_SIGNING_BACKEND, OMINULL_SIGNING_COMMAND   signer (sign-release.sh)
+  OMINULL_HUB_URL, OMINULL_ADMIN_KEY   hub API; unset: read from the production config
+  BPFTOOL                       bpftool path for build-bpf.sh (e.g. /usr/sbin/bpftool)
+
+Run it under st tools run (heavy lane). The exact routine command (signer, canaries)
+is in the private operations brief, "Current checkpoint".
 EOF
 }
 

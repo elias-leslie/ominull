@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -225,6 +226,16 @@ func newAPIClient(cfg CLIConfig) *APIClient {
 	return c
 }
 
+// requestFailed wraps a transport error; a refused connection to the built-in default URL says how to
+// reach a hub elsewhere, since the hub rarely runs where ominullctl does.
+func requestFailed(cfg CLIConfig, err error) error {
+	if cfg.HubURL == defaultHubURL && errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("HTTP request failed: %w (no hub at the default %s on this machine: set OMINULL_HUB_URL, "+
+			"OMINULL_HUB_CA and OMINULL_API_KEY_FILE for the hub you mean, or pass --url)", err, defaultHubURL)
+	}
+	return fmt.Errorf("HTTP request failed: %w", err)
+}
+
 func parseGlobalFlags(args []string) (CLIConfig, []string) {
 	var cfg CLIConfig
 	fs := flag.NewFlagSet("ominullctl", flag.ExitOnError)
@@ -290,7 +301,7 @@ func (c *APIClient) doRequestWith(method, endpoint string, body interface{}, hea
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, 0, requestFailed(c.cfg, err)
 	}
 	defer resp.Body.Close()
 
