@@ -1223,7 +1223,11 @@
     var host = arrayOf(DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.id === ep; })[0];
     if (host && /linux/i.test(host.os || "")) {
       return { packages: [{ script_id: "demo-linux-maintenance-mode", name: "linux-maintenance-mode", title: "Maintenance mode", role: "maintenance_mode",
-        interpreter: "/bin/sh", risk: "safe", timeout: 60, latest_version: 1, last: null }], maintenance_mode: demoMaintMode(ep, "linux") };
+        interpreter: "/bin/sh", risk: "safe", timeout: 60, latest_version: 1, last: null },
+        { script_id: "demo-linux-security-baseline", name: "linux-security-baseline", title: "Security baseline", description: "Checks SSH, accounts, the firewall and how far the logs reach back.", category: "security",
+          interpreter: "/bin/sh", risk: "safe", timeout: 300, latest_version: 1,
+          last: { job_id: "demo-job-baseline", job_state: "succeeded", state: "drift", mode: "audit", reboot: false, changed: [], pass: 5, fail: 1, requested_at: new Date(Date.now() - 180 * 60000).toISOString(), completed_at: new Date(Date.now() - 178 * 60000).toISOString() } }],
+        maintenance_mode: demoMaintMode(ep, "linux") };
     }
     if (!host || !/windows/i.test(host.os || "")) return { packages: [] };
     function pkg(name, title, desc, risk, timeout, last) {
@@ -1247,6 +1251,7 @@
         { id: "free_disk_percent", expected: ">= 15", actual: "41", state: "pass", risk: "safe" },
         { id: "secure_boot", expected: "on", actual: "on", state: "pass", risk: "safe" },
         { id: "tpm", expected: "present", actual: "not reported", state: "na", risk: "safe" }] })),
+      Object.assign(pkg("windows-security-baseline", "Security baseline", "Checks remote desktop, stored logon credentials, admin accounts and how far the Security log reaches back.", "safe", 300, run("drift", "audit", 180, { pass: 7, fail: 2 })), { category: "security", reboot_possible: false }),
       pkg("windows-cleanup", "Cleanup", "Clears old temp files, update downloads, crash dumps and superseded components.", "safe", 3600, run("fixed", "enforce", 300, { reboot: true, changed: ["windows_temp 812 MB", "component_store"] })),
       pkg("windows-debloat", "Remove bundled apps", "Removes a fixed list of bundled and sponsored apps.", "careful", 900, null),
       pkg("windows-performance", "Gaming performance", "Turns on Game Mode and GPU scheduling and turns off background game recording.", "safe", 300, run("skipped", "enforce", 1440, { reason: "a game is running (game.exe)" })),
@@ -1284,10 +1289,11 @@
   /* Posture in demo mode: a hardening pack and the readiness pack over the demo
      machines, with every answer a real hub can give. */
   var DEMO_ATTEST = null;
+  var DEMO_ACCEPTED = {};
   function demoPosture(path) {
     var only = (/[?&]endpoint_id=([^&]+)/.exec(path || "") || [])[1];
     only = only && decodeURIComponent(only);
-    var eps = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return !only || e.id === only; }).slice(0, 8);
+    var eps = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).slice(0, 8);
     var at = new Date(Date.now() - 3 * 3600000).toISOString(), old = new Date(Date.now() - 20 * 86400000).toISOString();
     var score = function (rs, sev) {
       var s = { pass: 0, fail: 0, accepted: 0, na: 0, unknown: 0, percent: null };
@@ -1295,11 +1301,14 @@
       if (s.pass + s.fail) s.percent = Math.round(100 * s.pass / (s.pass + s.fail));
       return s;
     };
-    var ctl = function (id, title, sev, why, refs, states, expected, actual) {
-      var rs = eps.map(function (e, i) {
+    var ctl = function (id, title, sev, why, refs, states, expected, actual, os) {
+      var rs = eps.map(function (e, i) { return { e: e, i: i }; }).filter(function (x) { return (!only || x.e.id === only) && (!os || new RegExp(os, "i").test(x.e.os || "")); }).map(function (x) {
+        var e = x.e, i = x.i;
         var st = states[i % states.length];
+        var own = DEMO_ACCEPTED[e.id + "|" + id];
+        if (own !== undefined && (st === "fail" || st === "accepted")) st = own === false ? "fail" : "accepted";
         return { endpoint_id: e.id, host: e.hostname, state: st, key: id, expected: expected, actual: st === "unknown" ? "no result yet" : st === "na" ? "does not apply here" : actual[st === "pass" ? 0 : 1],
-          at: st === "unknown" ? undefined : (i === 3 ? old : at), stale: st !== "unknown" && i === 3, reason: st === "accepted" ? "Lab machine" : undefined };
+          at: st === "unknown" ? undefined : (i === 3 ? old : at), stale: st !== "unknown" && i === 3, reason: st === "accepted" ? ((own && own.reason) || "Lab machine") : undefined };
       });
       return { id: id, title: title, severity: sev, why: why, refs: refs, results: rs, score: score(rs, sev) };
     };
@@ -1307,11 +1316,12 @@
       return { id: id, title: title, severity: sev, why: why, fleet: true, attest: attest, results: [r], score: score([r], sev) };
     };
     var att = DEMO_ATTEST;
+    var hasRows = function (c) { return arrayOf(c.results).length; };
     var packs = [
       { id: "cisa-nsa-hardening", title: "CISA and NSA hardening", source_name: "CISA", source_url: "https://www.cisa.gov/",
         controls: [
-          ctl("ssh.password_auth_off", "SSH refuses password logins", "high", "A guessed password gets a shell. Keys cannot be guessed.", ["CISA AA23-278A"], ["pass", "fail", "pass", "accepted"], "password login off", ["password no", "password yes"]),
-          ctl("accounts.least_privilege", "Only root has full rights", "high", "Extra full-rights accounts are the first thing an intruder looks for.", ["CISA AA23-278A"], ["pass", "pass", "unknown"], "only root has user id 0", ["only root", "user id 0: toor"])
+          ctl("ssh.password_auth_off", "SSH refuses password logins", "high", "A guessed password gets a shell. Keys cannot be guessed.", ["CISA AA23-278A"], ["pass", "fail", "pass", "accepted"], "password login off", ["password no", "password yes"], "linux"),
+          ctl("accounts.least_privilege", "Only root has full rights", "high", "Extra full-rights accounts are the first thing an intruder looks for.", ["CISA AA23-278A"], ["pass", "pass", "unknown"], "only root has user id 0", ["only root", "user id 0: toor"], "linux")
         ] },
       { id: "ir-readiness", title: "Ready for an incident", source_name: "NIST SP 800-61", source_url: "https://csrc.nist.gov/",
         controls: [
@@ -1321,10 +1331,11 @@
         ] }
     ];
     packs.forEach(function (p) {
+      p.controls = p.controls.filter(hasRows);
       if (only) p.controls = p.controls.filter(function (c) { return !c.fleet; });
       p.score = score(p.controls.reduce(function (all, c) { return all.concat(c.results); }, []), "high");
     });
-    return { generated_at: new Date().toISOString(), stale_days: 14, packs: packs };
+    return { generated_at: new Date().toISOString(), stale_days: 14, packs: packs.filter(function (p) { return p.controls.length; }) };
   }
   var DEMO_DECISIONS = null;
   function demoDecisions() {
@@ -1460,6 +1471,8 @@
       if (win) DEMO_MAINT_ROWS["windows-cleanup|" + win.id] = { mode: "enforce", reason: "Small disk, clean weekly", expires_at: new Date(Date.now() + 10 * 86400000).toISOString() };
     }
     var defs = [
+      ["windows-security-baseline", "Security baseline", "security", "safe", "daily", []],
+      ["linux-security-baseline", "Security baseline", "security", "safe", "daily", []],
       ["windows-audit", "Standards check", "maintenance", "safe", "daily", [["min_free_percent", "int", "15", 1, 90, "Free disk below this percent is a failure."], ["max_update_age_days", "int", "14", 1, 120, "Days since the last update before it fails."]]],
       ["windows-cleanup", "Cleanup", "maintenance", "safe", "weekly", [["age_days", "int", "14", 1, 365, "Delete temp files older than this many days."], ["compact_store", "bool", "true", null, null, "Compact the component store after cleaning."]]],
       ["windows-debloat", "Remove bundled apps", "maintenance", "careful", "weekly", [["apps", "list", "Microsoft.BingNews,*CandyCrush*", null, null, "Apps to remove."]]],
@@ -1479,7 +1492,11 @@
       var on = e.enabled !== undefined ? e.enabled : !!f.enabled;
       return { enabled: on, package_enabled: on, category_enabled: true, mode: e.mode || f.mode || "audit", interval: e.interval || f.interval || defaults.__interval, params: params };
     }
+    var accepted = ep ? Object.keys(DEMO_ACCEPTED).filter(function (k) { return k.indexOf(ep + "|") === 0 && DEMO_ACCEPTED[k]; }).map(function (k) {
+      return { control: k.slice(ep.length + 1), reason: DEMO_ACCEPTED[k].reason, by: "demo", at: new Date().toISOString() };
+    }) : [];
     return {
+      accepted_risks: accepted,
       categories: [{ name: "maintenance", fleet_enabled: true, enabled: ep ? true : undefined }, { name: "security", fleet_enabled: true, enabled: ep ? true : undefined }],
       packages: defs.map(function (d) {
         var defaults = { __interval: d[4] };
@@ -1780,6 +1797,10 @@
     }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
+      if (body.accept_risk) {
+        DEMO_ACCEPTED[body.endpoint_id + "|" + body.accept_risk] = body.accepted ? { reason: body.reason || "" } : false;
+        return demoMaintSettings("?endpoint_id=" + body.endpoint_id);
+      }
       var key = (body.package || "@" + body.category) + "|" + (body.endpoint_id || "");
       var row = body.reset ? {} : (DEMO_MAINT_ROWS[key] || {});
       ["enabled", "mode", "interval", "reason", "expires_at"].forEach(function (k) { if (body[k] !== undefined) { if (body[k] === null) delete row[k]; else row[k] = body[k]; } });
@@ -8165,6 +8186,7 @@
     routeOpener = null;
     if (wasOpen) restoreFocus(opener);
     state.routeKey = "";
+    state.routeDetailKey = "";
     /* Only when a route was actually on screen: go() closes the route before
        it pushes its own entry, and two entries for one navigation makes Back
        feel broken. */
@@ -8213,6 +8235,15 @@
     syncURL(true);
     renderRoute();
     loadHostScope(key);
+    loadRouteDetail(key);
+  }
+  /* What the full view reads for one machine. Opened from a link, the route
+     waits for the assets, so renderRoute calls this as well; it runs once per
+     opening. */
+  function loadRouteDetail(key) {
+    var loaded = state.assetByKey[key];
+    if (!loaded || !loaded.endpoint || state.routeDetailKey === key) return;
+    state.routeDetailKey = key;
     /* Same for the baseline. Waiting for the next refresh tick left "what
        happens if I isolate this host" reading "Reading the baseline" for five
        seconds, which is long enough for someone to act without it. */
@@ -8468,7 +8499,7 @@
       h("div", { cls: "card-body uf uf-wrap uf-g1" },
         maintTabs(tab, function (id) { state.maintCardTab = id; renderRoute(); }),
         h("span", { cls: "u-grow" }),
-        maintCompliance(pass, fail),
+        tab === "security" ? null : maintCompliance(pass, fail),
         catSel ? h("label", { cls: "uf uf-g1" }, h("span", { cls: "dim-2", text: "Scheduled runs" }), catSel) : null,
         catNote,
         cat ? maintOverrideNote(cat.override) : null),
@@ -9139,12 +9170,12 @@
   function postureResultWords(r) {
     var st = POSTURE_STATES[r.state] || ["idle", r.state];
     var at = r.at ? ", " + maintDateText(r.at) : "";
-    return (r.host ? r.host + ": " : "") + st[1] + (r.actual ? " (" + r.actual + ")" : "") + at + (r.stale ? ", old answer" : "");
+    return (r.host || r.endpoint_id || "Whole fleet") + ": " + st[1] + (r.actual ? " (" + r.actual + ")" : "") + at + (r.stale ? ", old answer" : "");
   }
-  function postureDots(results) {
-    return h("span", { cls: "pst-dots" }, arrayOf(results).map(function (r) {
+  function postureDots(c) {
+    return h("button", { cls: "pst-dots", type: "button", "aria-label": "What each machine reported for " + c.title, on: { click: function () { openPostureControl(c); } } }, arrayOf(c.results).map(function (r) {
       var words = postureResultWords(r);
-      return h("span", { cls: "pst-dot", "data-state": r.state, "data-stale": r.stale ? "true" : "false", role: "img", "aria-label": words, title: words });
+      return h("span", { cls: "pst-dot", "data-state": r.state, "data-stale": r.stale ? "true" : "false", title: words });
     }));
   }
   /* Accept or stop accepting one machine's failing answer, then read again. */
@@ -9175,25 +9206,30 @@
     return r.job_id ? h("a", { href: "/console/jobs?id=" + encodeURIComponent(r.job_id), title: "Open this run" }, when) : when;
   }
   function openPostureConfirm(c) {
-    var state_ = h("select", { "aria-label": "Answer" }, h("option", { value: "pass", text: "Yes, this holds" }), h("option", { value: "fail", text: "No, this does not hold" }));
-    var note = h("input", { type: "text", maxlength: "300", "aria-label": "What shows it" });
-    var days = h("input", { type: "number", min: "1", max: "365", value: "90", "aria-label": "Good for how many days" });
+    var results = arrayOf(c.results), had = results[0] && results[0].by;
+    var save;
+    var ready = function () { save.disabled = !state_.value || !note.value.trim() || !(parseInt(days.value, 10) >= 1 && parseInt(days.value, 10) <= 365); };
+    var state_ = h("select", { "aria-label": "Answer", on: { change: function () { ready(); } } },
+      h("option", { value: "", text: "Choose…" }), h("option", { value: "pass", text: "Yes, this holds" }), h("option", { value: "fail", text: "No, this does not hold" }));
+    if (had && (results[0].state === "pass" || results[0].state === "fail")) state_.value = results[0].state;
+    var note = h("input", { type: "text", maxlength: "300", "aria-label": "What shows it", on: { input: function () { ready(); } } });
+    var days = h("input", { type: "number", min: "1", max: "365", value: "90", "aria-label": "Good for how many days", on: { input: function () { ready(); } } });
     var send = function (body) {
       return request("/api/v1/posture/attest", "POST", body).then(function () { closeSheet(); postureRefresh(); toast("Saved", "ok"); },
         function (e) { toast((e && e.message) || "Could not save", "crit"); });
     };
-    var results = arrayOf(c.results), had = results[0] && results[0].by;
+    save = h("button", { cls: "btn btn-primary", type: "button", text: "Save", disabled: true, on: { click: function () {
+      send({ control: c.id, state: state_.value, note: note.value.trim(), days: parseInt(days.value, 10) || 0 });
+    } } });
     openSheet(c.title, h("div", { cls: "stack" },
       c.why ? h("p", { text: c.why }) : null,
       h("label", { cls: "field" }, h("span", { text: "Answer" }), state_),
       h("label", { cls: "field" }, h("span", { text: "What shows it" }), note),
       h("label", { cls: "field" }, h("span", { text: "Good for how many days" }), days)),
-      [h("button", { cls: "btn btn-primary", type: "button", text: "Save", on: { click: function () {
-        send({ control: c.id, state: state_.value, note: note.value.trim(), days: parseInt(days.value, 10) || 0 });
-      } } }),
+      [save,
       had ? h("button", { cls: "btn", type: "button", text: "Clear answer", on: { click: function () { send({ control: c.id, state: "clear" }); } } }) : null,
       h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })].filter(Boolean));
-    note.focus();
+    state_.focus();
   }
   function openPostureControl(c) {
     var fleet = !!c.fleet;
@@ -9204,6 +9240,7 @@
     });
     openSheet(c.title, h("div", { cls: "stack" },
       h("div", { cls: "uf uf-wrap uf-g1" }, tipped(chip(POSTURE_SEVERITY[c.severity] || "idle", c.severity), "How much this matters"),
+        fleet ? tipped(chip("idle", "Whole fleet"), "One answer for the whole fleet, not for each machine") : null,
         arrayOf(c.refs).map(function (ref) { return tipped(chip("idle", ref), "Where this control comes from"); })),
       c.why ? h("p", { text: c.why }) : null,
       stackOnPhone(simpleTable(head, rows, { sortable: false }))),
@@ -9217,7 +9254,7 @@
         h("button", { cls: "pst-open", type: "button", text: c.title, title: c.why || c.title, on: { click: function () { openPostureControl(c); } } }),
         tipped(chip(POSTURE_SEVERITY[c.severity] || "idle", c.severity), "How much this matters"),
         postureScoreChip(c.score),
-        postureDots(c.results)
+        postureDots(c)
       ];
     });
     var block = h("details", { cls: "pst-pack", on: { toggle: function (e) { state.postureOpen[p.id] = e.target.open; } } },
@@ -9926,6 +9963,7 @@
 
     var asset = state.assetByKey[state.routeKey];
     if (!asset) { state.routeKey = ""; return; }
+    loadRouteDetail(state.routeKey);
 
     var ep = asset.endpoint;
     var sc = asset.scan;

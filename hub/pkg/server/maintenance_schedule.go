@@ -214,6 +214,13 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 			if !eff.Enabled || now.Sub(ep.LastSeenAt) >= endpointOnline {
 				continue
 			}
+			// The agent would drop the job without a word; say so here.
+			if why := s.machineRefusal(ep.ID, "script"); why != "" {
+				key := tenant + "|refused|" + d.Header.Name + "|" + ep.ID
+				live[key] = true
+				s.maintBlocks.set(key, scheduleBlock{Package: d.Header.Name, Endpoints: []string{ep.ID}, Reason: why, Since: now})
+				continue
+			}
 			interval, ok := scripts.RecurrenceInterval(eff.Interval)
 			if !ok {
 				continue

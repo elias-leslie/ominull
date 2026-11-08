@@ -4149,7 +4149,7 @@ td .path-wrap { display: inline-block; white-space: normal; overflow-wrap: anywh
 .pst-pack summary::before { content: "\25B8"; color: var(--ink-3); }
 .pst-pack[open] summary::before { content: "\25BE"; }
 .pst-src { margin-left: auto; }
-.pst-dots { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.pst-dots { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; background: none; border: 0; padding: 4px 0; cursor: pointer; }
 .pst-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--ink-3); flex: none; }
 .pst-dot[data-state="pass"] { background: var(--ok); border-color: var(--ok); }
 .pst-dot[data-state="fail"] { background: var(--crit); border-color: var(--crit); }

@@ -626,7 +626,8 @@ it, and `ominull.posture` adds one Status row. That row only rises (to the board
 never a page) when a critical control fails.
 
 **Machines that take no hub-signed scripts.** Nearly all the Linux fleet runs the
-`respond` profile or a host lock, so the hub cannot run a package there, and posture
+`respond` profile or a host lock, so the hub cannot run a package there: it refuses
+the request up front, and a scheduled one shows as blocked with the reason. Posture
 does not widen a profile to get an answer. `scripts/posture-collect.sh` runs
 `linux-security-baseline` daily over the same root routes as
 `scripts/update-linux-agents.sh` and posts each result to

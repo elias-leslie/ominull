@@ -10,6 +10,7 @@ import (
 
 	hubauth "ominull/hub/pkg/auth"
 	"ominull/hub/pkg/response"
+	"ominull/hub/pkg/storage"
 )
 
 // The lock table matches the agent's: the terminal only under no lock,
@@ -64,7 +65,7 @@ func TestLockedMachineRefusedBeforeSigning(t *testing.T) {
 	srv.trust.init()
 	srv.trust.reports["win-locked"] = trustReportSeen{at: time.Now(), report: response.AgentTrustReport{V: 1, Ceiling: "signed-scripts", Profile: "engagement"}}
 	srv.trust.reports["win-ha"] = trustReportSeen{at: time.Now(), report: response.AgentTrustReport{V: 1, Profile: "engagement", HostAuthority: true}}
-	srv.trust.reports["win-free"] = trustReportSeen{at: time.Now(), report: response.AgentTrustReport{V: 1, Profile: "respond"}}
+	srv.trust.reports["win-free"] = trustReportSeen{at: time.Now(), report: response.AgentTrustReport{V: 1, Profile: "engagement"}}
 	srv.trust.mu.Unlock()
 	jwt, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: hubauth.RoleAdmin, TenantID: "default"}, "test-admin-key-12345", time.Hour)
 	call := func(path, body string) (int, map[string]interface{}) {
@@ -115,5 +116,117 @@ func TestLockedMachineRefusedBeforeSigning(t *testing.T) {
 	}
 	if n := authorizedActions(); n != 1 {
 		t.Fatalf("authorizations after the free machine: %d", n)
+	}
+}
+
+// A machine on a profile without the right drops the offer in silence, so the
+// hub says so first. A manifest the hub has just signed counts over the report.
+func TestProfileWithoutScriptsIsRefused(t *testing.T) {
+	t.Parallel()
+	if why := lockRefusal("box", &response.AgentTrustReport{Profile: "respond"}, "script"); !strings.Contains(why, "respond permission profile") {
+		t.Fatalf("respond and scripts: %q", why)
+	}
+	for _, profile := range []string{"", "engagement", "monitor-scripts", "not-a-profile"} {
+		if why := lockRefusal("box", &response.AgentTrustReport{Profile: profile}, "script"); why != "" {
+			t.Fatalf("%q and scripts: %q", profile, why)
+		}
+	}
+	if why := lockRefusal("box", &response.AgentTrustReport{Profile: "respond"}, "terminal"); why != "" {
+		t.Fatalf("respond and a terminal: %q", why)
+	}
+	// A reason a profile change would not cure comes first.
+	if why := lockRefusal("box", &response.AgentTrustReport{Profile: "respond", HostAuthority: true}, "script"); !strings.Contains(why, "over SSH") {
+		t.Fatalf("host authority on respond: %q", why)
+	}
+	if why := lockRefusal("box", &response.AgentTrustReport{Profile: "respond", Ceiling: "signed-scripts"}, "script"); !strings.Contains(why, "no scripts at all") {
+		t.Fatalf("signed-scripts on respond: %q", why)
+	}
+	// A monitor-only host is held there, so nothing tells the owner to raise it.
+	for _, profile := range []string{"monitor", "monitor-scripts"} {
+		why := lockRefusal("box", &response.AgentTrustReport{Profile: profile}, "terminal")
+		if !strings.Contains(why, profile+" permission profile") || strings.Contains(why, "change its profile") {
+			t.Fatalf("%s and a terminal: %q", profile, why)
+		}
+	}
+	srv, _, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+	srv.trust.mu.Lock()
+	srv.trust.init()
+	then := time.Now().Add(-time.Hour)
+	srv.trust.reports["raised"] = trustReportSeen{at: then, report: response.AgentTrustReport{V: 1, Profile: "respond", ManifestSeq: 2}}
+	srv.trust.manifests["raised"] = &response.CapabilityManifest{Profile: "engagement", Seq: 3, IssuedAt: then.Add(time.Minute).Unix()}
+	// The agent reported after that manifest and still holds the old one: it declined.
+	srv.trust.reports["declined"] = trustReportSeen{at: then.Add(time.Hour), report: response.AgentTrustReport{V: 1, Profile: "respond", ManifestSeq: 2}}
+	srv.trust.manifests["declined"] = &response.CapabilityManifest{Profile: "engagement", Seq: 3, IssuedAt: then.Add(time.Minute).Unix()}
+	// A hub restored from backup holds an older manifest than the agent.
+	srv.trust.reports["ahead"] = trustReportSeen{at: then, report: response.AgentTrustReport{V: 1, Profile: "engagement", ManifestSeq: 5}}
+	srv.trust.manifests["ahead"] = &response.CapabilityManifest{Profile: "respond", Seq: 3, IssuedAt: then.Add(time.Minute).Unix()}
+	// Lowered: refused at once, while the agent catches up.
+	srv.trust.reports["lowered"] = trustReportSeen{at: then, report: response.AgentTrustReport{V: 1, Profile: "engagement", ManifestSeq: 2}}
+	srv.trust.manifests["lowered"] = &response.CapabilityManifest{Profile: "respond", Seq: 3, IssuedAt: then.Add(time.Minute).Unix()}
+	srv.trust.mu.Unlock()
+	for id, refused := range map[string]bool{"raised": false, "declined": true, "ahead": false, "lowered": true} {
+		if why := srv.machineRefusal(id, "script"); (why != "") != refused {
+			t.Errorf("%s: %q", id, why)
+		}
+	}
+	// One request names every machine that would refuse it.
+	rec := httptest.NewRecorder()
+	if !srv.refuseLocked(rec, "script", "declined", "raised", "lowered") || rec.Code != http.StatusForbidden {
+		t.Fatalf("mixed targets: %d", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Count(body, "respond permission profile") != 2 {
+		t.Fatalf("both refused machines should be named: %s", body)
+	}
+	if why := srv.machineRefusal("no-report", "script"); why != "" {
+		t.Fatalf("a machine with no report is left to its agent: %q", why)
+	}
+}
+
+// A scheduled package on a machine that takes no scripts queues nothing and
+// shows up as blocked with the reason, then clears when the profile changes.
+func TestScheduleBlocksOnProfileWithoutScripts(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.responseEnabled = true
+	authorityOf(t, srv)
+	now := time.Now().UTC()
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "ep-lap", TenantID: "default", Hostname: "laptop-1", OS: "Windows 11 Home", Status: "online", LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	sc, _ := syncRealPackage(t, srv, "cleanup.ps1")
+	srv.trust.mu.Lock()
+	srv.trust.init()
+	srv.trust.reports["ep-lap"] = trustReportSeen{at: now, report: response.AgentTrustReport{V: 1, Profile: "respond"}}
+	srv.trust.mu.Unlock()
+	if w := adminPut(srv, "/api/v1/maintenance/settings", `{"package":"windows-cleanup","enabled":true}`); w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	srv.maintBlocks.kicks.Wait()
+	srv.runMaintenanceSchedules(now)
+	jobs := func() int {
+		list, err := srv.responseStore.ScriptJobs("default", "ep-lap", sc.ID, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(list)
+	}
+	if n := jobs(); n != 0 {
+		t.Fatalf("a machine that refuses scripts got %d jobs", n)
+	}
+	blocks := srv.maintBlocks.list()
+	if len(blocks) != 1 || !strings.Contains(blocks[0].Reason, "respond permission profile") || blocks[0].Endpoints[0] != "ep-lap" {
+		t.Fatalf("blocks: %+v", blocks)
+	}
+	srv.trust.mu.Lock()
+	srv.trust.manifests["ep-lap"] = &response.CapabilityManifest{Profile: "engagement", Seq: 1, IssuedAt: now.Add(time.Minute).Unix()}
+	srv.trust.mu.Unlock()
+	srv.runMaintenanceSchedules(now)
+	if n := jobs(); n != 1 {
+		t.Fatalf("after the profile change: %d jobs", n)
+	}
+	if blocks := srv.maintBlocks.list(); len(blocks) != 0 {
+		t.Fatalf("the block should clear: %+v", blocks)
 	}
 }

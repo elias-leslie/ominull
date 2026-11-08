@@ -35,6 +35,8 @@ Terminal and remote screen are refused by the agent under `monitor`, `isolate`, 
 hub signs: a terminal under those levels, hub-signed scripts (one-off, maintenance, playbook) under `monitor`, `isolate`
 and `respond`, under `(monitor-)signed-scripts` without a host authority, and on any host that pins one (those take
 scripts only by hand over SSH; the hub carries none); remote screen has its own preflight. The agent's refusal stays the real guard. The
+same goes for an endpoint's profile: a manifest without `script` (such as `respond`) is refused up front, and a scheduled
+package there queues nothing and shows as blocked with that reason, because the agent drops such an offer without a word. The
 hub's per-machine "remote access off" setting (docs/REMOTE_SCREEN.md §7) refuses them
 on the hub side as well; set it for the same machines.
 
