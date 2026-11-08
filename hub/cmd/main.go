@@ -34,7 +34,7 @@ const banner = `
 // VERSION in scripts/build-packages.sh so endpoints are only offered packages that the
 // hub can actually serve from its download directory.
 const (
-	defaultAgentVersion = "1.8.118"
+	defaultAgentVersion = "1.8.119"
 )
 
 // version is the git commit the binary was built from, set by
