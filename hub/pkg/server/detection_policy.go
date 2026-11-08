@@ -534,25 +534,27 @@ var tuningDirections = map[string]tuningDirection{
 	// Any change to a zone loosens something: a network added mutes the
 	// admin and sweep rules there, one removed drops its hosts' lab escape
 	// and always-on infrastructure pages.
-	"lab_cidrs":               anyLoosens,
-	"infra_cidrs":             anyLoosens,
-	"beacon_browsers":         addLoosens,
-	"beacon_page_span_min":    higherLoosens,
-	"decoy_addrs":             removeLoosens,
-	"decoy_names":             removeLoosens,
-	"domain_intel_feeds":      removeLoosens, // a feed dropped, or its confidence changed
-	"tunnel_services":         removeLoosens,
-	"intel_page_confidence":   higherLoosens,
-	"auto_isolate_roles":      removeLoosens,
-	"page_incident_hours":     higherLoosens,
-	"lan_sweep_hosts":         higherLoosens,
-	"lab_escape_hosts":        higherLoosens,
-	"beacon_page_score":       higherLoosens,
-	"beacon_rare_devices":     lowerLoosens,
-	"new_dest_upload_mb":      higherLoosens,
-	"new_dest_window_min":     lowerLoosens,
-	"max_plausible_rate_mbps": lowerLoosens,
-	"ephemeral_port_from":     anyLoosens, // a port range decides which flows count as served
+	"lab_cidrs":                   anyLoosens,
+	"infra_cidrs":                 anyLoosens,
+	"beacon_browsers":             addLoosens,
+	"beacon_page_span_min":        higherLoosens,
+	"decoy_addrs":                 removeLoosens,
+	"decoy_names":                 removeLoosens,
+	"domain_intel_feeds":          removeLoosens, // a feed dropped, or its confidence changed
+	"tunnel_services":             removeLoosens,
+	"intel_page_confidence":       higherLoosens,
+	"auto_isolate_roles":          removeLoosens,
+	"page_incident_hours":         higherLoosens,
+	"aico_fleet_fresh_minutes":    anyLoosens, // longer trusts an old word, shorter drops a dark-sensor page
+	"aico_fleet_off_memory_hours": higherLoosens,
+	"lan_sweep_hosts":             higherLoosens,
+	"lab_escape_hosts":            higherLoosens,
+	"beacon_page_score":           higherLoosens,
+	"beacon_rare_devices":         lowerLoosens,
+	"new_dest_upload_mb":          higherLoosens,
+	"new_dest_window_min":         lowerLoosens,
+	"max_plausible_rate_mbps":     lowerLoosens,
+	"ephemeral_port_from":         anyLoosens, // a port range decides which flows count as served
 }
 
 // tuningLoosens names each field whose change loosens detection; empty means

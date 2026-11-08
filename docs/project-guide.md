@@ -143,9 +143,7 @@ rotation returns the new secret once, and revocation stops the endpoint.
 An administrator enrolls a Linux host directly with `scripts/enroll-linux-host.sh --role ROLE
 [--monitor-only REASON] -- RUN...`, where RUN runs a command as root on the host (`ssh HOST sudo -n`, or
 `ssh root@pve-host pct exec ID --`); it needs `OMINULL_HUB_URL` and `OMINULL_ADMIN_KEY`. Agent VMs use role
-`agent`; a host the hub must never isolate also gets `--monitor-only`. Aico's Status row `ominull.fleet.coverage`
-(`scripts/fleet_coverage.py`, Aico routine `ominull-fleet-coverage` from `scripts/install-fleet-coverage.sh` on the workstation, every 15
-minutes) names the fleet machines in Aico Status that have no enrolled agent.
+`agent`; a host the hub must never isolate also gets `--monitor-only`. The hub's Status row `ominull.fleet.coverage` names the machines that report to Aico and have no enrolled agent.
 
 ## Package lifecycle and updates
 
@@ -269,7 +267,6 @@ belong to that name, so reattach with the same one.
 | `/api/v1/detection/expected/mark` | POST | admin: `{id, reason?, all_hosts?, days?}` turns a finding into a narrow expected rule (this program, this network, this host, this kind) and acknowledges the finding; audited as `EXPECTED_RULE_MARKED`; no release needed |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
 | `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason; what it closes is recorded as `FINDINGS_ACKNOWLEDGED` and counted on the health findings' detection-policy note, like an acknowledgement |
-| `/api/v1/endpoints/presence` | POST | admin: `{endpoint_id, presence, reason}` with presence `always_on`, `intermittent` (quiet alerts only after 30 days) or `parked` (never alerted when quiet; `lab` is accepted as its old name); reason required unless `always_on`; moving a host toward parked is authorized by the response authority on the same request (kind `detection_policy`, target `endpoint:<id>`), back toward always on applies at once; audited |
 | `/api/v1/topology/workspace` | GET | grouped communication data with stable asset IDs and observed domain/process evidence |
 | `/api/v1/router/telemetry` | POST | ingest one gateway poll: DHCP leases, conntrack flows, resolver queries and the answers they returned |
 | `/api/v1/router/flows` | GET | stored flow rollups, filterable by source, destination and hours |
@@ -407,8 +404,8 @@ resolver bypass of a removed agent runtime, counts). The authority's audit
 statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...",
 shortened to the count when the change leaves no room) or with "floor drill:
 blinds no floor case (the 10 MB burst yields to expected rules)". The drill does not block the save: the authority signs it and the
-audit and the detection-policy note show what it blinds. Presence and retirement
-reach no floor rule the drill runs, so their statements carry
+audit and the detection-policy note show what it blinds. Retirement
+reaches no floor rule the drill runs, so its statement carries
 no drill.
 
 Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
@@ -487,9 +484,7 @@ open alerts in the last 24 hours, agent egress findings at their worst severity,
 server agents quiet for 30 minutes or more, workstation agents quiet for over 7
 days, router collector freshness and certificate expiry, and so on.
 `GET /api/v1/health/findings` (fleet administrator only) returns the raw list for
-diagnostics; Aico's Status rows are built from it. An endpoint's presence
-(`/api/v1/endpoints/presence`) changes its allowance: intermittent hosts are reported after 30 days quiet,
-parked hosts never; the hub's own `ENDPOINT_SILENT` finding follows the same presence.
+diagnostics; Aico's Status rows are built from it. Aico owns which machines should be running: each push reply carries its fleet (`machine`, `intent`, `up`, `reports`), kept in setting `aico_fleet`. For a machine Aico says is off, a quiet agent is no finding; for one it says is up, a quiet agent past `silence_after_minutes` (counted from when the hub first heard it was up) pages as a dark sensor. A host Aico cannot speak for (the Windows laptops), or a view older than `aico_fleet_fresh_minutes`, keeps the stored presence: intermittent hosts are reported after 30 days quiet, parked hosts never. Exception: a machine last called off whose intent is on-demand or off stays off for `aico_fleet_off_memory_hours` once Aico's word lapses. A stopped always-on guest is sent as not known, so its presence keeps it watched. Presence is only set at enrolment (a server stays always-on, anything else starts intermittent).
 Device names appear only in structured fields, never in messages, except the alert summary,
 which is the notice's sentence.
 

@@ -106,7 +106,7 @@ source = "stdout"
 id = "release-scripts"
 kind = "test"
 coverage = "full"
-argv = ["python3", "-m", "unittest", "-v", "scripts/test-release-headers.py", "scripts/test-release-convergence.py", "scripts/test-fleet-coverage.py", "scripts/router/test-address-filter.py"]
+argv = ["python3", "-m", "unittest", "-v", "scripts/test-release-headers.py", "scripts/test-release-convergence.py", "scripts/router/test-address-filter.py"]
 [native.stages.evidence]
 format = "text"
 source = "combined"

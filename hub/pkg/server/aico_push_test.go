@@ -125,6 +125,7 @@ type aicoReceiver struct {
 	notices []map[string]any
 	rows    []map[string]any
 	server  *httptest.Server
+	reply   string
 }
 
 func newAicoReceiver(t *testing.T) *aicoReceiver {
@@ -142,6 +143,7 @@ func newAicoReceiver(t *testing.T) *aicoReceiver {
 		r.keys = append(r.keys, req.Header.Get("X-API-Key"))
 		r.notices, r.rows = body.Notices, body.Rows
 		w.WriteHeader(r.status)
+		_, _ = w.Write([]byte(r.reply))
 	}))
 	t.Cleanup(r.server.Close)
 	return r
@@ -629,5 +631,126 @@ func TestAicoResolvedRowsFitTheRoom(t *testing.T) {
 	}
 	if out := aicoResolvedRows(shown, live, now, 0); len(out) != 0 {
 		t.Fatalf("room 0 = %+v", out)
+	}
+}
+
+// Aico's reply carries the fleet; the hub keeps it and needs no list of its
+// own. A reply without one leaves the last view in place.
+func TestAicoPushKeepsTheFleetFromTheReply(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	r := newAicoReceiver(t)
+	aicoConfigure(t, srv, store, r, time.Now().Add(-time.Hour))
+	now := time.Now().UTC()
+
+	r.mu.Lock()
+	r.reply = `{"notices":[],"rows":1,"machines":[{"machine":"Web.lan","intent":"on-demand","up":true,"reports":true},{"machine":"","up":true},{"machine":"lost","up":null}]}`
+	r.mu.Unlock()
+	srv.aicoPushPass(now, r.server.Client())
+	fleet, err := store.AicoFleet()
+	if err != nil || !fleet.At.Equal(now) || len(fleet.Machines) != 2 {
+		t.Fatalf("fleet = %+v err=%v", fleet, err)
+	}
+	cfg := store.GetDetectionTuning()
+	if m, word := fleet.Word("web.example", now, cfg); word != storage.AicoSaysUp || m.Intent != "on-demand" || !m.UpSince.Equal(now) {
+		t.Fatalf("web = %+v word=%v", m, word)
+	}
+	if _, word := fleet.Word("lost", now, cfg); word != storage.AicoNoWord {
+		t.Fatal("a machine Aico cannot read counts as known")
+	}
+
+	r.mu.Lock()
+	r.reply = `{"notices":[],"rows":1}`
+	r.mu.Unlock()
+	srv.aicoPushPass(now.Add(time.Minute), r.server.Client())
+	if again, _ := store.AicoFleet(); !again.At.Equal(now) {
+		t.Fatalf("a reply with no fleet changed the view: %+v", again)
+	}
+}
+
+func TestFleetCoverageRow(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	yes, no := true, false
+	if row := srv.fleetCoverageRow(now); row.State != "warn" || !strings.Contains(row.Meaning, "Not known") {
+		t.Fatalf("no view yet: %+v", row)
+	}
+	for id, status := range map[string]string{"covered": "online", "gone": "retired"} {
+		if err := store.UpsertEndpoint(storage.Endpoint{ID: id, TenantID: "t-01", Hostname: id + ".lan", Status: status, LastSeenAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save := func(ms ...storage.AicoMachine) {
+		t.Helper()
+		if err := store.SaveAicoFleet(ms, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(storage.AicoMachine{Machine: "covered", Up: &yes, Reports: true},
+		storage.AicoMachine{Machine: "idle", Up: &no, Reports: true},
+		storage.AicoMachine{Machine: "guest-only", Up: &yes})
+	if row := srv.fleetCoverageRow(now); row.State != "ok" || row.Meaning != "All 1 fleet machines have an OmniNull agent; not counted while off: idle" {
+		t.Fatalf("covered: %+v", row)
+	}
+	save(storage.AicoMachine{Machine: "covered", Up: &yes, Reports: true},
+		storage.AicoMachine{Machine: "gone", Up: &yes, Reports: true},
+		storage.AicoMachine{Machine: "unread", Reports: true})
+	if row := srv.fleetCoverageRow(now); row.State != "warn" || row.Meaning != "2 of 3 fleet machines have no OmniNull agent: gone, unread" {
+		t.Fatalf("missing: %+v", row)
+	}
+	if row := srv.fleetCoverageRow(now.Add(time.Hour)); row.State != "warn" || !strings.Contains(row.Meaning, "Not known") {
+		t.Fatalf("a stale view counted as covered: %+v", row)
+	}
+}
+
+// Every reporting machine off is not "Aico lists no machines", and a long list
+// cannot make the row bigger than Aico accepts.
+func TestFleetCoverageRowEdges(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	no, yes := false, true
+	if err := store.SaveAicoFleet([]storage.AicoMachine{{Machine: "idle", Up: &no, Reports: true}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if row := srv.fleetCoverageRow(now); row.State != "ok" || strings.Contains(row.Meaning, "lists no machines") {
+		t.Fatalf("all off: %+v", row)
+	}
+	var many []storage.AicoMachine
+	for i := 0; i < 200; i++ {
+		many = append(many, storage.AicoMachine{Machine: fmt.Sprintf("a-machine-with-a-long-name-%03d", i), Up: &yes, Reports: true})
+	}
+	if err := store.SaveAicoFleet(many, now); err != nil {
+		t.Fatal(err)
+	}
+	if row := srv.fleetCoverageRow(now); len([]rune(row.Meaning)) > 300 || row.State != "warn" {
+		t.Fatalf("long list: %d runes, %s", len([]rune(row.Meaning)), row.State)
+	}
+}
+
+// The Quiet agents row follows Aico too: a machine it says is off is not quiet.
+func TestQuietAgentsFollowsAico(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	no := false
+	if err := store.UpsertEndpoint(storage.Endpoint{ID: "off", TenantID: "t-01", Hostname: "off", RoleTag: "server", Status: "offline", LastSeenAt: now.Add(-48 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	finding, err := srv.agentFinding(now)
+	if err != nil || finding.StatusID != ocsfStatusNew {
+		t.Fatalf("no view: the quiet server should show: %+v err=%v", finding, err)
+	}
+	if err := store.SaveAicoFleet([]storage.AicoMachine{{Machine: "off", Up: &no}}, now); err != nil {
+		t.Fatal(err)
+	}
+	finding, err = srv.agentFinding(now)
+	if err != nil || finding.StatusID != ocsfStatusResolved {
+		t.Fatalf("Aico says it is off: %+v err=%v", finding, err)
 	}
 }

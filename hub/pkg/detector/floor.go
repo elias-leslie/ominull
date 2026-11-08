@@ -60,7 +60,9 @@ const (
 const sweepCooldown = 10 * time.Minute
 
 // floorSilenceMinutes is the longest an always-on host may go quiet before it
-// is reported (silence_after_minutes). Silence itself cannot be switched off.
+// is reported (silence_after_minutes). No setting switches silence off; Aico's
+// authenticated reply saying a machine is off is what stops it for that machine
+// (storage.AicoFleet.Word), and Aico then answers for that machine being down.
 const floorSilenceMinutes = 15
 
 // ClampToFloor runs the floor wherever the tuning is weaker, and names each

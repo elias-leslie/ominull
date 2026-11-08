@@ -50,6 +50,7 @@ const (
 	aicoKeyName      = "ominull-hub"
 	aicoPushPath     = "/api/ominull/push"
 	aicoPushInterval = time.Minute
+	aicoReplyMax     = 1 << 20
 	aicoPushTimeout  = 15 * time.Second
 	aicoLookback     = 7 * 24 * time.Hour
 	aicoSentKeep     = 30 * 24 * time.Hour
@@ -247,7 +248,7 @@ func (s *Server) aicoPushPass(now time.Time, client *http.Client) {
 	if len(rows) > aicoListMax {
 		rows = rows[:aicoListMax]
 	}
-	err := aicoPost(client, target, key, notices, append(append([]aicoRow{}, rows...), resolved...))
+	fleet, err := aicoPost(client, target, key, notices, append(append([]aicoRow{}, rows...), resolved...))
 	_ = s.store.SetSetting(aicoLastAtSetting, now.Format(time.RFC3339))
 	switch {
 	case err != nil:
@@ -255,6 +256,11 @@ func (s *Server) aicoPushPass(now time.Time, client *http.Client) {
 		log.Printf("[!] Aico push failed: %v", err)
 	default:
 		_ = s.store.SetSetting(aicoLastOKSetting, now.Format(time.RFC3339))
+		if fleet != nil {
+			if err := s.store.SaveAicoFleet(fleet, now); err != nil {
+				log.Printf("[!] Aico push: saving the machine view failed: %v", err)
+			}
+		}
 		if noticeErr != nil {
 			_ = s.store.SetSetting(aicoLastErrSetting, "the alerts could not be read; health was sent")
 		} else {
@@ -269,7 +275,9 @@ func (s *Server) aicoPushPass(now time.Time, client *http.Client) {
 	}
 }
 
-func aicoPost(client *http.Client, target, key string, notices []aicoNotice, rows []aicoRow) error {
+// aicoPost sends one push and returns the machine view in Aico's reply, nil if
+// it sent none (an older Aico, or a reading that failed there).
+func aicoPost(client *http.Client, target, key string, notices []aicoNotice, rows []aicoRow) ([]storage.AicoMachine, error) {
 	if notices == nil {
 		notices = []aicoNotice{}
 	}
@@ -278,25 +286,32 @@ func aicoPost(client *http.Client, target, key string, notices []aicoNotice, row
 	}
 	payload, err := json.Marshal(map[string]any{"notices": notices, "rows": rows})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", key)
 	resp, err := client.Do(req)
 	if err != nil {
 		// The error text carries the URL, never the key (a header).
-		return fmt.Errorf("Aico not reached: %v", err)
+		return nil, fmt.Errorf("Aico not reached: %v", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, aicoReplyMax))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("Aico answered %d", resp.StatusCode)
+		return nil, fmt.Errorf("Aico answered %d", resp.StatusCode)
 	}
-	return nil
+	var reply struct {
+		Machines []storage.AicoMachine `json:"machines"`
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		log.Printf("[!] Aico push: the reply could not be read: %v", err)
+		return nil, nil
+	}
+	return reply.Machines, nil
 }
 
 // aicoShownRows reads the rows Aico last accepted with a next_run (id -> what).
@@ -627,12 +642,12 @@ func (s *Server) aicoRows(now time.Time) []aicoRow {
 	return rows
 }
 
-// aicoAllRows is every row the hub produces this pass: the hub's own machine row first, then the
-// rest with the ones needing a look first. Uncut.
+// aicoAllRows is every row the hub produces this pass: the hub's own machine and fleet coverage
+// rows first, then the rest with the ones needing a look first. Uncut.
 func (s *Server) aicoAllRows(now time.Time) []aicoRow {
 	rows := append(aicoFindingRows(s.healthFindings(now), now), s.retiredBuildRows(now)...)
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].State == "warn" && rows[j].State != "warn" })
-	return append([]aicoRow{aicoMachineRow(now)}, rows...)
+	return append([]aicoRow{aicoMachineRow(now), s.fleetCoverageRow(now)}, rows...)
 }
 
 // aicoMachineRow is the hub's own liveness row. Aico shows every other row of a machine as
@@ -642,6 +657,67 @@ func aicoMachineRow(now time.Time) aicoRow {
 	return aicoRow{ID: "ominull.machine", What: aicoRowMachine, Kind: "machine", Machine: aicoRowMachine, Project: aicoRowProject,
 		State: "ok", Meaning: "The OmniNull hub is up and pushing its checks",
 		LastRun: now.UTC().Format(time.RFC3339), NextRun: now.Add(aicoRowsDue).UTC().Format(time.RFC3339)}
+}
+
+// fleetCoverageRow compares Aico's fleet (the machines that send it their own
+// machine row) with the hub's enrolled agents: warn names the machines with no
+// agent, leaving out those Aico says are off, where nothing runs to protect. A
+// view that is missing or stale is never "all covered".
+func (s *Server) fleetCoverageRow(now time.Time) aicoRow {
+	row := aicoRow{ID: "ominull.fleet.coverage", What: "Fleet machines without an OmniNull agent", Kind: "check",
+		Machine: aicoRowMachine, Project: aicoRowProject, State: "warn", LastRun: now.UTC().Format(time.RFC3339),
+		NextRun: now.Add(aicoRowsDue).UTC().Format(time.RFC3339)}
+	fleet, err := s.store.AicoFleet()
+	if err != nil || !fleet.Fresh(now, time.Duration(s.store.GetDetectionTuning().AicoFleetFreshMinutes)*time.Minute) {
+		row.Meaning = "Not known which fleet machines are covered: Aico has not said which machines it knows"
+		return row
+	}
+	endpoints, err := s.store.ListEndpoints("")
+	if err != nil {
+		row.Meaning = "Not known which fleet machines are covered: the agent list could not be read"
+		return row
+	}
+	hosts := map[string]bool{}
+	for _, ep := range endpoints {
+		if ep.Status != "retired" {
+			hosts[storage.ShortHost(ep.Hostname)] = true
+		}
+	}
+	var missing, idle []string
+	counted := 0
+	for _, m := range fleet.Machines {
+		switch {
+		case !m.Reports:
+		case !hosts[m.Machine] && m.Up != nil && !*m.Up:
+			idle = append(idle, m.Machine)
+		case !hosts[m.Machine]:
+			missing = append(missing, m.Machine)
+			counted++
+		default:
+			counted++
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(idle)
+	note := ""
+	if len(idle) > 0 {
+		note = "; not counted while off: " + strings.Join(idle, ", ")
+	}
+	switch {
+	case counted == 0 && len(idle) == 0:
+		row.Meaning = "Not known which fleet machines are covered: Aico lists no machines"
+	case len(missing) == 0:
+		row.State = "ok"
+		row.Meaning = fmt.Sprintf("All %d fleet machines have an OmniNull agent%s", counted, note)
+	default:
+		verb := "have"
+		if len(missing) == 1 {
+			verb = "has"
+		}
+		row.Meaning = fmt.Sprintf("%d of %d fleet machines %s no OmniNull agent: %s%s", len(missing), counted, verb, strings.Join(missing, ", "), note)
+	}
+	row.Meaning = cutRunes(row.Meaning, 300)
+	return row
 }
 
 type retiredKey struct {

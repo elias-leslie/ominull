@@ -346,6 +346,9 @@ func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 	if err != nil {
 		return feedFinding{}, err
 	}
+	fleet, _ := s.store.AicoFleet()
+	cfg := s.store.GetDetectionTuning()
+	newest := storage.NewestEndpoints(list)
 	var servers, laptops []feedResource
 	var longest time.Duration
 	quiet := map[string]string{}
@@ -367,6 +370,18 @@ func (s *Server) agentFinding(now time.Time) (feedFinding, error) {
 			base = feedServerQuiet
 		}
 		allowance, watched := ep.QuietAllowance(base)
+		if newest[storage.ShortHost(ep.Hostname)] == ep.ID {
+			// Aico owns whether the machine should be running.
+			switch m, word := fleet.Word(ep.Hostname, now, cfg); word {
+			case storage.AicoSaysOff:
+				watched = false
+			case storage.AicoSaysUp:
+				allowance, watched = base, true
+				if m.UpSince.After(ep.LastSeenAt) { // a machine just up has its grace
+					age = now.Sub(m.UpSince)
+				}
+			}
+		}
 		switch {
 		case !watched || age < allowance:
 			continue

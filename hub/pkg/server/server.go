@@ -3646,7 +3646,6 @@ func (s *Server) routes() *http.ServeMux {
 	// Host-authority courier: /api/v1/endpoints/{id}/jobs/signed[/reserve] (signed_jobs.go).
 	mux.HandleFunc("/api/v1/endpoints/", s.authMiddleware(requireAdmin(s.handleEndpointSubroutes)))
 	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
-	mux.HandleFunc("/api/v1/endpoints/presence", s.authMiddleware(requireAdmin(s.handleEndpointPresence)))
 	mux.HandleFunc("/api/v1/endpoints/cert-renewal", s.authMiddleware(requireAdmin(s.handleAgentCertRenewal)))
 	mux.HandleFunc("/api/v1/endpoints/monitor-only", s.authMiddleware(requireAdmin(s.handleMonitorOnly)))
 	mux.HandleFunc("/api/v1/trust/rules", s.authMiddleware(requireAdmin(s.handleTrustRules)))

@@ -134,6 +134,13 @@ type DetectionTuning struct {
 	// escalation asks again.
 	PageIncidentHours int `json:"page_incident_hours"`
 
+	// AicoFleetFreshMinutes is how old Aico's machine view may be before the
+	// silence watch stops acting on it and falls back to stored presence.
+	AicoFleetFreshMinutes int `json:"aico_fleet_fresh_minutes"`
+	// AicoFleetOffMemoryHours is how long a machine Aico last called off, and
+	// which is not meant to be always on, stays off once Aico's word lapses.
+	AicoFleetOffMemoryHours int `json:"aico_fleet_off_memory_hours"`
+
 	// LANSweepHosts is how many home-zone hosts one process may reach in the
 	// sweep window before it pages; LabEscapeHosts how many hosts outside
 	// the lab a lab host may reach before it pages.
@@ -216,21 +223,23 @@ func defaultDetectionTuning() DetectionTuning {
 
 		ExpectedRules: seedExpectedRules(),
 
-		DomainIntelFeeds:     defaultDomainIntelFeeds(),
-		TunnelServices:       defaultTunnelServices(),
-		BeaconBrowsers:       defaultBeaconBrowsers(),
-		IntelPageConfidence:  IntelPageConfidenceDefault,
-		AutoIsolateRoles:     []string{RoleLab, RolePersonal},
-		PageIncidentHours:    24,
-		LANSweepHosts:        10,
-		LabEscapeHosts:       1,
-		BeaconPageScore:      0.90,
-		BeaconPageSpanMin:    30,
-		BeaconRareDevices:    1,
-		NewDestUploadMB:      1,
-		NewDestWindowMin:     60,
-		MaxPlausibleRateMbps: 10000,
-		EphemeralPortFrom:    32768,
+		DomainIntelFeeds:        defaultDomainIntelFeeds(),
+		TunnelServices:          defaultTunnelServices(),
+		BeaconBrowsers:          defaultBeaconBrowsers(),
+		IntelPageConfidence:     IntelPageConfidenceDefault,
+		AutoIsolateRoles:        []string{RoleLab, RolePersonal},
+		PageIncidentHours:       24,
+		AicoFleetFreshMinutes:   10,
+		AicoFleetOffMemoryHours: 24,
+		LANSweepHosts:           10,
+		LabEscapeHosts:          1,
+		BeaconPageScore:         0.90,
+		BeaconPageSpanMin:       30,
+		BeaconRareDevices:       1,
+		NewDestUploadMB:         1,
+		NewDestWindowMin:        60,
+		MaxPlausibleRateMbps:    10000,
+		EphemeralPortFrom:       32768,
 	}
 }
 
@@ -470,6 +479,8 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AutoIsolateRoles = tidyList(t.AutoIsolateRoles)
 	t.IntelPageConfidence = clampInt(t.IntelPageConfidence, 1, 100, IntelPageConfidenceDefault)
 	t.PageIncidentHours = clampInt(t.PageIncidentHours, 1, 168, 24)
+	t.AicoFleetFreshMinutes = clampInt(t.AicoFleetFreshMinutes, 2, 1440, 10)
+	t.AicoFleetOffMemoryHours = clampInt(t.AicoFleetOffMemoryHours, 1, 168, 24)
 	t.LANSweepHosts = clampInt(t.LANSweepHosts, 2, 256, 10)
 	t.LabEscapeHosts = clampInt(t.LabEscapeHosts, 1, 256, 1)
 	if t.BeaconPageScore <= 0 || t.BeaconPageScore > 1 {

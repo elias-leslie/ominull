@@ -223,6 +223,10 @@ func (s *Server) handleEnrollmentRedeem(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "endpoint could not be registered")
 		return
 	}
+	if err := s.store.DefaultPresenceAtEnrolment(endpointID, profile.Role); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "endpoint could not be registered")
+		return
+	}
 	cert, err := s.pki.IssueClientCert(endpointID, req.IP)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "endpoint certificate could not be issued")

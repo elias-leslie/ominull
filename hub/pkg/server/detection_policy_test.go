@@ -546,10 +546,9 @@ func TestAMixedSaveIsSignedOnlyForItsLoosening(t *testing.T) {
 	}
 }
 
-// Presence and retirement decide whether the silence floor reports a host, so
-// watching one less closely is a loosening the authority signs, on the first
-// request.
-func TestParkingOrRetiringAHostIsSignedAtOnce(t *testing.T) {
+// Retiring a host takes it off the silence floor, a loosening the authority
+// signs on the first request.
+func TestRetiringAHostIsSignedAtOnce(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -569,25 +568,11 @@ func TestParkingOrRetiringAHostIsSignedAtOnce(t *testing.T) {
 		return on && ep.Status != "retired"
 	}
 
-	park := `{"endpoint_id":"srv-1","presence":"parked","reason":"off between tests"}`
 	if !watched() {
 		t.Fatal("the host starts unwatched")
 	}
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", park, ""), http.StatusOK)
-	if a.Target != "endpoint:srv-1" || a.Summary != "host srv-1 (web); presence always_on -> parked; reason off between tests" || watched() {
-		t.Fatalf("park authorization = %+v watched=%v", a, watched())
-	}
-	// Watching it closely again needs no signature, and is noted.
-	n := len(authorizedAudit(t, store))
-	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/presence", `{"endpoint_id":"srv-1","presence":"always_on"}`, ""); w.Code != http.StatusOK || !watched() {
-		t.Fatalf("always on = %d %s", w.Code, w.Body.String())
-	}
-	if got := len(authorizedAudit(t, store)); got != n {
-		t.Fatalf("watching a host closely was sent to the authority (%d -> %d rows)", n, got)
-	}
-
 	retire := `{"endpoint_id":"srv-1","reason":"decommissioned"}`
-	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""), http.StatusOK)
+	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""), http.StatusOK)
 	if a.Summary != "host srv-1 (web); isolated true -> false; status active -> retired; reason decommissioned" || watched() {
 		t.Fatalf("retire authorization = %+v watched=%v", a, watched())
 	}
@@ -595,13 +580,12 @@ func TestParkingOrRetiringAHostIsSignedAtOnce(t *testing.T) {
 		t.Fatalf("the host was not retired and released: %+v", ep)
 	}
 	// Retiring a host already retired changes nothing and signs nothing.
-	n = len(authorizedAudit(t, store))
+	n := len(authorizedAudit(t, store))
 	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""); w.Code != http.StatusOK || len(authorizedAudit(t, store)) != n {
 		t.Fatalf("retire again = %d %s", w.Code, w.Body.String())
 	}
 	kinds := noteKinds(policyNotes(t, store))
-	if len(kinds) != 3 || !strings.HasPrefix(kinds[0], "loosened (retire) with authorization") || kinds[1] != "tightened endpoint watch presence" ||
-		!strings.HasPrefix(kinds[2], "loosened (presence) with authorization") {
+	if len(kinds) != 1 || !strings.HasPrefix(kinds[0], "loosened (retire) with authorization") {
 		t.Fatalf("notes = %v", kinds)
 	}
 }

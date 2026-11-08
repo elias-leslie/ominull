@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,20 @@ func (ep Endpoint) QuietAllowance(alwaysOn time.Duration) (time.Duration, bool) 
 		return max(alwaysOn, IntermittentQuiet), true
 	}
 	return alwaysOn, true
+}
+
+// DefaultPresenceAtEnrolment sets what a new host is expected to do until Aico
+// speaks for it: a server is meant to stay on, anything else may be a laptop
+// that gets shut. A presence already chosen for the host stands.
+func (s *Store) DefaultPresenceAtEnrolment(id, role string) error {
+	if strings.EqualFold(strings.TrimSpace(role), "server") {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE endpoints SET presence = ? WHERE id = ? AND COALESCE(presence, ?) = ?`,
+		PresenceIntermittent, id, PresenceAlwaysOn, PresenceAlwaysOn)
+	return err
 }
 
 // SetEndpointPresence records how often an endpoint is expected to report.

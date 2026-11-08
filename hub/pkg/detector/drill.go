@@ -243,12 +243,25 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 	silent := DrillCase{Rule: "host gone quiet", Want: silenceAnomalyType, Tuning: live}
 	quiet := ep
 	quiet.LastSeenAt = now.Add(-(floorSilenceMinutes + 1) * time.Minute)
-	if q, threshold, watched := silentFor(quiet, live, now); watched && q > threshold {
+	if q, threshold, _, watched := silentFor(quiet, live, storage.AicoFleet{}, now); watched && q > threshold {
 		silent.Findings = []storage.AnomalyAlert{{EndpointID: DrillEndpointID, AnomalyType: silenceAnomalyType, Severity: "HIGH"}}
 	}
 	cases = append(cases, silent)
 
-	// An expected rule silences neither sweep: each program a rule names is
+	// A machine Aico says is up, its agent quiet past the floor: no presence
+	// the host carries can hide it.
+	dark := DrillCase{Rule: "machine up, sensor dark", Want: silenceAnomalyType, Tuning: live}
+	up := true
+	darkHost := quiet
+	darkHost.Presence = storage.PresenceParked
+	darkRun := New(store, nil, nil)
+	darkRun.pinned = &live
+	darkRun.sink = func(a storage.AnomalyAlert) { dark.Findings = append(dark.Findings, a) }
+	darkRun.sweepEndpoint(darkHost, live, storage.AicoFleet{At: now, Machines: []storage.AicoMachine{
+		{Machine: storage.ShortHost(darkHost.Hostname), Up: &up, UpSince: quiet.LastSeenAt}}}, now)
+	cases = append(cases, dark)
+
+	// An expected rule silences neither darkRun: each program a rule names is
 	// run through both as the process it matches. An installed resolver or
 	// container runtime a rule names is exempt from the sweeps in code, not by
 	// the rule.

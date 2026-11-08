@@ -48,10 +48,12 @@ type silenceWatch struct {
 	mu       sync.Mutex
 	reported map[string]time.Time
 	observed map[string]bool
+	// dark records which reported hosts were reported as a dark sensor.
+	dark map[string]bool
 }
 
 func newSilenceWatch() *silenceWatch {
-	return &silenceWatch{reported: make(map[string]time.Time), observed: make(map[string]bool)}
+	return &silenceWatch{reported: make(map[string]time.Time), observed: make(map[string]bool), dark: make(map[string]bool)}
 }
 
 // StartSilenceWatch sweeps the fleet until the context is cancelled.
@@ -83,29 +85,58 @@ func (e *Engine) SweepSilence(now time.Time) {
 		return
 	}
 
+	fleet, err := e.store.AicoFleet()
+	if err != nil {
+		log.Printf("[-] The silence sweep could not read Aico's machine view: %v", err)
+	}
+	newest := storage.NewestEndpoints(endpoints)
 	for _, endpoint := range endpoints {
-		quiet, threshold, watched := silentFor(endpoint, cfg, now)
-		if !watched {
-			continue
+		view := fleet
+		if newest[storage.ShortHost(endpoint.Hostname)] != endpoint.ID {
+			view = storage.AicoFleet{}
 		}
-		if quiet > threshold {
-			e.reportSilence(endpoint, quiet, threshold, now)
-			continue
-		}
+		e.sweepEndpoint(endpoint, cfg, view, now)
+	}
+}
+
+func (e *Engine) sweepEndpoint(endpoint storage.Endpoint, cfg storage.DetectionTuning, fleet storage.AicoFleet, now time.Time) {
+	quiet, threshold, dark, watched := silentFor(endpoint, cfg, fleet, now)
+	switch {
+	case !watched:
+		e.reportUnwatched(endpoint, now)
+	case quiet > threshold:
+		e.reportSilence(endpoint, now.Sub(endpoint.LastSeenAt), threshold, dark, now)
+	case now.Sub(endpoint.LastSeenAt) <= threshold:
+		// A machine just up has its grace; its agent has not come back yet.
 		e.reportReturn(endpoint, now)
 	}
 }
 
 // silentFor is how long an endpoint has been quiet and how long it may be;
-// watched is false for a host whose silence means nothing.
-func silentFor(endpoint storage.Endpoint, cfg storage.DetectionTuning, now time.Time) (quiet, threshold time.Duration, watched bool) {
+// watched is false for a host whose silence means nothing. Aico says whether
+// the machine is meant to be running: off, the agent's silence means nothing
+// (Aico itself tells the owner if the machine should be on); up, it means the
+// sensor is dark, counted from when the machine came up. A host Aico cannot
+// speak for keeps its stored presence.
+func silentFor(endpoint storage.Endpoint, cfg storage.DetectionTuning, fleet storage.AicoFleet, now time.Time) (quiet, threshold time.Duration, dark, watched bool) {
 	if !watchableEndpoint(endpoint) {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
-	// A lab guest is off between experiments and an intermittent laptop is
-	// shut most evenings: their absences are not findings, or not yet.
-	threshold, watched = endpoint.QuietAllowance(time.Duration(cfg.SilenceAfterMinutes) * time.Minute)
-	return now.Sub(endpoint.LastSeenAt), threshold, watched
+	base := time.Duration(cfg.SilenceAfterMinutes) * time.Minute
+	switch m, word := fleet.Word(endpoint.Hostname, now, cfg); word {
+	case storage.AicoSaysOff:
+		return 0, 0, false, false
+	case storage.AicoSaysUp:
+		from := endpoint.LastSeenAt
+		if m.UpSince.After(from) {
+			from = m.UpSince
+		}
+		return now.Sub(from), base, true, true
+	}
+	// An intermittent laptop is shut most evenings: its absences are not
+	// findings, or not yet.
+	threshold, watched = endpoint.QuietAllowance(base)
+	return now.Sub(endpoint.LastSeenAt), threshold, false, watched
 }
 
 // watchableEndpoint excludes the hosts for which silence means nothing.
@@ -124,16 +155,22 @@ func watchableEndpoint(endpoint storage.Endpoint) bool {
 	return !endpoint.LastSeenAt.IsZero()
 }
 
-func (e *Engine) reportSilence(endpoint storage.Endpoint, quiet, threshold time.Duration, now time.Time) {
+func (e *Engine) reportSilence(endpoint storage.Endpoint, quiet, threshold time.Duration, dark bool, now time.Time) {
 	e.silence.mu.Lock()
 	_, already := e.silence.reported[endpoint.ID]
+	wasDark := e.silence.dark[endpoint.ID]
 	firstSight := !e.silence.observed[endpoint.ID]
 	if !already {
 		e.silence.reported[endpoint.ID] = now
 	}
+	if dark {
+		e.silence.dark[endpoint.ID] = true
+	}
 	e.silence.observed[endpoint.ID] = true
 	e.silence.mu.Unlock()
-	if already {
+	// A finding from while Aico's word had lapsed may only have been recorded:
+	// it does not stand in for the page a dark sensor owes.
+	if already && (wasDark || !dark) {
 		return
 	}
 
@@ -141,8 +178,14 @@ func (e *Engine) reportSilence(endpoint storage.Endpoint, quiet, threshold time.
 	// about a host this process has not decided on before. A host that returned
 	// and went dark again is a new event, and would otherwise be swallowed by
 	// its own still-open previous finding.
-	if firstSight {
-		open, err := e.store.HasOpenAnomaly(endpoint.ID, silenceAnomalyType)
+	if firstSight && e.sink == nil {
+		var open bool
+		var err error
+		if dark {
+			open, err = e.store.HasOpenDarkSensor(endpoint.ID, silenceAnomalyType)
+		} else {
+			open, err = e.store.HasOpenAnomaly(endpoint.ID, silenceAnomalyType)
+		}
 		if err != nil {
 			log.Printf("[-] The silence sweep could not check for an existing finding on %s: %v", endpoint.ID, err)
 		}
@@ -155,6 +198,11 @@ func (e *Engine) reportSilence(endpoint storage.Endpoint, quiet, threshold time.
 	title := fmt.Sprintf("Agent stopped reporting on %s", name)
 	description := fmt.Sprintf("%s last reported %s ago, past the %s this hub waits before calling a host silent. Every behavioural detector on this endpoint is blind until it returns, which is what stopping the agent is for; it is also what a rebuilt, crashed or disconnected host looks like.",
 		name, quiet.Truncate(time.Minute), threshold)
+	if dark {
+		title = fmt.Sprintf("Sensor dark on %s: the machine is up, its agent is not reporting", name)
+		description = fmt.Sprintf("Aico says %s is up, but its agent last reported %s ago. Every behavioural detector on this endpoint is blind until it returns, which is what stopping the agent is for; it is also what a crashed agent looks like.",
+			name, quiet.Truncate(time.Minute))
+	}
 
 	anomaly := storage.AnomalyAlert{
 		ID:          uuid.New().String(),
@@ -172,8 +220,13 @@ func (e *Engine) reportSilence(endpoint storage.Endpoint, quiet, threshold time.
 		Description: description,
 		Details: fmt.Sprintf("Last seen: %s | Silent for: %s | Threshold: %s | OS: %s | Address: %s",
 			endpoint.LastSeenAt.UTC().Format(time.RFC3339), quiet.Truncate(time.Minute), threshold, endpoint.OS, endpoint.IP),
-		Evidence:  silenceEvidence(endpoint, quiet, threshold),
+		Evidence:  silenceEvidence(endpoint, quiet, threshold, dark),
 		Timestamp: now,
+	}
+	if e.sink != nil { // a drill: nothing is stored
+		e.stampClass(&anomaly)
+		e.sink(anomaly)
+		return
 	}
 	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
 		log.Printf("[-] The silence finding for %s could not be written: %v", endpoint.ID, err)
@@ -186,6 +239,7 @@ func (e *Engine) reportReturn(endpoint storage.Endpoint, now time.Time) {
 	e.silence.mu.Lock()
 	since, wasReported := e.silence.reported[endpoint.ID]
 	delete(e.silence.reported, endpoint.ID)
+	delete(e.silence.dark, endpoint.ID)
 	e.silence.observed[endpoint.ID] = true
 	e.silence.mu.Unlock()
 	if !wasReported {
@@ -214,6 +268,39 @@ func (e *Engine) reportReturn(endpoint storage.Endpoint, now time.Time) {
 	log.Printf("[*] ANOMALY ALERT [LOW]: %s", anomaly.Title)
 }
 
+// reportUnwatched closes the book on a host reported as silent that has since
+// been switched off or retired: if it comes up later with a dark sensor, that is
+// a new event, not the old finding going on.
+func (e *Engine) reportUnwatched(endpoint storage.Endpoint, now time.Time) {
+	e.silence.mu.Lock()
+	since, wasReported := e.silence.reported[endpoint.ID]
+	delete(e.silence.reported, endpoint.ID)
+	delete(e.silence.dark, endpoint.ID)
+	e.silence.observed[endpoint.ID] = true
+	e.silence.mu.Unlock()
+	if !wasReported {
+		return
+	}
+	name := endpointName(endpoint)
+	anomaly := storage.AnomalyAlert{
+		ID:          uuid.New().String(),
+		TenantID:    endpoint.TenantID,
+		LocationID:  endpoint.LocationID,
+		EndpointID:  endpoint.ID,
+		Hostname:    endpoint.Hostname,
+		AnomalyType: recoveryAnomalyType,
+		Severity:    "LOW",
+		Title:       fmt.Sprintf("Agent no longer expected on %s", name),
+		Description: fmt.Sprintf("%s is off or retired, so its agent's silence since %s no longer means anything. The gap before that is left in place.",
+			name, since.UTC().Format(time.RFC3339)),
+		Details:   fmt.Sprintf("Noted: %s | Silent since: %s", now.UTC().Format(time.RFC3339), since.UTC().Format(time.RFC3339)),
+		Timestamp: now,
+	}
+	if err := e.store.CreateAnomalyAlert(anomaly); err != nil {
+		log.Printf("[-] The note for %s could not be written: %v", endpoint.ID, err)
+	}
+}
+
 func endpointName(endpoint storage.Endpoint) string {
 	if strings.TrimSpace(endpoint.Hostname) != "" {
 		return endpoint.Hostname
@@ -221,8 +308,8 @@ func endpointName(endpoint storage.Endpoint) string {
 	return endpoint.ID
 }
 
-func silenceEvidence(endpoint storage.Endpoint, quiet, threshold time.Duration) string {
-	return fmt.Sprintf(`{"last_seen_at":%q,"silent_seconds":%d,"threshold_seconds":%d,"os":%q,"role_tag":%q,"presence":%q,"is_isolated":%t}`,
+func silenceEvidence(endpoint storage.Endpoint, quiet, threshold time.Duration, dark bool) string {
+	return fmt.Sprintf(`{"last_seen_at":%q,"silent_seconds":%d,"threshold_seconds":%d,"os":%q,"role_tag":%q,"presence":%q,"is_isolated":%t,"sensor_dark":%t}`,
 		endpoint.LastSeenAt.UTC().Format(time.RFC3339), int64(quiet.Seconds()), int64(threshold.Seconds()),
-		endpoint.OS, endpoint.RoleTag, endpoint.Presence, endpoint.IsIsolated)
+		endpoint.OS, endpoint.RoleTag, endpoint.Presence, endpoint.IsIsolated, dark)
 }

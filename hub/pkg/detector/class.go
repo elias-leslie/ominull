@@ -236,7 +236,7 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 		ep, known := cx.byID[a.EndpointID]
 		switch {
 		case ev.SensorDark:
-			return page("the host is still on the network while its sensor is dark")
+			return page("Aico says the machine is up while its sensor is dark")
 		case !known || storage.NormalizePresence(ep.Presence) != storage.PresenceAlwaysOn:
 			return record("the hub does not expect this host to be on all the time")
 		case cx.RoleOf(ep) == storage.RoleInfra:
