@@ -65,8 +65,13 @@ int main(int argc, char **argv) {
           current.st_ino != initial.st_ino);
     const unsigned port = 9005;
     ForgetPathMTU();
+    const char *echo4[] = {"ping", "-c1", "-W1", argv[3], NULL};
+    const char *echo6[] = {"ping", "-6", "-c1", "-W1", argv[4], NULL};
+    /* The link has only just come up, so give the neighbor lookup a moment. */
+    const char *firstEcho6[] = {"ping", "-6", "-c3", "-W1", argv[4], NULL};
+    CHECK(RunTool(echo4) == 0 && RunTool(firstEcho6) == 0 && RunTool(echo6) == 0);
     CHECK(Transfer(argv[1], port) && Transfer(argv[2], port));
-    puts("Precondition: both transfers work through the smaller link with no rules");
+    puts("Precondition: the router answers and both transfers work through the smaller link with no rules");
 
     atexit(Cleanup);
     char allowed[2][64], empty[1][64] = {{0}};
@@ -81,8 +86,6 @@ int main(int argc, char **argv) {
     CHECK(v4 && v6);
     puts("An allowed connection hears the router's packet-too-big while isolated");
 
-    const char *echo4[] = {"ping", "-c1", "-W1", argv[3], NULL};
-    const char *echo6[] = {"ping", "-6", "-c1", "-W1", argv[4], NULL};
     CHECK(RunTool(echo4) != 0 && RunTool(echo6) != 0);
     puts("Echo stays blocked");
 

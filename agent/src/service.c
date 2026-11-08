@@ -623,7 +623,6 @@ bool HubAddressLiteral(const AGENT_CONFIG *config, char *out, size_t cap) {
 static bool known = false;
 static bool appliedIsolated = false;
 static OMINULL_HUB_TARGETS appliedHubTargets;
-static bool g_HubFollowed = false;
 static char appliedPeers[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
 static int appliedPeerCount = 0;
 static char appliedAllow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
@@ -708,11 +707,10 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
 
     /* The dead-man timer released this host without the hub's agreement.
      * Forget what was applied so the next answer is treated as new and the
-     * isolation is re-applied if the hub still wants one. A followed address
-     * ends the same way: the rebuild looks the name up and opens the plain hole. */
-    if (g_ForgetApplied || g_HubFollowed) {
+     * isolation is re-applied if the hub still wants one. */
+    if (g_ForgetApplied) {
         known = false;
-        g_ForgetApplied = g_HubFollowed = false;
+        g_ForgetApplied = false;
     }
 
     const char* p = strstr(respJson, "\"is_isolated\":");
@@ -855,9 +853,10 @@ static void AdoptIsolationInForce(void) {
 /* FollowHubAddress: a hub that moved can't say so to an isolated host, whose hole still
  * points at the old address, so the host would wait for the dead-man timer to release
  * it. While the hub isn't answering, its name is looked up again and any new address
- * joins the old: the hub's TCP port, for this agent's own connections only, because an
- * unanswered lookup could come from whoever is keeping the hub quiet. The hub's next
- * answer proves itself by its certificate and the rebuild it causes ends this.
+ * joins the old, on the hub's TCP port, below the blocks and for this program only. An
+ * unanswered lookup could come from whoever is keeping the hub quiet, so it stays that
+ * way through this isolation: only the agent needs it, and the next policy change
+ * rebuilds from a fresh lookup as ever.
  * Needs rules this run built: after a restart the lists aren't known. */
 static void FollowHubAddress(const AGENT_CONFIG *config) {
     if (!known || !appliedIsolated || !engineReady || appliedHubTargets.count == 0) return;
@@ -881,7 +880,6 @@ static void FollowHubAddress(const AGENT_CONFIG *config) {
            "so this agent may try it too.\n", moved);
     fflush(stdout);
     appliedHubTargets = next;
-    g_HubFollowed = true;
     g_HubPeers = next;
     g_HubPeerResolved = true;
 }

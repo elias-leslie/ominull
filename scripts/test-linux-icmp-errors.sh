@@ -32,6 +32,7 @@ sudo -n ip -n "$R" addr add 2001:db8:1::fe/64 dev mtu-ra nodad
 sudo -n ip -n "$R" addr add 2001:db8:2::fe/64 dev mtu-rb nodad
 sudo -n ip -n "$B" addr add 2001:db8:2::2/64 dev mtu-b nodad
 sudo -n ip -n "$A" link set mtu-a up
+sudo -n ip -n "$R" link set lo up   # IPv6 answers to its own address need it
 sudo -n ip -n "$R" link set mtu-ra up
 sudo -n ip -n "$R" link set mtu-rb up
 sudo -n ip -n "$B" link set mtu-b up

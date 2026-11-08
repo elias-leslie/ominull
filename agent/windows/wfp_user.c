@@ -424,7 +424,9 @@ static DWORD Wfp_AddHubPermits(const OMINULL_HUB_TARGETS *hub) {
         strcpy(rule.protocol, "tcp"); rule.port = hub->port;
         int family = ServiceCondition(&rule, cond, &store);
         UINT32 count = 3;
-        /* A followed address rests on a lookup alone: this program's connections only. */
+        UINT8 weight = OMINULL_WEIGHT_PERMIT_HUB;
+        /* A followed address rests on a lookup alone: this program's connections only,
+         * and below the blocks so a lying answer can't name a quarantined address. */
         if (hub->agent_only[i]) {
             wchar_t path[MAX_PATH];
             if (!self) {
@@ -439,9 +441,10 @@ static DWORD Wfp_AddHubPermits(const OMINULL_HUB_TARGETS *hub) {
             cond[3].conditionValue.type = FWP_BYTE_BLOB_TYPE;
             cond[3].conditionValue.byteBlob = self;
             count = 4;
+            weight = OMINULL_WEIGHT_PERMIT_ALLOW;
         }
         status = AddFilterEverywhere(L"Ominull Analyst Hub Pinhole", FWP_ACTION_PERMIT,
-                                     OMINULL_WEIGHT_PERMIT_HUB, cond, count, family);
+                                     weight, cond, count, family);
         if (status != ERROR_SUCCESS) break;
     }
     if (self) FwpmFreeMemory0((void**)&self);

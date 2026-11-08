@@ -1216,10 +1216,12 @@ static void SetSelfHubPeer(const LINUX_AGENT_CONFIG* config) {
     g_HubPeerPort = parsed > 0 && parsed <= UINT16_MAX ? (uint16_t)parsed : 0;
 }
 
+static OMINULL_HUB_TARGETS appliedHubTargets;
 static bool IsOwnHubFlow(const FLOW_CANDIDATE* candidate, uint32_t pid) {
     return g_HubPeerPort != 0 && pid != 0 && pid == g_SelfPid &&
            candidate->dst_port == g_HubPeerPort &&
-           strcmp(candidate->dst_ip, g_HubPeerAddr) == 0;
+           (strcmp(candidate->dst_ip, g_HubPeerAddr) == 0 ||
+            OminullHubTargetsHas(&appliedHubTargets, candidate->dst_ip));
 }
 
 /* SelectFlowCandidates chooses which sockets get the batch's wire slots.
@@ -1803,20 +1805,12 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
         char port[6]; snprintf(port, sizeof(port), "%u", hub->port);
         for (size_t i = 0; i < hub->count; i++) {
             const char *address = hub->addresses[i];
-            if ((strchr(address, ':') != NULL) != v6) continue;
+            if (hub->agent_only[i] || (strchr(address, ':') != NULL) != v6) continue;
             const char *hubIn[] = {tool, "-A", OMINULL_NEXT_IN, "-s", address,
                 "-p", "tcp", "--sport", port, "-j", "RETURN", NULL};
             const char *hubOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-d", address,
                 "-p", "tcp", "--dport", port, "-j", "RETURN", NULL};
-            /* A followed address rests on a lookup alone: only this agent may call
-             * it, and nothing there may open a connection to this host. */
-            char uid[16]; snprintf(uid, sizeof(uid), "%u", (unsigned)geteuid());
-            const char *followedIn[] = {tool, "-A", OMINULL_NEXT_IN, "-s", address,
-                "-p", "tcp", "--sport", port, "!", "--syn", "-j", "RETURN", NULL};
-            const char *followedOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-d", address,
-                "-p", "tcp", "--dport", port, "-m", "owner", "--uid-owner", uid, "-j", "RETURN", NULL};
-            bool followed = hub->agent_only[i];
-            if (RunFw(followed ? followedIn : hubIn) != 0 || RunFw(followed ? followedOut : hubOut) != 0) whole = false;
+            if (RunFw(hubIn) != 0 || RunFw(hubOut) != 0) whole = false;
         }
     }
 
@@ -1864,6 +1858,22 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
     }
 
     if (isolated) {
+        /* A hub address followed on a lookup alone (FollowHubAddress), below the blocks
+         * so a lying answer can't name a quarantined address: programs running as this
+         * agent's user may call it, and nothing there may open a connection here. */
+        for (size_t i = 0; hub && hub->port && i < hub->count; i++) {
+            const char *address = hub->addresses[i];
+            if (!hub->agent_only[i] || (strchr(address, ':') != NULL) != v6) continue;
+            char port[6], uid[16];
+            snprintf(port, sizeof(port), "%u", hub->port);
+            snprintf(uid, sizeof(uid), "%u", (unsigned)geteuid());
+            const char *followedIn[] = {tool, "-A", OMINULL_NEXT_IN, "-s", address,
+                "-p", "tcp", "--sport", port, "!", "--syn", "-j", "RETURN", NULL};
+            const char *followedOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-d", address,
+                "-p", "tcp", "--dport", port, "-m", "owner", "--uid-owner", uid, "-j", "RETURN", NULL};
+            if (RunFw(followedIn) != 0 || RunFw(followedOut) != 0) whole = false;
+        }
+
         /* Errors about existing flows: path-MTU feedback comes from routers on no
          * allow list, and an allowed connection through a smaller link stalls without
          * it (scripts/test-linux-icmp-errors.sh). Below the blocks, so a quarantined
@@ -2024,6 +2034,8 @@ static int appliedThreatCount = 0;
 static BASELINE_RULE appliedBaseline[MAX_BASELINE_RULES];
 static int appliedBaselineCount = 0;
 static bool g_ForgetApplied = false;
+/* A followed list a failed or partial rebuild hasn't finished writing. */
+static OMINULL_HUB_TARGETS g_FollowPending;
 static bool g_DeadmanReleased = false;
 
 /* OMINULL_DEADMAN_BEATS is how many consecutive heartbeats may fail while this
@@ -2061,6 +2073,7 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     if (g_ForgetApplied) {
         known = false;
         g_ForgetApplied = false;
+        g_FollowPending.count = 0;
     }
 
     const char* p = strstr(respJson, "\"is_isolated\":");
@@ -2239,16 +2252,22 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
 /* FollowHubAddress: a hub that moved can't say so to an isolated host, whose hole still
  * points at the old address, so the host would wait for the dead-man timer to release
  * it. While the hub isn't answering, its name is looked up again and any new address
- * joins the old: the hub's TCP port, for this agent's own connections only, because an
- * unanswered lookup could come from whoever is keeping the hub quiet. The hub's next
- * answer proves itself by its certificate and the rebuild it causes ends this.
+ * joins the old, on the hub's TCP port, below the blocks and closed to programs not
+ * running as this agent's user (root, so no wall against another root process). An
+ * unanswered lookup could come from whoever is keeping the hub quiet, so it stays that
+ * way through this isolation: only the agent needs it, and the next policy change
+ * rebuilds from a fresh lookup as ever.
  * Needs rules this run built: after a restart the lists aren't known. */
 static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
     if (!known || !appliedIsolated || appliedHubTargets.count == 0) return;
-    OMINULL_HUB_TARGETS answer = {0};
-    if (!OminullResolveHub(config->hub_url, &answer)) return;
     OMINULL_HUB_TARGETS next = appliedHubTargets;
-    if (!OminullHubTargetsFollow(&next, &answer)) return;
+    if (g_FollowPending.count) {
+        /* First, as the permit lost may be the one that lets the lookup work. */
+        next = g_FollowPending;
+    } else {
+        OMINULL_HUB_TARGETS answer = {0};
+        if (!OminullResolveHub(config->hub_url, &answer) || !OminullHubTargetsFollow(&next, &answer)) return;
+    }
     const char *moved = next.addresses[appliedHubTargets.count];
     g_PermitsRetry = false;
     bool built = EnforcementBuild("iptables", true, &next, appliedAllow, appliedAllowCount, appliedPeers,
@@ -2261,6 +2280,7 @@ static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
      * happens here, and the next beat tries again if it doesn't come. */
     if (!built) {
         g_ForgetApplied = true;
+        g_FollowPending = next;
         printf("[-] The hub's address changed to %s but the firewall refused the new rules; "
                "trying again next beat.\n", moved);
         fflush(stdout);
@@ -2269,10 +2289,13 @@ static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
     printf("[!] Isolated, and the hub isn't answering at its old address: it now resolves to %s, "
            "so this agent may try it too.\n", moved);
     fflush(stdout);
-    g_ForgetApplied = true;
-    snprintf(g_HubPeerAddr, sizeof(g_HubPeerAddr), "%s", moved);
-    /* A permit lost to a held lock: leaving this unrecorded rebuilds next beat. */
-    if (!g_PermitsRetry) appliedHubTargets = next;
+    if (g_PermitsRetry) {               /* a held lock passes; rebuild next beat */
+        g_ForgetApplied = true;
+        g_FollowPending = next;
+        return;
+    }
+    g_FollowPending.count = 0;
+    appliedHubTargets = next;
 }
 
 static void HubContact(bool accepted) {

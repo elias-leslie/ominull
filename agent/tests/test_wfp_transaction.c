@@ -34,6 +34,9 @@ static DWORD Abort(HANDLE h) {
 static FWP_V4_ADDR_AND_MASK seen_v4[8];
 static FWP_V6_ADDR_AND_MASK seen_v6[8];
 static unsigned seen_v4_n, seen_v6_n;
+/* The app-limited filters Add was given, and the weight each carried. */
+static unsigned seen_app, seen_app_weight, seen_plain_hub_weight;
+static FWP_BYTE_BLOB self_app;
 static DWORD Add(HANDLE h, const FWPM_FILTER0 *f, PSECURITY_DESCRIPTOR sd,
                  UINT64 *id) {
     (void)h;
@@ -44,7 +47,13 @@ static DWORD Add(HANDLE h, const FWPM_FILTER0 *f, PSECURITY_DESCRIPTOR sd,
             seen_v4[seen_v4_n++] = *v->v4AddrMask;
         if (v->type == FWP_V6_ADDR_MASK && seen_v6_n < 8)
             seen_v6[seen_v6_n++] = *v->v6AddrMask;
+        if (v->type == FWP_BYTE_BLOB_TYPE && v->byteBlob == &self_app) {
+            seen_app++;
+            seen_app_weight = f->weight.uint8;
+        }
     }
+    if (f && f->displayData.name && wcsstr(f->displayData.name, L"Hub Pinhole") && f->numFilterConditions == 3)
+        seen_plain_hub_weight = f->weight.uint8;
     (void)id;
     if (++add_calls == fail_add)
         return ERROR_ACCESS_DENIED;
@@ -85,6 +94,12 @@ static DWORD SubAdd(HANDLE h, const FWPM_SUBLAYER0 *s, PSECURITY_DESCRIPTOR d) {
     (void)d;
     return 0;
 }
+static DWORD AppId(const wchar_t *path, FWP_BYTE_BLOB **id) {
+    (void)path;
+    *id = &self_app;
+    return 0;
+}
+#define FwpmGetAppIdFromFileName0 AppId
 #define FwpmTransactionBegin0 Begin
 #define FwpmTransactionCommit0 Commit
 #define FwpmTransactionAbort0 Abort
@@ -138,6 +153,19 @@ int main(void) {
             assert(seen_v6[i].prefixLength == 48);
             assert(memcmp(seen_v6[i].addr, want6, 16) == 0);
         }
+    }
+    /* A followed hub address is this program's alone and below the blocks; the old
+     * hole stays as it was. */
+    {
+        OMINULL_HUB_TARGETS hub = {.count = 2, .port = 9443, .addresses = {"203.0.113.1", "203.0.113.2"}};
+        seen_app = 0;
+        assert(Wfp_ApplyState(&hub, 1, NULL, 0, NULL, 0, NULL, 0, 0) == 0);
+        assert(seen_app == 0 && seen_plain_hub_weight == OMINULL_WEIGHT_PERMIT_HUB);
+        hub.agent_only[1] = true;
+        assert(Wfp_ApplyState(&hub, 1, NULL, 0, NULL, 0, NULL, 0, 0) == 0);
+        assert(seen_app == 2 && seen_app_weight == OMINULL_WEIGHT_PERMIT_ALLOW);
+        assert(seen_plain_hub_weight == OMINULL_WEIGHT_PERMIT_HUB);
+        assert(OMINULL_WEIGHT_PERMIT_ALLOW < OMINULL_WEIGHT_BLOCK_PEER);
     }
     return 0;
 }

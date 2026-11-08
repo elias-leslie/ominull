@@ -247,7 +247,7 @@ static void FollowsAMovedHub(const char *path) {
     assert(setenv("OMINULL_FIXTURE_FAIL", "-j DROP$", 1) == 0);
     FollowHubAddress(&config);
     unsetenv("OMINULL_FIXTURE_FAIL");
-    assert(!strcmp(appliedHubTargets.addresses[0], "198.51.100.8") && g_ForgetApplied);
+    assert(!strcmp(appliedHubTargets.addresses[0], "198.51.100.8") && appliedHubTargets.count == 1 && g_ForgetApplied);
     g_ForgetApplied = false;
 
     ResetCommands(path);
@@ -262,10 +262,21 @@ static void FollowsAMovedHub(const char *path) {
     assert(strstr(data, "-d 203.0.113.88 -j DROP") && strstr(data, "-d 198.51.100.53 "));
     assert(strstr(data, "-A OMINULL_ISO_OUT_N -j DROP"));
     assert(appliedHubTargets.count == 2 && appliedHubTargets.agent_only[1] && appliedIsolated);
-    assert(!strcmp(g_HubPeerAddr, "198.51.100.9"));
-    /* The hub's next answer rebuilds, which is what ends the agent-only hole. */
-    assert(g_ForgetApplied);
-    g_ForgetApplied = false;
+    /* Below the blocks, so a lying answer can't name a quarantined address. */
+    assert(strstr(data, "-d 203.0.113.88 -j DROP") < strstr(data, "-d 198.51.100.9 "));
+    /* A reply doesn't promote it: the agent is all that needs it. */
+    assert(!g_ForgetApplied);
+    /* The agent's calls to it are still its own, not a flow to report. */
+    {
+        FLOW_CANDIDATE own;
+        memset(&own, 0, sizeof(own));
+        strcpy(own.dst_ip, "198.51.100.9");
+        own.dst_port = 443;
+        g_SelfPid = 7;
+        g_HubPeerPort = 443;
+        assert(IsOwnHubFlow(&own, 7) && !IsOwnHubFlow(&own, 8));
+        g_HubPeerPort = 0;
+    }
 
     ResetCommands(path);
     FollowHubAddress(&config);
@@ -274,16 +285,20 @@ static void FollowsAMovedHub(const char *path) {
     FollowHubAddress(&config);
     assert(!ReadCommands(path)[0] && appliedHubTargets.count == 2);
 
-    /* A permit lost to a held lock is tried again next beat, with the hub still silent. */
+    /* A permit lost to a held lock is tried again next beat, with the hub still silent,
+     * even when it was the one the lookup needs. */
     strcpy(config.hub_url, "https://198.51.100.10:443");
     assert(setenv("OMINULL_FIXTURE_FAIL", "198.51.100.53", 1) == 0 && setenv("OMINULL_FIXTURE_FAIL_CODE", "4", 1) == 0);
     FollowHubAddress(&config);
     unsetenv("OMINULL_FIXTURE_FAIL");
     unsetenv("OMINULL_FIXTURE_FAIL_CODE");
     assert(appliedHubTargets.count == 2 && g_ForgetApplied);
+    strcpy(config.hub_url, "ftp://host");
     ResetCommands(path);
     FollowHubAddress(&config);
-    assert(strstr(ReadCommands(path), "198.51.100.53") && appliedHubTargets.count == 3);
+    data = ReadCommands(path);
+    assert(strstr(data, "198.51.100.53") && strstr(data, "198.51.100.10") && appliedHubTargets.count == 3);
+    assert(!g_FollowPending.count);
     g_ForgetApplied = false;
 
     known = false;

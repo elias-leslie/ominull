@@ -17,7 +17,7 @@ typedef struct {
     char addresses[OMINULL_MAX_HUB_ADDRESSES][64];
     size_t count;
     uint16_t port;
-    /* Followed on a lookup alone: open to this agent's own connections, not the host's. */
+    /* Followed on a lookup alone: below the blocks and closed to other programs. */
     bool agent_only[OMINULL_MAX_HUB_ADDRESSES];
 } OMINULL_HUB_TARGETS;
 static inline void OminullParseHubURL(const char *hubUrl, char *host,
@@ -108,19 +108,11 @@ static inline bool OminullUnscopedPolicyIP(const char *s) {
            !(v6.s6_addr[0] == 0xfe && (v6.s6_addr[1] & 0xc0) == 0x80);
 }
 
-/* The same port and the same addresses, in whatever order the resolver gave them. */
-static inline bool OminullHubTargetsSame(const OMINULL_HUB_TARGETS *a,
-                                         const OMINULL_HUB_TARGETS *b) {
-    if (a->port != b->port || a->count != b->count)
-        return false;
-    for (size_t i = 0; i < a->count; i++) {
-        bool found = false;
-        for (size_t j = 0; j < b->count && !found; j++)
-            found = !strcmp(a->addresses[i], b->addresses[j]);
-        if (!found)
-            return false;
-    }
-    return true;
+static inline bool OminullHubTargetsHas(const OMINULL_HUB_TARGETS *targets, const char *address) {
+    for (size_t i = 0; i < targets->count; i++)
+        if (!strcmp(targets->addresses[i], address))
+            return true;
+    return false;
 }
 
 /* Adds the answer's addresses the list lacks, marked agent_only, as far as there is
@@ -130,10 +122,7 @@ static inline size_t OminullHubTargetsFollow(OMINULL_HUB_TARGETS *held,
                                              const OMINULL_HUB_TARGETS *answer) {
     size_t added = 0;
     for (size_t i = 0; i < answer->count && held->count < OMINULL_MAX_HUB_ADDRESSES; i++) {
-        bool found = false;
-        for (size_t j = 0; j < held->count && !found; j++)
-            found = !strcmp(answer->addresses[i], held->addresses[j]);
-        if (found)
+        if (OminullHubTargetsHas(held, answer->addresses[i]))
             continue;
         memcpy(held->addresses[held->count], answer->addresses[i], sizeof(held->addresses[0]));
         held->agent_only[held->count++] = true;
