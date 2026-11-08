@@ -102,3 +102,46 @@ func TestTrafficAPIEndpoints(t *testing.T) {
 		t.Errorf("unexpected single flow: %+v", singleFlow)
 	}
 }
+
+// The conversations route answers in the storage shape and refuses an unknown
+// mark or direction instead of silently showing everything.
+func TestTrafficConversationsAPI(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	store, err := storage.New(filepath.Join(tmpDir, "conversations_api.db"))
+	if err != nil {
+		t.Fatalf("storage.New() failed: %v", err)
+	}
+	defer store.Close()
+	srv := newTestServer(t, store, "mock_admin_token", tmpDir, "http://localhost:9999", "1.8.1")
+	now := time.Now().UTC()
+	if err := store.InsertEventsBatch([]storage.Event{{
+		Timestamp: now.Add(-5 * time.Minute), EndpointID: "ep-api-01", Layer: "test", Action: "PERMIT", Direction: "OUTBOUND",
+		Protocol: 6, SrcIP: "10.0.0.10", DstIP: "192.0.2.1", SrcPort: 50000, DstPort: 443, ProcessPath: "/usr/bin/curl",
+	}}); err != nil {
+		t.Fatalf("InsertEventsBatch failed: %v", err)
+	}
+	get := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "mock_admin_token")
+		w := httptest.NewRecorder()
+		srv.authMiddleware(srv.handleTrafficConversations).ServeHTTP(w, req)
+		return w
+	}
+	w := get("/api/v1/traffic/conversations?range=1h")
+	if w.Code != http.StatusOK {
+		t.Fatalf("conversations: %d %s", w.Code, w.Body.String())
+	}
+	var res storage.TrafficConversations
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(res.Conversations) != 1 || res.Conversations[0].Port != 443 || res.Conversations[0].Process != "curl" || res.Counts.All != 1 {
+		t.Fatalf("one curl conversation on 443: %+v", res)
+	}
+	for _, bad := range []string{"mark=everything", "dir=sideways"} {
+		if w := get("/api/v1/traffic/conversations?range=1h&" + bad); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d", bad, w.Code)
+		}
+	}
+}

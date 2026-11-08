@@ -285,6 +285,33 @@
    let rejected=false; try { await a.request('/api/v1/fixture-error-'+status+'-'+type); } catch { rejected=true; } assert(rejected,'Invalid API response accepted');
   } } finally {window.fetch=original;a.state.demo=true;}
  });
+ await check('Traffic lists conversations needing a look first, filters by chip, and the panel opens and closes by keyboard', async () => {
+  const saved=a.state.trafficFilter;
+  a.state.trafficFilter={range:'1h'}; a.state.trafficConversations=null; a.state.section='traffic'; a.render(); a.refresh();
+  const rows=()=>[...document.querySelectorAll('.tf-table tbody tr')];
+  for(let i=0;i<100 && !rows().length;i++) await wait();
+  assert(rows().length>3,'No conversations listed');
+  assert(rows()[0].querySelector('.tf-mark[data-kind="finding"]'),'The first row is not the one with a finding');
+  assert(rows().every(r=>!/NOTHING FLAGGED|OUTBOUND|INBOUND/.test(r.textContent)),'A row spells its state in words');
+  const chip=label=>[...document.querySelectorAll('.tf-filters .tg-chip')].find(b=>b.querySelector('span') && b.querySelector('span').textContent===label);
+  const flagged=Number(chip('Flagged').querySelector('b').textContent);
+  chip('Flagged').click();
+  for(let i=0;i<100 && rows().length!==flagged;i++) await wait();
+  assert(a.state.trafficFilter.mark==='flagged' && chip('Flagged').getAttribute('aria-pressed')==='true','Flagged did not turn on');
+  assert(rows().length===flagged && rows().every(r=>r.querySelector('.tf-mark[data-kind="finding"]')),'Flagged shows rows without a finding');
+  const opener=rows()[0].querySelector('.tf-open'); opener.focus(); opener.click(); await wait();
+  const panel=document.querySelector('.tf-panel');
+  assert(document.querySelector('.tf-workspace').dataset.panel==='open' && panel.contains(document.activeElement),'Details did not open and take focus');
+  assert([...panel.querySelectorAll('button')].some(b=>/Open finding/.test(b.textContent)),'No way from a flagged conversation to its finding');
+  assert(!/\bnull\b|undefined/.test(panel.textContent),'Panel prints null or undefined');
+  document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); await wait();
+  assert(document.querySelector('.tf-workspace').dataset.panel!=='open','Escape did not close the details');
+  assert(document.activeElement && document.activeElement.classList.contains('tf-open'),'Focus did not return to the row');
+  [...document.querySelectorAll('.tf-filters .btn')].find(b=>b.textContent==='Clear filters').click();
+  for(let i=0;i<100 && a.state.trafficFilter.mark;i++) await wait();
+  assert(!a.state.trafficFilter.mark,'Clear filters left the mark on');
+  a.state.trafficFilter=saved; a.state.section='assets'; a.render();
+ });
  await check('a gated-looking action completes on the first request', async () => {
   const original=window.fetch;a.state.demo=false;const calls=[];
   const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});

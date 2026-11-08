@@ -11,13 +11,16 @@ import (
 )
 
 type TrafficFilter struct {
-	TenantID          string
-	Range             string
-	From              time.Time
-	To                time.Time
-	EndpointID        string
-	SrcIP             string
-	DstIP             string
+	TenantID   string
+	Range      string
+	From       time.Time
+	To         time.Time
+	EndpointID string
+	SrcIP      string
+	DstIP      string
+	// Peer matches either end of a flow: a conversation's peer is the
+	// destination of what this host opened and the source of what reached it.
+	Peer              string
 	Process           string
 	Domain            string
 	Country           string
@@ -254,6 +257,11 @@ func buildTrafficWhere(filter TrafficFilter, start, end time.Time) (string, []in
 		args = append(args, filter.DstIP)
 		active["dst_ip"] = filter.DstIP
 	}
+	if filter.Peer != "" {
+		where = append(where, "(dst_ip = ? OR src_ip = ?)")
+		args = append(args, filter.Peer, filter.Peer)
+		active["peer"] = filter.Peer
+	}
 	if filter.Process != "" {
 		where = append(where, "(process_path LIKE ? OR process_path = ?)")
 		args = append(args, "%/"+filter.Process, filter.Process)
@@ -345,10 +353,11 @@ func (c *trafficCache) put(key string, overview *TrafficOverview, now time.Time)
 }
 
 func (f TrafficFilter) CacheKey() string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%d|%d|%s|%s|%t|%s|%s",
-		f.TenantID, f.Range, f.EndpointID, f.SrcIP, f.DstIP, f.Process, f.Domain,
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%d|%d|%s|%s|%t|%s|%s|%s|%s|%s",
+		f.TenantID, f.Range, f.EndpointID, f.SrcIP, f.DstIP, f.Peer, f.Process, f.Domain,
 		f.Country, f.Protocol, f.Port, f.Direction, f.Action, f.MeasuredOnly,
-		f.From.Format(time.RFC3339), f.To.Format(time.RFC3339))
+		f.From.Format(time.RFC3339), f.To.Format(time.RFC3339),
+		f.ExecutableSHA256, f.UserIdentity, f.AttributionStatus)
 }
 
 func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, error) {
@@ -372,10 +381,11 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 		ActiveFilters: activeFilters,
 	}
 
-	isUnfiltered := filter.EndpointID == "" && filter.SrcIP == "" && filter.DstIP == "" &&
+	isUnfiltered := filter.EndpointID == "" && filter.SrcIP == "" && filter.DstIP == "" && filter.Peer == "" &&
 		filter.Process == "" && filter.Domain == "" && filter.Country == "" &&
 		filter.Protocol == 0 && filter.Port == 0 && filter.Direction == "" &&
-		filter.Action == "" && !filter.MeasuredOnly
+		filter.Action == "" && !filter.MeasuredOnly && filter.ExecutableSHA256 == "" &&
+		filter.UserIdentity == "" && filter.AttributionStatus == ""
 
 	// 1. Totals & Coverage Query
 

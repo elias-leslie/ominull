@@ -1,0 +1,536 @@
+/* Traffic: controls, a one-line summary and timeline, then the conversation
+   list with a details panel beside it (over it on narrow screens). Shares
+   Topology's chips, fields, badges, facts and table; tokens only. */
+body[data-section="traffic"] #strip {
+  display: none;
+}
+body[data-section="traffic"] #view {
+  padding: 0;
+}
+.tf-workspace {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  color: var(--ink);
+  font-family: var(--f-sans);
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 480px;
+}
+.tf-workspace [hidden] {
+  display: none !important;
+}
+.tf-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.tf-dim {
+  color: var(--ink-3);
+}
+.tf-mono {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+}
+.tf-error {
+  color: var(--crit);
+  margin: 0;
+}
+.tf-empty {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+/* Top bar and filters. */
+.tf-bar,
+.tf-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
+  flex-wrap: wrap;
+}
+.tf-filters {
+  gap: var(--s-2);
+}
+.tf-fresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: var(--ink-3);
+}
+.tf-fresh[data-tone="ok"] {
+  color: var(--ok);
+}
+.tf-fresh[data-tone="warn"] {
+  color: var(--warn);
+}
+.tf-fresh[data-tone="crit"] {
+  color: var(--crit);
+}
+.tf-filter-toggle {
+  display: none;
+  gap: 4px;
+}
+.tf-toggle-n:empty {
+  display: none;
+}
+.tf-toggle-n {
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+}
+.tf-chip-in .ic {
+  transform: rotate(180deg);
+}
+.tg-chip[data-tone="info"] b {
+  color: var(--info);
+}
+.tg-chip[aria-disabled="true"]:not([aria-pressed="true"]) {
+  opacity: 0.55;
+  cursor: default;
+}
+.tf-chip-x {
+  gap: 4px;
+}
+.tf-chip-x span {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tf-extra:empty {
+  display: none;
+}
+.tf-open:focus-visible,
+.tf-link:focus-visible,
+.tf-panel:focus-visible,
+.tf-chip-x:focus-visible,
+.tf-filter-toggle:focus-visible,
+.tf-workspace .tg-button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* Summary line and timeline. */
+.tf-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-4);
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  color: var(--ink-2);
+}
+.tf-summary:empty {
+  display: none;
+}
+.tf-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tf-stat[data-tone="warn"] {
+  color: var(--warn);
+}
+.tf-timeline:empty {
+  display: none;
+}
+.tf-chart {
+  display: block;
+  width: 100%;
+  height: 56px;
+}
+.tf-hit {
+  fill: transparent;
+}
+.tf-bar-v {
+  fill: var(--brand);
+  opacity: 0.7;
+}
+.tf-chart g:hover .tf-bar-v {
+  opacity: 1;
+}
+.tf-chart g:hover .tf-hit {
+  fill: var(--raised);
+}
+.tf-uncovered {
+  fill: var(--raised);
+  opacity: 0.6;
+}
+.tf-axis {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.tf-tick-block {
+  fill: var(--crit);
+}
+.tf-tick-finding {
+  fill: var(--warn);
+}
+.tf-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  color: var(--ink-3);
+}
+
+/* List and panel. */
+.tf-stage {
+  display: flex;
+  flex: 1;
+  min-height: 240px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-b);
+  overflow: hidden;
+}
+.tf-list {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--ground);
+}
+.tf-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-2);
+  padding: var(--s-4) var(--s-3);
+}
+.tf-state:empty {
+  display: none;
+}
+.tf-table {
+  margin-bottom: 0;
+  min-width: 600px;
+}
+.tf-table td {
+  vertical-align: top;
+}
+.tf-table tbody tr {
+  cursor: pointer;
+}
+.tf-table tbody tr:hover td {
+  background: var(--panel);
+}
+.tf-table tbody tr[aria-selected="true"] td {
+  background: var(--raised);
+}
+.tf-table tr[data-tone="crit"] td:first-child {
+  box-shadow: inset 2px 0 0 var(--crit);
+}
+.tf-table .c-mark {
+  width: 1%;
+  white-space: nowrap;
+  padding-right: 0;
+}
+.tf-table .c-dir {
+  width: 1%;
+  padding-inline: 4px;
+}
+.tf-table .c-port,
+.tf-table .c-num,
+.tf-table .c-time {
+  white-space: nowrap;
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+}
+.tf-table .c-num {
+  text-align: right;
+}
+.tf-marks {
+  display: inline-flex;
+  gap: 4px;
+  min-width: 16px;
+}
+.tf-mark {
+  display: inline-flex;
+  color: var(--ink-3);
+}
+.tf-mark[data-tone="crit"] {
+  color: var(--crit);
+}
+.tf-mark[data-tone="warn"] {
+  color: var(--warn);
+}
+.tf-mark[data-tone="info"] {
+  color: var(--info);
+}
+.tf-dir {
+  font-family: var(--f-mono);
+  color: var(--ink-3);
+}
+.tf-dir[data-dir="in"] {
+  color: var(--info);
+}
+.tf-open {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.tf-open strong {
+  font-weight: 500;
+}
+.tf-open span {
+  color: var(--ink-2);
+}
+.tf-open:hover strong {
+  text-decoration: underline;
+}
+.tf-peer {
+  display: grid;
+}
+.tf-peer small {
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+}
+.tf-panel {
+  position: relative;
+  display: none;
+  flex: none;
+  flex-direction: column;
+  gap: var(--s-3);
+  width: 360px;
+  box-sizing: border-box;
+  padding: var(--s-3);
+  overflow: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  font-size: var(--t-3);
+}
+.tf-workspace[data-panel="open"] .tf-panel {
+  display: flex;
+}
+.tf-panel-head {
+  display: grid;
+  gap: var(--s-1);
+  padding-right: 40px;
+}
+.tf-panel-head strong {
+  font-size: var(--t-4);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.tf-finding {
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-b);
+}
+.tf-finding[data-tone="crit"] {
+  border-color: var(--crit);
+}
+.tf-finding-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.tf-finding[data-tone="crit"] .tf-finding-title .ic {
+  color: var(--crit);
+}
+.tf-finding[data-tone="warn"] .tf-finding-title .ic {
+  color: var(--warn);
+}
+.tf-finding .tg-button {
+  justify-self: start;
+}
+.tg-badge[data-tone="info"] {
+  color: var(--info);
+  border-color: var(--info);
+}
+.tf-facts {
+  grid-template-columns: 96px 1fr;
+}
+.tf-facts .tg-badge {
+  margin-left: var(--s-1);
+}
+.tf-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.tf-link:hover {
+  text-decoration: underline;
+}
+.tf-actions {
+  display: grid;
+  gap: var(--s-1);
+}
+.tf-actions .tg-button {
+  justify-content: flex-start;
+  gap: var(--s-2);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.tf-flows h3 {
+  margin: 0 0 var(--s-1);
+  font-family: var(--f-cond);
+  font-size: var(--t-1);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-3);
+}
+.tf-flows p {
+  margin: var(--s-1) 0 0;
+}
+.tf-flow-list {
+  display: grid;
+  gap: var(--s-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tf-flow {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  width: 100%;
+}
+.tf-flow > .tf-mark {
+  grid-area: 1 / 1;
+}
+.tf-flow > time {
+  grid-area: 1 / 2;
+}
+.tf-flow > b {
+  grid-area: 1 / 3;
+}
+.tf-flow .tf-mono {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  color: var(--ink-2);
+}
+
+@media (max-width: 1100px) {
+  .tf-workspace {
+    padding: var(--s-2) var(--s-3);
+  }
+  .tf-table .c-flows {
+    display: none;
+  }
+}
+@media (max-width: 820px) {
+  .tf-stage {
+    position: relative;
+  }
+  .tf-panel {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    border-left: 0;
+    z-index: 2;
+  }
+}
+@media (max-width: 640px) {
+  .tf-workspace {
+    padding: var(--s-2);
+    height: auto;
+  }
+  .tf-filter-toggle {
+    display: inline-flex;
+    flex: none;
+    min-height: 36px;
+  }
+  .tf-workspace:not([data-controls="open"]) .tf-bar > .tg-field,
+  .tf-workspace:not([data-controls="open"]) .tf-filters {
+    display: none;
+  }
+  .tf-search {
+    flex: 1 1 140px;
+    max-width: none;
+    min-height: 36px;
+  }
+  .tf-bar > .tg-fill,
+  .tf-filters > .tg-fill,
+  .tf-filters .tg-sep {
+    display: none;
+  }
+  .tf-bar > .tg-field {
+    order: 10;
+    flex: 1 1 40%;
+    display: grid;
+    gap: 2px;
+  }
+  .tf-bar > .tg-field select,
+  .tf-filters .tg-field select {
+    max-width: none;
+    width: 100%;
+    min-height: 36px;
+  }
+  .tf-workspace .tg-chip,
+  .tf-workspace .tg-button {
+    min-height: 36px;
+  }
+  .tf-stage {
+    min-height: 420px;
+  }
+  /* Rows stack: marks, who and peer read as two lines; port, data and time
+     share the last. */
+  .tf-table thead {
+    display: none;
+  }
+  .tf-table,
+  .tf-table tbody {
+    display: block;
+    min-width: 0;
+  }
+  .tf-table tbody tr {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "mark who time"
+      "dir peer peer"
+      ". port data";
+    gap: 2px var(--s-2);
+    padding: var(--s-2) var(--s-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .tf-table tbody td,
+  .tg-table.tf-table td:nth-child(3) {
+    display: block;
+    padding: 0;
+    border: 0;
+  }
+  .tf-table td.c-mark { grid-area: mark; }
+  .tf-table td.c-who { grid-area: who; }
+  .tf-table td.c-dir { grid-area: dir; text-align: center; }
+  .tf-table td.c-peer { grid-area: peer; }
+  .tf-table td.c-port { grid-area: port; }
+  .tf-table td.c-flows { display: none; }
+  .tf-table td.c-num:not(.c-flows) { grid-area: data; }
+  .tf-table td.c-time { grid-area: time; }
+  .tf-table tr[data-tone="crit"] td:first-child {
+    box-shadow: none;
+  }
+  .tf-table tbody tr[data-tone="crit"] {
+    box-shadow: inset 2px 0 0 var(--crit);
+  }
+  .tf-open {
+    min-height: 24px;
+  }
+}

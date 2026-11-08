@@ -85,6 +85,7 @@ func parseTrafficFilter(s *Server, r *http.Request) storage.TrafficFilter {
 		EndpointID:        strings.TrimSpace(q.Get("endpoint_id")),
 		SrcIP:             strings.TrimSpace(q.Get("src_ip")),
 		DstIP:             strings.TrimSpace(q.Get("dst_ip")),
+		Peer:              strings.TrimSpace(q.Get("peer")),
 		Process:           strings.TrimSpace(q.Get("process")),
 		Domain:            strings.TrimSpace(q.Get("domain")),
 		Country:           strings.TrimSpace(q.Get("country")),
@@ -116,6 +117,45 @@ func (s *Server) handleTrafficOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, overview)
+}
+
+// handleTrafficConversations folds the window's flows into who-talked-to-whom
+// rows with their findings, first-seen and blocked marks (storage/traffic_conversations.go).
+// q searches, mark is flagged|new|blocked, dir is in|out, limit caps the rows.
+func (s *Server) handleTrafficConversations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	filter := parseTrafficFilter(s, r)
+	q := r.URL.Query()
+	cq := storage.ConversationQuery{
+		Search:            strings.TrimSpace(q.Get("q")),
+		Mark:              strings.TrimSpace(q.Get("mark")),
+		Direction:         strings.TrimSpace(q.Get("dir")),
+		EphemeralPortFrom: s.store.GetDetectionTuning().EphemeralPortFrom,
+	}
+	if l, err := strconv.Atoi(q.Get("limit")); err == nil {
+		cq.Limit = l
+	}
+	switch cq.Mark {
+	case "", "flagged", "new", "blocked":
+	default:
+		writeJSONError(w, http.StatusBadRequest, "mark must be flagged, new or blocked")
+		return
+	}
+	switch cq.Direction {
+	case "", "in", "out":
+	default:
+		writeJSONError(w, http.StatusBadRequest, "dir must be in or out")
+		return
+	}
+	result, err := s.store.QueryTrafficConversations(filter, cq)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // handleTrafficFlows returns paginated raw flows matching filter criteria.

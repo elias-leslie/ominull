@@ -3693,6 +3693,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/analytics/summary", s.authMiddleware(s.handleGetAnalyticsSummary))
 	mux.HandleFunc("/api/v1/traffic/overview", s.authMiddleware(s.handleTrafficOverview))
 	mux.HandleFunc("/api/v1/traffic/flows", s.authMiddleware(s.handleTrafficFlows))
+	mux.HandleFunc("/api/v1/traffic/conversations", s.authMiddleware(s.handleTrafficConversations))
 	mux.HandleFunc("/api/v1/traffic/flows/", s.authMiddleware(s.handleTrafficFlows))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))

@@ -433,9 +433,9 @@
     events: [],
     analytics: null,
     trafficOverview: null,
-    trafficFlows: null,
-    trafficFilter: { range: "1h", endpoint_id: "", src_ip: "", dst_ip: "", process: "", domain: "", country: "", protocol: "", port: "", direction: "", action: "", measured_only: false, cursor: "" },
-    selectedFlow: null,
+    trafficConversations: null,
+    trafficError: "",
+    trafficFilter: { range: "1h" },
     terminalAvailable: false,
     /* The hub runs 24 checks with remediation text and the console never asked
        for them once. They are not on the 5s poll: each run has an 8 second
@@ -969,6 +969,176 @@
   var DEMO_CACHE = null;
   var demoScreenSeq = 0;
 
+  /* Traffic in the hub's shapes (storage.TrafficConversations, TrafficOverview,
+     TrafficFlowsResult): the demo fleet's conversations, three of them carrying
+     the demo findings, so every mark on the Traffic page has something to show. */
+  var DEMO_TRAFFIC_RANGES = { "15m": 0.25, "1h": 1, "6h": 6, "24h": 24, "7d": 168, "all": 720 };
+  function demoTrafficRows() {
+    var host = {};
+    arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).forEach(function (e) { host[e.id] = e; });
+    function row(ep, path, dir, peer, port, proto, flows, bin, bout, o) {
+      o = o || {};
+      var base = path.split(/[\\/]/).pop();
+      return { endpoint_id: ep, hostname: (host[ep] || {}).hostname || "", process: base, process_path: path, direction: dir,
+        peer_ip: peer, peer_name: o.name || "", peer_host: o.peerHost || "", peer_endpoint: o.peerEp || "", country: o.country || "",
+        port: port, protocol: proto, flows: flows, measured_flows: o.unmeasured ? 0 : flows, bytes_in: bin, bytes_out: bout,
+        blocked: o.blocked || 0, first_min: o.first || 1440, last_min: o.last || 1, new: !!o.isNew, findings: o.findings || null };
+    }
+    function finding(ids, worst, title, type, open, held) {
+      return { count: ids.length, open: open, worst: worst, title: title, type: type, held_reason: held || "", ids: ids };
+    }
+    return [
+      row("win11-corp-exec", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "out", "198.51.100.22", 443, "TCP", 42, 18400, 96200,
+        { country: "NL", blocked: 3, isNew: true, first: 52, last: 4, findings: finding(["alert-ioc-01"], "CRITICAL", "Threat-intel destination blocked", "THREAT_INTEL_MATCH", 1) }),
+      row("win11-corp-exec", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "out", "198.51.100.22", 8443, "TCP", 9, 4100, 19400,
+        { country: "NL", isNew: true, first: 40, last: 38, findings: finding(["alert-offhours-02"], "HIGH", "Off-hours interactive shell egress", "NOVEL_PROCESS_EGRESS", 1) }),
+      row("linux-prod-db-01", "/usr/lib/postgresql/16/bin/postgres", "out", "203.0.113.51", 5432, "TCP", 310, 88000000, 4200000000,
+        { country: "US", first: 1300, last: 96, findings: finding(["alert-bandwidth-04"], "MEDIUM", "Egress volume 14x baseline", "BANDWIDTH_SPIKE", 1) }),
+      row("linux-branch-nvr", "/usr/bin/ffmpeg", "out", "198.51.100.77", 554, "TCP", 64, 210000, 38000000, { country: "DE", isNew: true, first: 180, last: 2 }),
+      row("linux-dmz-web-01", "/usr/bin/curl", "out", "192.0.2.150", 80, "TCP", 3, 1200, 900, { country: "US", isNew: true, first: 22, last: 21, unmeasured: true }),
+      row("win11-fin-11", "C:\\Program Files\\Backup\\agent.exe", "out", "203.0.113.90", 445, "TCP", 12, 0, 0, { country: "US", blocked: 12, first: 600, last: 30 }),
+      row("linux-dmz-web-01", "/usr/sbin/nginx", "in", "203.0.113.14", 443, "TCP", 5210, 410000000, 2900000000, { country: "US" }),
+      row("linux-dmz-web-01", "/usr/sbin/nginx", "in", "198.51.100.140", 443, "TCP", 2380, 160000000, 1100000000, { country: "GB" }),
+      row("linux-prod-api-02", "/usr/bin/node", "out", "172.16.10.4", 5432, "TCP", 8820, 640000000, 120000000, { peerHost: "prod-db-01", peerEp: "linux-prod-db-01" }),
+      row("linux-prod-db-01", "/usr/lib/postgresql/16/bin/postgres", "in", "172.16.10.9", 5432, "TCP", 8820, 120000000, 640000000, { peerHost: "prod-api-02", peerEp: "linux-prod-api-02" }),
+      row("win11-fin-11", "C:\\Windows\\System32\\svchost.exe", "out", "192.0.2.80", 443, "TCP", 1840, 920000000, 21000000, { name: "update.example.com", country: "US" }),
+      row("win11-fin-11", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "out", "192.0.2.10", 443, "TCP", 960, 210000000, 18000000, { name: "mail.example.com", country: "US" }),
+      row("win11-corp-exec", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "out", "192.0.2.12", 443, "TCP", 1220, 380000000, 24000000, { name: "docs.example.com", country: "US" }),
+      row("win11-branch-kiosk", "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "out", "192.0.2.44", 443, "TCP", 410, 52000000, 3100000, { name: "portal.example.org", country: "US" }),
+      row("linux-prod-api-02", "/usr/sbin/sshd", "in", "10.0.4.15", 22, "TCP", 14, 2100000, 380000000, { peerHost: "corp-win11-exec", peerEp: "win11-corp-exec", first: 300, last: 12 }),
+      row("linux-dmz-web-01", "/usr/bin/certbot", "out", "192.0.2.200", 443, "TCP", 4, 48000, 9000, { name: "acme.example.net", country: "US", first: 700, last: 690 }),
+      row("linux-prod-db-01", "/usr/lib/systemd/systemd-resolved", "out", "10.0.4.1", 53, "UDP", 2210, 410000, 180000, {}),
+      row("linux-branch-nvr", "/usr/sbin/chronyd", "out", "192.0.2.123", 123, "UDP", 96, 9200, 9200, { name: "time.example.net", country: "US" })
+    ];
+  }
+
+  function demoTrafficWindow(q) {
+    var hours = DEMO_TRAFFIC_RANGES[q.get("range") || "1h"] || 1;
+    var end = Date.now();
+    return { hours: hours, start: end - hours * 3600000, end: end, scale: Math.min(1, hours / 24) };
+  }
+
+  function demoTrafficConversations(q) {
+    var w = demoTrafficWindow(q);
+    var needle = (q.get("q") || "").toLowerCase();
+    var mark = q.get("mark") || "", dir = q.get("dir") || "";
+    var limit = Number(q.get("limit")) || 300;
+    var counts = { all: 0, flagged: 0, open: 0, "new": 0, blocked: 0, out: 0, "in": 0 };
+    var rows = demoTrafficRows().filter(function (r) { return r.last_min <= w.hours * 60; }).map(function (r) {
+      var first = Math.min(r.first_min, w.hours * 60);
+      var c = Object.assign({}, r, {
+        flows: Math.max(1, Math.round(r.flows * Math.max(w.scale, first / 1440))),
+        first_seen: new Date(w.end - first * 60000).toISOString(),
+        last_seen: new Date(w.end - r.last_min * 60000).toISOString(),
+        known_since: new Date(w.end - (r["new"] ? first : 40 * 1440) * 60000).toISOString(),
+        "new": r["new"] && r.first_min <= w.hours * 60
+      });
+      c.measured_flows = r.measured_flows ? c.flows : 0;
+      c.blocked = Math.min(c.flows, r.blocked);
+      ["bytes_in", "bytes_out"].forEach(function (k) { c[k] = Math.round(r[k] * Math.max(w.scale, first / 1440)); });
+      delete c.first_min; delete c.last_min;
+      return c;
+    }).filter(function (c) {
+      if (q.get("endpoint_id") && c.endpoint_id !== q.get("endpoint_id")) return false;
+      return !needle || [c.endpoint_id, c.hostname, c.process, c.process_path, c.peer_ip, c.peer_name, c.peer_host, c.country, String(c.port)].some(function (v) { return String(v || "").toLowerCase().indexOf(needle) >= 0; });
+    });
+    var shown = [], matching = 0;
+    rows.forEach(function (c) {
+      counts.all++;
+      if (c.findings) { counts.flagged++; if (c.findings.open) counts.open++; }
+      if (c["new"]) counts["new"]++;
+      if (c.blocked) counts.blocked++;
+      counts[c.direction]++;
+      if (mark === "flagged" && !c.findings) return;
+      if (mark === "new" && !c["new"]) return;
+      if (mark === "blocked" && !c.blocked) return;
+      if (dir && c.direction !== dir) return;
+      matching++;
+      if (shown.length < limit) shown.push(c);
+    });
+    return {
+      as_of: new Date(w.end).toISOString(), window_start: new Date(w.start).toISOString(), window_end: new Date(w.end).toISOString(),
+      retained_from: new Date(w.end - 14 * 86400000).toISOString(), latest_flow: new Date(w.end - 60000).toISOString(),
+      new_known: true, profiles_from: new Date(w.end - 60 * 86400000).toISOString(),
+      counts: counts, matching: matching, truncated: matching > shown.length, conversations: shown
+    };
+  }
+
+  function demoTrafficOverview(q) {
+    var w = demoTrafficWindow(q);
+    var conv = demoTrafficConversations(new URLSearchParams("range=" + (q.get("range") || "1h") + (q.get("endpoint_id") ? "&endpoint_id=" + q.get("endpoint_id") : ""))).conversations;
+    var stepMin = { 0.25: 0.5, 1: 1, 6: 5, 24: 15, 168: 120, 720: 1440 }[w.hours] || 1;
+    var n = Math.round(w.hours * 60 / stepMin) + 1;
+    var tot = { bytes_in: 0, bytes_out: 0, flow_count: 0, block_count: 0 };
+    conv.forEach(function (c) { tot.bytes_in += c.bytes_in; tot.bytes_out += c.bytes_out; tot.flow_count += c.flows; tot.block_count += c.blocked; });
+    var trends = [];
+    for (var i = 0; i < n; i++) {
+      var t = w.end - (n - 1 - i) * stepMin * 60000;
+      var wave = 0.6 + 0.4 * Math.sin(i / 5) + (i % 7 === 3 ? 0.5 : 0);
+      trends.push({ timestamp: new Date(t).toISOString(), bytes_in: Math.round(tot.bytes_in / n * wave), bytes_out: Math.round(tot.bytes_out / n * wave),
+        flows: Math.round(tot.flow_count / n * wave), blocks: i === n - 2 ? tot.block_count : 0, anomalies: i === n - 3 ? 1 : 0 });
+    }
+    var measured = conv.reduce(function (s, c) { return s + c.measured_flows; }, 0);
+    return {
+      as_of: new Date(w.end).toISOString(), window_start: new Date(w.start).toISOString(), window_end: new Date(w.end).toISOString(),
+      bucket_size: stepMin + "m", retained_from: new Date(w.end - 14 * 86400000).toISOString(),
+      total_flows: tot.flow_count, measured_flows: measured, measured_flow_coverage: tot.flow_count ? measured / tot.flow_count : 0,
+      totals: { bytes_in: tot.bytes_in, bytes_out: tot.bytes_out, total_bytes: tot.bytes_in + tot.bytes_out, flow_count: tot.flow_count, block_count: tot.block_count, anomaly_count: 3 },
+      trends: trends,
+      distributions: { protocols: demoTrafficSlices(conv, "protocol", tot.flow_count), actions: [{ label: "PERMIT", count: tot.flow_count - tot.block_count, total_bytes: tot.bytes_in + tot.bytes_out, percentage: 1 - tot.block_count / Math.max(1, tot.flow_count) }, { label: "BLOCK", count: tot.block_count, total_bytes: 0, percentage: tot.block_count / Math.max(1, tot.flow_count) }],
+        directions: demoTrafficSlices(conv, "direction", tot.flow_count) },
+      rankings: { top_endpoints: demoTrafficRank(conv, "endpoint_id"), top_processes: demoTrafficRank(conv, "process"), top_destinations: demoTrafficRank(conv, "peer_ip"),
+        top_domains: demoTrafficRank(conv.filter(function (c) { return c.peer_name; }), "peer_name"), top_countries: demoTrafficRank(conv.filter(function (c) { return c.country; }), "country"), top_ports: demoTrafficRank(conv, "port") },
+      active_filters: {}
+    };
+  }
+
+  function demoTrafficRank(conv, key) {
+    var by = {};
+    conv.forEach(function (c) {
+      var k = String(c[key]);
+      var r = by[k] || (by[k] = { key: k, label: k, flow_count: 0, bytes_in: 0, bytes_out: 0, total_bytes: 0 });
+      r.flow_count += c.flows; r.bytes_in += c.bytes_in; r.bytes_out += c.bytes_out; r.total_bytes += c.bytes_in + c.bytes_out;
+    });
+    return Object.keys(by).map(function (k) { return by[k]; }).sort(function (a, b) { return b.total_bytes - a.total_bytes; }).slice(0, 8);
+  }
+  function demoTrafficSlices(conv, key, total) {
+    return demoTrafficRank(conv, key).map(function (r) { return { label: key === "direction" ? (r.key === "in" ? "INBOUND" : "OUTBOUND") : r.key, count: r.flow_count, total_bytes: r.total_bytes, percentage: r.flow_count / Math.max(1, total) }; });
+  }
+
+  function demoTrafficFlows(q) {
+    var w = demoTrafficWindow(q);
+    var conv = demoTrafficConversations(new URLSearchParams("range=" + (q.get("range") || "1h") + "&limit=1000")).conversations;
+    var flows = [];
+    conv.forEach(function (c, ci) {
+      if (q.get("endpoint_id") && c.endpoint_id !== q.get("endpoint_id")) return;
+      if (q.get("dst_ip") && c.peer_ip !== q.get("dst_ip")) return;
+      if (q.get("process") && c.process !== q.get("process") && c.process_path !== q.get("process")) return;
+      if (q.get("peer") && c.peer_ip !== q.get("peer")) return;
+      if (q.get("protocol") && c.protocol !== q.get("protocol")) return;
+      if (q.get("port") && String(c.port) !== q.get("port")) return;
+      var local = (arrayOf(DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.id === c.endpoint_id; })[0] || {}).ip || "10.0.4.2";
+      if (q.get("src_ip") && q.get("src_ip") !== local) return;
+      var count = Math.min(6, c.flows);
+      for (var i = 0; i < count; i++) {
+        var at = Date.parse(c.last_seen) - i * Math.max(60000, (Date.parse(c.last_seen) - Date.parse(c.first_seen)) / count);
+        var out = c.direction === "out";
+        flows.push({
+          id: String(9000 + ci * 10 + i), tenant_id: "corp-default", timestamp: new Date(at).toISOString(), endpoint_id: c.endpoint_id, hostname: c.hostname,
+          layer: /\\/.test(c.process_path) ? "wfp-ale" : "linux-socket-v1", action: i < c.blocked ? "BLOCK" : "PERMIT", direction: "OUTBOUND",
+          protocol: c.protocol === "UDP" ? 17 : 6, proto_name: c.protocol,
+          src_ip: local, src_port: out ? 49152 + ci * 7 + i : c.port, dst_ip: c.peer_ip, dst_port: out ? c.port : 50100 + i,
+          process_path: c.process_path, process_name: c.process, domain: c.peer_name, country: c.country,
+          bytes_in: Math.round(c.bytes_in / c.flows), bytes_out: Math.round(c.bytes_out / c.flows), is_anomalous: false,
+          user_identity: /\\/.test(c.process_path) ? "CORP\\analyst" : "www-data", attribution_status: "exact"
+        });
+      }
+    });
+    flows.sort(function (a, b) { return Date.parse(b.timestamp) - Date.parse(a.timestamp); });
+    var limit = Number(q.get("limit")) || 50;
+    return { total: flows.length, flows: flows.slice(0, limit), next_cursor: "", active_filters: {} };
+  }
+
   /* The topology workspace in the hub's shape (storage.TopologyWorkspace):
      the demo graph with segments, address scopes, per-port shares and the
      conversations behind each pair. */
@@ -1321,7 +1491,9 @@
           resolve({ alerts: mine, total: mine.length, unacknowledged_total: mine.length });
           return;
         }
-        if (base === "/api/v1/traffic/flows" && (q.get("endpoint_id") || q.get("src_ip"))) { resolve({ total: 0, flows: [] }); return; }
+        if (base === "/api/v1/traffic/conversations") { resolve(demoTrafficConversations(q)); return; }
+        if (base === "/api/v1/traffic/overview") { resolve(demoTrafficOverview(q)); return; }
+        if (base === "/api/v1/traffic/flows") { resolve(demoTrafficFlows(q)); return; }
         var hit = DEMO_CACHE[base];
         if (hit !== undefined) {
           resolve(hit);
@@ -1995,25 +2167,6 @@
     };
   }
 
-  /* Scaled to the series' own range, not to zero: a stat that has not moved
-     draws a flat low line instead of six full-height bars shouting at an
-     operator about nothing happening. */
-  function sparkline(values) {
-    if (!values || values.length < 2) return null;
-    var max = Math.max.apply(null, values);
-    var min = Math.min.apply(null, values);
-    var span = max - min;
-    var n = values.length;
-    var svg = s("svg", { "class": "spark", viewBox: "0 0 " + (n * 3) + " 12", preserveAspectRatio: "none", "aria-hidden": "true" });
-    values.forEach(function (v, i) {
-      var hgt = span > 0 ? Math.max(1, Math.round(2 + ((v - min) / span) * 10)) : 2;
-      svg.appendChild(s("rect", {
-        "class": i === n - 1 ? "bar-last" : "bar",
-        x: i * 3, y: 12 - hgt, width: 2, height: hgt, rx: 0.5
-      }));
-    });
-    return svg;
-  }
 
   function renderStrip() {
     $("strip").hidden = state.section === "assets";
@@ -2091,22 +2244,6 @@
            count. Reporting it beside the graph keeps every figure on the page
            readable as what it is. */
         measuredStat(m)
-      ];
-    }
-    if (state.section === "traffic") {
-      var ov = state.trafficOverview || {};
-      var tot = ov.totals || {};
-      var totalFlows = ov.total_flows || tot.flow_count || 0;
-      var measuredFlows = ov.measured_flows || 0;
-      var permits = totalFlows - (tot.block_count || 0);
-      if (permits < 0) permits = 0;
-      return [
-        { label: "Events", value: String(totalFlows) },
-        { label: "Blocked", value: String(tot.block_count || 0), tone: tot.block_count ? "crit" : "" },
-        { label: "Permitted", value: String(permits) },
-        { label: "Bytes in", value: bytes(tot.bytes_in) },
-        { label: "Bytes out", value: bytes(tot.bytes_out) },
-        measuredStat({ total_flow_count: totalFlows, measured_flow_count: measuredFlows })
       ];
     }
     if (state.section === "policy") {
@@ -4507,38 +4644,6 @@
     if (state.topoSelected) { topologyUI.focus(state.topoSelected); state.topoSelected = ""; }
   }
 
-  /* opts.onPick makes a row a filter control; opts.spark draws the per-item
-     history the hub already returns on every RankingItem and the console threw
-     away, so "top talker" can be read as "top talker, and rising". */
-  function barList(items, valueFn, labelFn, textFn, opts) {
-    opts = opts || {};
-    var max = Math.max.apply(null, items.map(valueFn).concat([1]));
-    var list = h("div", { cls: "barlist" });
-    items.forEach(function (it) {
-      var frac = Math.max(0, Math.min(1, valueFn(it) / max));
-      var svg = s("svg", { viewBox: "0 0 118 8", preserveAspectRatio: "none", "aria-hidden": "true" });
-      svg.appendChild(s("rect", { "class": "track", x: 0, y: 2, width: 118, height: 4, rx: 2 }));
-      svg.appendChild(s("rect", { "class": "fill", x: 0, y: 2, width: (frac * 118).toFixed(1), height: 4, rx: 2 }));
-
-      var spark = opts.spark && it.sparkline && it.sparkline.length > 1
-        ? sparkline(it.sparkline.map(function (v) { return Number(v) || 0; }))
-        : null;
-
-      var label = labelFn(it);
-      var name = opts.onPick
-        ? h("button", {
-            cls: "n n-pick", type: "button", text: label, title: "Filter on " + label,
-            on: { click: function () { opts.onPick(it); } }
-          })
-        : h("span", { cls: "n", text: label, title: label });
-
-      list.appendChild(h("div", { cls: "barrow" },
-        name, svg, spark,
-        h("span", { cls: "v", text: textFn(it) })));
-    });
-    return list;
-  }
-
   /* --------------------------------- Process Lineage & Forensics Components */
 
   function processAttributionBadge(status) {
@@ -4773,584 +4878,61 @@
     openSheet("Process Forensics & Event Inspection", body, actions, "sheet-forensics");
   }
 
-  function renderTraffic() {
-    var view = $("view");
-    clear(view);
-
-    var ov = state.trafficOverview || {};
-    var flowsData = state.trafficFlows || {};
+  /* Traffic owns its DOM (traffic.js); this loads it and hands it the data
+     refresh() fetched and the console's navigation. */
+  var trafficUI = null;
+  function trafficFilterPatch(patch) {
     var tf = state.trafficFilter || { range: "1h" };
-
-    // 1. Filter Bar
-    var rangeButtons = ["15m", "1h", "6h", "24h", "7d", "all"].map(function (r) {
-      var active = (tf.range || "1h") === r;
-      return h("button", {
-        cls: "btn mini" + (active ? " btn-primary" : ""),
-        type: "button",
-        /* The class alone was the whole answer to "which window am I looking
-           at", and it was drawing nothing; this states it to a reader who
-           cannot see the colour either way. */
-        "aria-pressed": active ? "true" : "false",
-        text: r.toUpperCase(),
-        on: {
-          click: function () {
-            tf.range = r;
-            tf.cursor = "";
-            refresh();
-          }
+    if (patch.clear) tf = { range: tf.range || "1h" };
+    else Object.keys(patch).forEach(function (k) { if (patch[k] === "" || patch[k] === false || patch[k] === 0) delete tf[k]; else tf[k] = patch[k]; });
+    state.trafficFilter = tf;
+    /* A new scope shows as loading rather than as the old scope's rows under
+       the new filter; "Show more" keeps the rows it extends. */
+    if (!(Object.keys(patch).length === 1 && patch.limit)) { state.trafficConversations = null; if (patch.range || patch.endpoint_id !== undefined || patch.clear || patch.peer !== undefined) state.trafficOverview = null; }
+    state.trafficError = "";
+    renderBody();
+    refresh();
+  }
+  function renderTraffic() {
+    if (!window.OminullTraffic) {
+      clear($("view"));
+      $("view").appendChild(h("p", {cls: "empty", role: "status", text: "Loading traffic…"}));
+      loadFeature("traffic", ["traffic.js"]).then(function () { if (state.section === "traffic") renderBody(); }).catch(function (e) {
+        if (state.section === "traffic") { clear($("view")); $("view").appendChild(h("p", {role:"alert", text:e.message})); $("view").appendChild(h("button", {cls:"btn", type:"button", text:"Retry", on:{click:renderBody}})); }
+      });
+      return;
+    }
+    if (!trafficUI || !$("view").contains(document.querySelector(".tf-workspace"))) {
+      if (trafficUI) trafficUI.destroy();
+      clear($("view"));
+      trafficUI = window.OminullTraffic.mount($("view"), {
+        request: request,
+        filter: function () { return state.trafficFilter || { range: "1h" }; },
+        hosts: function () { return arrayOf(state.endpoints).filter(function (e) { return e.status !== "retired"; }).map(function (e) { return { id: e.id, name: e.hostname || e.id }; }).sort(function (a, b) { return a.name.localeCompare(b.name); }); },
+        onFilter: trafficFilterPatch,
+        retry: function () { Object.keys(resources).forEach(function (key) { resources[key].retryAt = 0; }); refresh(); },
+        openHost: function (endpointId) {
+          var a = state.assets.find(function (x) { return x.endpoint && x.endpoint.id === endpointId; });
+          if (a) openRoute(a.key); else toast("No host record for " + endpointId + ".");
+        },
+        openFindings: function (c) {
+          var held = c.findings && c.findings.held_reason;
+          state.alertsFilter = { page: 1, limit: 50, endpoint_id: c.endpoint_id, search: c.peer_ip, hunt: held === "hunt", held: !!held && held !== "hunt" };
+          go("alerts");
+        },
+        showTopology: function (c) {
+          var ep = arrayOf(state.endpoints).find(function (e) { return e.id === c.endpoint_id; });
+          state.topoSelected = (ep && ep.ip) || c.peer_ip;
+          go("topology");
+        },
+        openFlow: function (flow) { openEventInspectionSheet(flow); },
+        copy: function (text) {
+          if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { toast("Copied " + text, "ok"); }, function () { toast("Couldn't copy " + text + "."); });
+          else toast("Couldn't copy " + text + ".");
         }
       });
-    });
-
-    var chips = [];
-    if (tf.endpoint_id) {
-      chips.push(filterChip("Endpoint: " + tf.endpoint_id, function () { delete tf.endpoint_id; refresh(); }));
     }
-    if (tf.dst_ip) {
-      chips.push(filterChip("Dest: " + tf.dst_ip, function () { delete tf.dst_ip; refresh(); }));
-    }
-    if (tf.process) {
-      chips.push(filterChip("Process: " + tf.process, function () { delete tf.process; refresh(); }));
-    }
-    if (tf.domain) {
-      chips.push(filterChip("Domain: " + tf.domain, function () { delete tf.domain; refresh(); }));
-    }
-    if (tf.protocol) {
-      chips.push(filterChip("Proto: " + tf.protocol, function () { delete tf.protocol; refresh(); }));
-    }
-    if (tf.action) {
-      chips.push(filterChip("Action: " + tf.action, function () { delete tf.action; refresh(); }));
-    }
-    if (tf.hash) {
-      chips.push(filterChip("Hash: " + tf.hash.slice(0, 10) + "…", function () { delete tf.hash; refresh(); }));
-    }
-    if (tf.user) {
-      chips.push(filterChip("User: " + tf.user, function () { delete tf.user; refresh(); }));
-    }
-    if (tf.attribution) {
-      chips.push(filterChip("Attribution: " + tf.attribution, function () { delete tf.attribution; refresh(); }));
-    }
-
-    var measuredCheck = h("label", { cls: "traffic-chip u-pointer" },
-      h("input", {
-        type: "checkbox",
-        checked: !!tf.measured_only,
-        on: {
-          change: function (e) {
-            tf.measured_only = e.target.checked;
-            tf.cursor = "";
-            refresh();
-          }
-        }
-      }),
-      h("span", { text: " Measured bytes only" }));
-
-    var filterBar = h("div", { cls: "traffic-filter-bar" },
-      h("div", { cls: "traffic-filter-group" }, rangeButtons),
-      h("div", { cls: "traffic-chips" }, measuredCheck, chips));
-
-    // 2. Measured Coverage Banner & Stat Cards
-    var totalFlows = Number(ov.total_flows) || 0;
-    var measuredFlows = Number(ov.measured_flows) || 0;
-    var covPct = Math.round((Number(ov.measured_flow_coverage) || 0) * 100);
-
-    var totals = ov.totals || {};
-    var statsGrid = h("div", { cls: "summary-grid" },
-      h("div", { cls: "summary-stat-box" },
-        h("span", { cls: "summary-stat-val", text: bytes((Number(totals.bytes_in) || 0) + (Number(totals.bytes_out) || 0)) }),
-        h("span", { cls: "summary-stat-label", text: "Total Volume (" + bytes(totals.bytes_in) + " in / " + bytes(totals.bytes_out) + " out)" })),
-      h("div", { cls: "summary-stat-box" },
-        h("span", { cls: "summary-stat-val", text: String(totals.flow_count || totalFlows) }),
-        h("span", { cls: "summary-stat-label", text: "Tracked Flow Events (" + covPct + "% Socket Measured)" })),
-      h("div", { cls: "summary-stat-box" },
-        h("span", { cls: "summary-stat-val", text: String(totals.block_count || 0), "data-tone": totals.block_count ? "crit" : null }),
-        h("span", { cls: "summary-stat-label", text: "Threat & Policy Block Drops" })),
-      h("div", { cls: "summary-stat-box" },
-        h("span", { cls: "summary-stat-val", text: String(totals.anomaly_count || 0), "data-tone": totals.anomaly_count ? "warn" : null }),
-        h("span", { cls: "summary-stat-label", text: "Anomalous Behavioral Detections" })));
-
-    // 3. Dual Synchronized Time Lanes
-    var trends = arrayOf(ov.trends);
-    var dualChartCard;
-    if (trends.length > 1) {
-      var maxB = Math.max.apply(null, trends.map(function (p) {
-        return Math.max(Number(p.bytes_in) || 0, Number(p.bytes_out) || 0);
-      }).concat([1]));
-      var maxF = Math.max.apply(null, trends.map(function (p) {
-        return Number(p.flows) || 0;
-      }).concat([1]));
-
-      var n = trends.length;
-      var W = 100;
-      var slot = W / n;
-      var barW = slot * 0.35;
-
-      var svg = s("svg", { "class": "chart dual-chart-svg", viewBox: "0 0 " + W + " 150", preserveAspectRatio: "none", role: "img", "aria-label": "Dual synchronized traffic lanes" });
-
-      /* An empty stretch of chart has two readings that look identical and mean
-         opposite things: nothing was talking, or the hub has nothing from those
-         minutes. retained_from is the oldest telemetry the hub still holds, so
-         the part of the window that predates it is drawn as uncovered rather
-         than as quiet, and said in words underneath. */
-      var winStart = parseTime(ov.window_start);
-      var winEnd = parseTime(ov.window_end);
-      var retainedFrom = parseTime(ov.retained_from);
-      var uncoveredTo = 0;
-      if (winStart && winEnd && retainedFrom && retainedFrom.getTime() > winStart.getTime() && winEnd.getTime() > winStart.getTime()) {
-        var span = winEnd.getTime() - winStart.getTime();
-        var gap = Math.min(retainedFrom.getTime(), winEnd.getTime()) - winStart.getTime();
-        uncoveredTo = Math.max(0, Math.min(W, (gap / span) * W));
-      }
-      if (uncoveredTo > 0) {
-        svg.appendChild(s("rect", { "class": "chart-uncovered", x: 0, y: 10, width: uncoveredTo, height: 55 }));
-        svg.appendChild(s("rect", { "class": "chart-uncovered", x: 0, y: 85, width: uncoveredTo, height: 55 }));
-      }
-
-      // Lane 1 (Top: Bandwidth In/Out) - y: 10 to 65
-      // Lane 2 (Bottom: Flows / Blocks) - y: 85 to 140
-      trends.forEach(function (p, i) {
-        var x0 = i * slot + slot * 0.1;
-        var bin = Number(p.bytes_in) || 0;
-        var bout = Number(p.bytes_out) || 0;
-        var flows = Number(p.flows) || 0;
-        var blocks = Number(p.blocks) || 0;
-        var anomalies = Number(p.anomalies) || 0;
-
-        var hIn = bin ? Math.max(1, Math.round((bin / maxB) * 50)) : 0;
-        var hOut = bout ? Math.max(1, Math.round((bout / maxB) * 50)) : 0;
-        var hFlow = flows ? Math.max(1, Math.round((flows / maxF) * 45)) : 0;
-        var hBlock = blocks ? Math.max(2, Math.round((blocks / maxF) * 45)) : 0;
-
-        if (hIn) svg.appendChild(s("rect", { "class": "series-in", x: x0, y: 65 - hIn, width: barW, height: hIn }));
-        if (hOut) svg.appendChild(s("rect", { "class": "series-out", x: x0 + barW + 0.2, y: 65 - hOut, width: barW, height: hOut }));
-        if (hFlow) svg.appendChild(s("rect", { "class": "series-flow", fill: "var(--dim)", opacity: "0.4", x: x0, y: 140 - hFlow, width: barW * 2 + 0.2, height: hFlow }));
-        if (hBlock) svg.appendChild(s("rect", { "class": "series-block", fill: "var(--crit)", x: x0, y: 140 - hBlock, width: barW * 2 + 0.2, height: hBlock }));
-
-        /* Every trend point carries the detector's anomaly count for that
-           bucket and the chart drew neither it nor any hint that it existed.
-           A tick above the flow lane says "the detector fired here", which is
-           the point at which an operator wants the flow table filtered. */
-        if (anomalies) {
-          svg.appendChild(s("rect", {
-            "class": "series-anom", fill: "var(--warn)",
-            x: x0, y: 78, width: barW * 2 + 0.2, height: 4
-          }));
-        }
-      });
-
-      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 66, x2: W, y2: 66, stroke: "var(--line)" }));
-      svg.appendChild(s("line", { "class": "axis", x1: 0, y1: 141, x2: W, y2: 141, stroke: "var(--line)" }));
-
-      var ticks = h("div", { cls: "chart-ticks" });
-      var step = Math.max(1, Math.floor((trends.length - 1) / 5));
-      for (var idx = 0; idx < trends.length; idx += step) {
-        var p = trends[idx];
-        var d = parseTime(p.timestamp);
-        if (d) {
-          var label = (tf.range === "7d" || tf.range === "all")
-            ? (d.getMonth() + 1) + "/" + d.getDate() + " " + pad(d.getHours(), 2) + ":00"
-            : pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2);
-          ticks.appendChild(h("span", { text: label }));
-        }
-      }
-      if ((trends.length - 1) % step !== 0 && trends.length > 1) {
-        var lastP = trends[trends.length - 1];
-        var lastD = parseTime(lastP.timestamp);
-        if (lastD) {
-          var lastLabel = (tf.range === "7d" || tf.range === "all")
-            ? (lastD.getMonth() + 1) + "/" + lastD.getDate() + " " + pad(lastD.getHours(), 2) + ":00"
-            : pad(lastD.getHours(), 2) + ":" + pad(lastD.getMinutes(), 2);
-          ticks.appendChild(h("span", { text: lastLabel }));
-        }
-      }
-
-      /* Said in words as well as drawn, because the shading answers "how much of
-         this window does the hub have" and nothing else on the card does. A
-         window the hub covers in full and still has no bars in it is a quiet
-         estate, and says so rather than leaving the reader to guess which of the
-         two they are looking at. */
-      var busy = trends.some(function (p) {
-        return (Number(p.flows) || 0) || (Number(p.bytes_in) || 0) || (Number(p.bytes_out) || 0) || (Number(p.blocks) || 0);
-      });
-      var coverageNote = null;
-      if (uncoveredTo > 0 && retainedFrom) {
-        var floorLabel = (tf.range === "7d" || tf.range === "all")
-          ? (retainedFrom.getMonth() + 1) + "/" + retainedFrom.getDate() + " " + pad(retainedFrom.getHours(), 2) + ":" + pad(retainedFrom.getMinutes(), 2)
-          : pad(retainedFrom.getHours(), 2) + ":" + pad(retainedFrom.getMinutes(), 2);
-        coverageNote = h("p", {
-          cls: "chart-note", "data-tone": "warn",
-          text: "Shaded: the hub retains no telemetry before " + floorLabel + ". This " + (tf.range || "1h")
-            + " window is covered for " + spanText(winEnd.getTime() - retainedFrom.getTime())
-            + " of " + spanText(winEnd.getTime() - winStart.getTime())
-            + " \u2014 an empty lane on the left is missing data, not a quiet network."
-        });
-      } else if (!busy) {
-        coverageNote = h("p", { cls: "chart-note", text: "The hub covers this whole window and recorded no flows in it." });
-      }
-
-      dualChartCard = card("Dual Synchronized Flow & Volume Timeline",
-        h("div", { cls: "card-body" },
-          h("div", { cls: "dual-timeline-container" },
-            h("div", { cls: "dual-lane-label u-mb1 uf uf-between", text: "Lane 1: Bandwidth Volume (Top) · Lane 2: Event Counts (Bottom)" }),
-            svg,
-            ticks,
-            coverageNote,
-            h("details", {}, h("summary", {text:"Timeline values · bytes and event counts"}), simpleTable(["Time", "Bytes in", "Bytes out", "Flows", "Blocks", "Anomalies"], trends.map(function(p){return [stamp(parseTime(p.timestamp)),String(p.bytes_in||0),String(p.bytes_out||0),String(p.flows||0),String(p.blocks||0),String(p.anomalies||0)];}))),
-            h("p", {cls:"why", text:"Scale: bytes 0–" + bytes(maxB) + "; flows 0–" + maxF + " per interval"}),
-            h("div", { cls: "legend pad-x u-mt1" },
-              h("span", { text: "■ Blue: Bytes In" }),
-              h("span", { text: "■ Indigo: Bytes Out" }),
-              h("span", { text: "■ Gray: Total Flows" }),
-              h("span", { text: "■ Red: Block Drops" }),
-              h("span", { text: "■ Amber: Detector Anomalies" }),
-              h("span", { text: "Window: " + (tf.range || "1h") })))));
-    } else {
-      dualChartCard = card("Traffic Timeline", emptyBox("No timeline points captured in this window."));
-    }
-
-    // 4. Composition Breakdowns
-    var dist = ov.distributions || {};
-    var protoCards = card("Protocol Distribution",
-      h("div", { cls: "card-body" },
-        arrayOf(dist.protocols).length
-          ? barList(dist.protocols, function (p) { return p.count; },
-              function (p) { return p.label + " (" + Math.round(p.percentage * 100) + "%)"; },
-              function (p) { return p.count + " flows · " + bytes(p.total_bytes); })
-          : emptyBox("No protocols active.")));
-
-    var actCards = card("Action Breakdown",
-      h("div", { cls: "card-body" },
-        arrayOf(dist.actions).length
-          ? barList(dist.actions, function (a) { return a.count; },
-              function (a) { return a.label + " (" + Math.round(a.percentage * 100) + "%)"; },
-              function (a) { return a.count + " flows"; })
-          : emptyBox("No action distribution.")));
-
-    var dirCards = card("Direction Distribution",
-      h("div", { cls: "card-body" },
-        arrayOf(dist.directions).length
-          ? barList(dist.directions, function (d) { return d.count; },
-              function (d) { return d.label + " (" + Math.round(d.percentage * 100) + "%)"; },
-              function (d) { return d.count + " flows"; })
-          : emptyBox("No direction distribution.")));
-
-    // 5. Multi-column Rankings
-    var rankings = ov.rankings || {};
-
-    /* top_endpoints and top_countries were computed on every overview and
-       dropped: "which host is loudest" and "where is this estate talking to"
-       are the two questions this page is opened with, and neither was on it. */
-    var epCard = card("Top Talking Endpoints",
-      h("div", { cls: "card-body" },
-        arrayOf(rankings.top_endpoints).length
-          ? barList(rankings.top_endpoints, function (e) { return e.total_bytes || e.flow_count; },
-              function (e) { return e.label || e.key; },
-              function (e) { return e.flow_count + " flows" + (e.total_bytes ? " \u00b7 " + bytes(e.total_bytes) : ""); },
-              { spark: true, onPick: function (e) { tf.endpoint_id = e.key || e.label; refresh(); } })
-          : emptyBox("No endpoint has reported a flow in this window.")));
-
-    var ctryCard = card("Top Destination Countries",
-      h("div", { cls: "card-body" },
-        arrayOf(rankings.top_countries).length
-          ? barList(rankings.top_countries, function (c) { return c.total_bytes || c.flow_count; },
-              function (c) { return c.label || c.key; },
-              function (c) { return c.flow_count + " flows" + (c.total_bytes ? " \u00b7 " + bytes(c.total_bytes) : ""); },
-              { spark: true, onPick: function (c) { tf.country = c.key || c.label; refresh(); } })
-          : emptyBox("No destination has been geolocated in this window.")));
-
-    var procCard = card("Top Active Processes",
-      h("div", { cls: "card-body" },
-        arrayOf(rankings.top_processes).length
-          ? barList(rankings.top_processes, function (p) { return p.total_bytes || p.flow_count; },
-              function (p) { return p.label; },
-              function (p) { return p.flow_count + " flows" + (p.total_bytes ? " · " + bytes(p.total_bytes) : ""); },
-              { spark: true, onPick: function (p) { tf.process = p.label; refresh(); } })
-          : emptyBox("No process attribution yet.")));
-
-    var dstCard = card("Top Remote Destinations",
-      h("div", { cls: "card-body" },
-        arrayOf(rankings.top_destinations).length
-          ? barList(rankings.top_destinations, function (d) { return d.total_bytes || d.flow_count; },
-              function (d) { return d.label; },
-              function (d) { return d.flow_count + " flows" + (d.total_bytes ? " · " + bytes(d.total_bytes) : ""); },
-              { spark: true })
-          : emptyBox("No destination data.")));
-
-    var domCard = card("Top Queried Domains",
-      h("div", { cls: "card-body" },
-        arrayOf(rankings.top_domains).length
-          ? barList(rankings.top_domains, function (d) { return d.flow_count; },
-              function (d) { return d.label; },
-              function (d) { return d.flow_count + " queries"; })
-          : emptyBox("No domain queries.")));
-
-    var portCard = card("Top Destination Ports",
-      h("div", { cls: "card-body" },
-        arrayOf(rankings.top_ports).length
-          ? barList(rankings.top_ports, function (p) { return p.flow_count; },
-              function (p) { return "Port " + p.label; },
-              function (p) { return p.flow_count + " flows"; })
-          : emptyBox("No port data.")));
-
-    // 6. Live Filtered Flow Stream Table
-    var flowsList = arrayOf(flowsData.flows);
-    var flowRows = flowsList.map(function (f) {
-      var isSelected = state.selectedFlow && state.selectedFlow.id === f.id;
-      var procCell = [
-        h("span", { cls: "dim", text: f.process_name || f.domain || "—", on: { click: function (e) { e.stopPropagation(); if (f.process_name) tf.process = f.process_name; refresh(); } } })
-      ];
-      if (f.attribution_status && f.attribution_status !== "unknown") {
-        procCell.push(h("span", { cls: "u-ml2" }, processAttributionBadge(f.attribution_status)));
-      }
-      if (f.executable_sha256) {
-        procCell.push(h("span", { cls: "u-ml2" }, processHashBadge(f.executable_sha256, function (hsh) { tf.hash = hsh; refresh(); })));
-      }
-      var verdict = f.is_anomalous
-        ? h("span", { cls: "st", "data-state": "warn", title: "The detector flagged this flow" },
-            icon("i-alert", true), h("span", { text: "anomalous" }))
-        : h("span", { cls: "st", "data-state": f.action === "BLOCK" ? "crit" : "ok" },
-            icon(f.action === "BLOCK" ? "g-quarantine" : "g-online", true),
-            h("span", { text: f.action || "PERMIT" }));
-
-      var row = [
-        stamp(parseTime(f.timestamp)),
-        verdict,
-        h("span", { cls: "dim-3", text: f.direction || "OUT" }),
-        h("span", { cls: "ip", text: f.endpoint_id || "—", on: { click: function (e) { e.stopPropagation(); tf.endpoint_id = f.endpoint_id; refresh(); } } }),
-        h("span", { cls: "ip", text: f.src_ip + (f.src_port ? ":" + f.src_port : "") }),
-        h("span", { cls: "ip", text: f.dst_ip + (f.dst_port ? ":" + f.dst_port : ""), on: { click: function (e) { e.stopPropagation(); tf.dst_ip = f.dst_ip; refresh(); } } }),
-        h("span", { cls: "dim-3", text: f.proto_name || "TCP" }),
-        h("div", { cls: "uf uf-wrap uf-g1" }, procCell),
-        h("span", { cls: "ago", text: (Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0)
-          ? bytes((Number(f.bytes_in) || 0) + (Number(f.bytes_out) || 0))
-          : "—" })
-      ];
-      return row;
-    });
-
-    var flowsTable = flowRows.length
-      ? simpleTable(["Time", "Action", "Dir", "Endpoint", "Source", "Destination", "Proto", "Process / Domain", "Volume"], flowRows)
-      : emptyBox("No flow events match active filters.");
-
-    // Make table rows interactive for drawer selection
-    var tableEl = flowsTable.querySelector("tbody");
-    if (tableEl) {
-      var trs = tableEl.querySelectorAll("tr");
-      trs.forEach(function (tr, idx) {
-        tr.classList.add("flow-table-row");
-        if (flowsList[idx] && state.selectedFlow && state.selectedFlow.id === flowsList[idx].id) {
-          tr.classList.add("selected");
-        }
-        tr.addEventListener("click", function () {
-          state.selectedFlow = flowsList[idx];
-          renderBody();
-        });
-      });
-    }
-
-    var nextBtn = flowsData.next_cursor ? h("button", {
-      cls: "btn mini btn-primary", type: "button", text: "Next Page →",
-      on: { click: function () { tf.cursor = flowsData.next_cursor; refresh(); } }
-    }) : null;
-    var prevBtn = tf.cursor ? h("button", {
-      cls: "btn mini", type: "button", text: "← First Page",
-      on: { click: function () { tf.cursor = ""; refresh(); } }
-    }) : null;
-
-    var pagination = h("div", { cls: "actions pad-x" }, prevBtn, nextBtn);
-    var flowStreamCard = card("Active Flow Telemetry (" + (flowsData.total || flowsList.length) + " matching events)",
-      h("div", { cls: "stack" }, flowsTable, pagination));
-
-    /* The hub bins every flow by day-of-week and hour-of-day whenever the
-       window is a day or longer, and the console never asked for the grid.
-       "Is this host talking at 3am on a Sunday" is a beaconing question that
-       the trend lane, which is one continuous line, cannot answer. */
-    var heat = arrayOf(ov.heatmap);
-    var heatCard;
-    if (heat.length) {
-      var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-      var byCell = {};
-      var heatMax = 0;
-      heat.forEach(function (c) {
-        var v = Number(c.total_bytes) || Number(c.flows) || 0;
-        byCell[c.day_of_week + ":" + c.hour_of_day] = c;
-        if (v > heatMax) heatMax = v;
-      });
-
-      var grid = h("div", { cls: "heatgrid", role: "table", "aria-label": "Flows by day and hour" });
-      grid.appendChild(h("span", { cls: "heat-corner", "aria-hidden": "true" }));
-      for (var hr = 0; hr < 24; hr++) {
-        grid.appendChild(h("span", { cls: "heat-hour", text: hr % 3 === 0 ? pad(hr, 2) : "" }));
-      }
-      DAYS.forEach(function (dayName, day) {
-        grid.appendChild(h("span", { cls: "heat-day", text: dayName }));
-        for (var hour = 0; hour < 24; hour++) {
-          var cell = byCell[day + ":" + hour];
-          var flows = cell ? (Number(cell.flows) || 0) : 0;
-          var vol = cell ? (Number(cell.total_bytes) || 0) : 0;
-          var level = heatMax > 0 && (vol || flows)
-            ? Math.min(4, Math.max(1, Math.ceil(((vol || flows) / heatMax) * 4)))
-            : 0;
-          grid.appendChild(h("span", {
-            cls: "heat-cell", "data-level": String(level),
-            title: dayName + " " + pad(hour, 2) + ":00 \u2014 " + flows + " flow" + (flows === 1 ? "" : "s") +
-              (vol ? " \u00b7 " + bytes(vol) : "")
-          }));
-        }
-      });
-
-      heatCard = card("When This Estate Talks",
-        h("div", { cls: "card-body" },
-          grid,
-          h("div", { cls: "legend u-mt1" },
-            h("span", { text: "quiet" }),
-            h("span", { cls: "heat-cell", "data-level": "1", "aria-hidden": "true" }),
-            h("span", { cls: "heat-cell", "data-level": "2", "aria-hidden": "true" }),
-            h("span", { cls: "heat-cell", "data-level": "3", "aria-hidden": "true" }),
-            h("span", { cls: "heat-cell", "data-level": "4", "aria-hidden": "true" }),
-            h("span", { text: "busiest" }))));
-    } else {
-      heatCard = card("When This Estate Talks",
-        emptyBox("The hub bins the week only over a window of a day or more. Widen the range to see it."));
-    }
-
-    /* The diurnal pair is the whole point of the summary: the baseline is what
-       this hour of the day normally looks like and the live curve is what it
-       looks like now, and reading them apart is how "quiet Sunday 3am" becomes
-       a finding rather than a feeling. */
-    var an = state.analytics || {};
-    var base = an.diurnal_baseline || {};
-    var live = an.diurnal_live || {};
-    var diurnalCard;
-    if (Object.keys(base).length || Object.keys(live).length) {
-      var hours = [];
-      for (var dh = 0; dh < 24; dh++) hours.push(dh);
-      var dMax = 1;
-      hours.forEach(function (hour) {
-        dMax = Math.max(dMax, Number(base[hour]) || 0, Number(live[hour]) || 0);
-      });
-      var dsvg = s("svg", { "class": "chart", viewBox: "0 0 120 60", preserveAspectRatio: "none", role: "img", "aria-label": "Estate event counts by UTC hour: last 24 hours and seven-day baseline" });
-      var baseLine = [], liveLine = [];
-      hours.forEach(function (hour, i) {
-        var x = (i / 23) * 118 + 1;
-        baseLine.push(x.toFixed(1) + "," + (55 - ((Number(base[hour]) || 0) / dMax) * 50).toFixed(1));
-        liveLine.push(x.toFixed(1) + "," + (55 - ((Number(live[hour]) || 0) / dMax) * 50).toFixed(1));
-      });
-      dsvg.appendChild(s("polyline", { points: baseLine.join(" "), fill: "none", stroke: "var(--ink-3)", "stroke-width": "1", "stroke-dasharray": "3 2" }));
-      dsvg.appendChild(s("polyline", { points: liveLine.join(" "), fill: "none", stroke: "var(--brand)", "stroke-width": "1.5" }));
-      dsvg.appendChild(s("line", { x1: 0, y1: 56, x2: 120, y2: 56, stroke: "var(--line)" }));
-
-      var dticks = h("div", { cls: "chart-ticks" });
-      [0, 6, 12, 18, 23].forEach(function (hour) { dticks.appendChild(h("span", { text: pad(hour, 2) + ":00" })); });
-
-      diurnalCard = card("Estate activity by UTC hour",
-        h("div", { cls: "card-body" },
-          h("p", {cls: "why", text: "Whole-estate comparison, independent of the traffic filters above. Event counts, not bytes."}), dsvg, dticks,
-          h("details", {}, h("summary", {text:"Hourly event counts"}), simpleTable(["UTC hour", "Last 24 hours", "Seven-day hourly mean"], hours.map(function(hour){return [pad(hour,2)+":00",String(live[hour]||0),String(base[hour]||0)];}))),
-          h("div", { cls: "legend u-mt1" },
-            h("span", { text: "\u2504 Grey: mean hourly events over the preceding seven days" }),
-            h("span", { text: "\u2500 Blue: events in the last 24 hours" }))));
-    } else {
-      diurnalCard = card("Estate activity by UTC hour",
-        emptyBox("The hub needs a day of history before it can say what normal looks like."));
-    }
-
-    // Assemble View
-    view.appendChild(h("div", { cls: "pad stack traffic-workspace" },
-      filterBar,
-      statsGrid,
-      dualChartCard,
-      diurnalCard,
-      heatCard,
-      h("div", { cls: "distrib-grid" }, protoCards, actCards, dirCards),
-      h("div", { cls: "cols" }, epCard, ctryCard),
-      h("div", { cls: "cols" }, procCard, dstCard),
-      h("div", { cls: "cols" }, domCard, portCard),
-      flowStreamCard));
-
-    // Render Drawer if Flow is Selected
-    if (state.selectedFlow) {
-      var sel = state.selectedFlow;
-      var drawer = h("div", { cls: "flow-drawer" },
-        h("div", { cls: "drawer-header" },
-          h("div", { cls: "stack" },
-            h("b", { text: "Flow Investigation #" + (sel.id || sel.ID || "") }),
-            h("span", { cls: "dim-3", text: sel.timestamp ? String(sel.timestamp) : "" })),
-          h("div", { cls: "uf uf-g2" },
-            h("button", {
-              cls: "btn mini btn-primary", type: "button", text: "Forensics Sheet ↗",
-              on: { click: function () { openEventInspectionSheet(sel); } }
-            }),
-            h("button", {
-              cls: "btn mini", type: "button", text: "✕ Close",
-              on: { click: function () { state.selectedFlow = null; renderBody(); } }
-            }))),
-        h("div", { cls: "drawer-body" },
-          h("div", { cls: "drawer-kv-group" },
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Action Verdict" }), h("span", { cls: "st", "data-state": sel.action === "BLOCK" ? "crit" : "ok", text: sel.action || "PERMIT" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Direction" }), h("span", { cls: "drawer-kv-val", text: sel.direction || "OUTBOUND" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Protocol" }), h("span", { cls: "drawer-kv-val", text: (sel.proto_name || "TCP") + " (" + sel.protocol + ")" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Endpoint ID" }), h("span", { cls: "drawer-kv-val", text: sel.endpoint_id || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Source IP:Port" }), h("span", { cls: "drawer-kv-val", text: sel.src_ip + ":" + sel.src_port })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Destination IP:Port" }), h("span", { cls: "drawer-kv-val", text: sel.dst_ip + ":" + sel.dst_port })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Remote Country" }), h("span", { cls: "drawer-kv-val", text: sel.country || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Queried Domain" }), h("span", { cls: "drawer-kv-val", text: sel.domain || "—" })),
-            /* The agent reports which collection layer saw the flow, the TLS
-               server name it was opened for, the host it resolved through, and
-               whether the detector called it anomalous. All four were in the
-               payload and none of them were on the screen, which is most of
-               what "why am I looking at this flow" means. */
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "TLS Server Name" }), h("span", { cls: "drawer-kv-val", text: sel.sni || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Reported Hostname" }), h("span", { cls: "drawer-kv-val", text: sel.hostname || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Collection Layer" }), h("span", { cls: "drawer-kv-val", text: sel.layer || "—" })),
-            h("div", { cls: "drawer-kv-row" },
-              h("span", { cls: "drawer-kv-label", text: "Detector Verdict" }),
-              sel.is_anomalous
-                ? h("span", { cls: "st", "data-state": "warn", text: "anomalous" })
-                : h("span", { cls: "st", "data-state": "idle", text: "nothing flagged" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Bytes In / Out" }), h("span", { cls: "drawer-kv-val", text: bytes(sel.bytes_in) + " / " + bytes(sel.bytes_out) }))),
-
-          // Process Lineage Hierarchy Tree
-          h("div", { cls: "stack uf-g1" },
-            h("span", { cls: "drawer-kv-label", text: "Process Lineage Tree" }),
-            processLineageTree(sel)),
-
-          // Process Provenance & Signature
-          h("div", { cls: "drawer-kv-group" },
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Process Path" }), h("span", { cls: "drawer-kv-val", text: sel.process_path || sel.process_name || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "User Principal" }), h("span", { cls: "drawer-kv-val", text: sel.user_identity || "—" })),
-            h("div", { cls: "drawer-kv-row" }, h("span", { cls: "drawer-kv-label", text: "Attribution Status" }), processAttributionBadge(sel.attribution_status)),
-            sel.executable_sha256 ? h("div", { cls: "drawer-kv-row" },
-              h("span", { cls: "drawer-kv-label", text: "Executable SHA-256" }),
-              processHashBadge(sel.executable_sha256, function (hsh) { tf.hash = hsh; state.selectedFlow = null; refresh(); })) : null),
-
-          // Command Line Inspector
-          h("div", { cls: "stack uf-g1" },
-            commandLineInspector(sel.command_line)),
-
-          h("div", { cls: "drawer-actions" },
-            h("button", {
-              cls: "btn mini btn-primary", type: "button", text: "Filter by this Endpoint",
-              on: { click: function () { tf.endpoint_id = sel.endpoint_id; state.selectedFlow = null; refresh(); } }
-            }),
-            h("button", {
-              cls: "btn mini", type: "button", text: "Filter by this Destination IP",
-              on: { click: function () { tf.dst_ip = sel.dst_ip; state.selectedFlow = null; refresh(); } }
-            }),
-            sel.executable_sha256 ? h("button", {
-              cls: "btn mini", type: "button", text: "Filter by Executable Hash",
-              on: { click: function () { tf.hash = sel.executable_sha256; state.selectedFlow = null; refresh(); } }
-            }) : null,
-            sel.user_identity ? h("button", {
-              cls: "btn mini", type: "button", text: "Filter by User (" + sel.user_identity + ")",
-              on: { click: function () { tf.user = sel.user_identity; state.selectedFlow = null; refresh(); } }
-            }) : null,
-            sel.process_name ? h("button", {
-              cls: "btn mini", type: "button", text: "Filter by Process (" + sel.process_name + ")",
-              on: { click: function () { tf.process = sel.process_name; state.selectedFlow = null; refresh(); } }
-            }) : null)));
-      view.appendChild(drawer);
-    }
+    trafficUI.update({ overview: state.trafficOverview, conversations: state.trafficConversations, error: state.trafficError });
   }
 
   /* ------------------------------------------------------------- sheet */
@@ -11527,7 +11109,6 @@
     var requirements = {
       assets: ["/api/v1/endpoints", "/api/v1/assets"],
       alerts: ["/api/v1/anomalies"],
-      traffic: ["/api/v1/traffic/overview", "/api/v1/traffic/flows"],
       topology: ["/api/v1/topology/workspace"],
       policy: ["/api/v1/baseline/policies", "/api/v1/detection/tuning"],
       access: ["/api/v1/operators", "/api/v1/device-auth/credentials"],
@@ -11541,7 +11122,6 @@
         if (key.split("?")[0] !== prefix) return false;
         var query = new URLSearchParams(key.split("?")[1] || "");
         if (state.section === "topology") return query.get("window") === String(state.topoWindow);
-        if (state.section === "traffic") return key === prefix + trafficQuery();
         if (state.section === "alerts") return key === prefix + alertQuery();
         return true;
       });
@@ -11553,6 +11133,7 @@
     document.body.dataset.section = state.section;
     if ($("compact-section-menu")) $("compact-section-menu").value = state.section;
     if (state.section !== "topology" && topologyUI) { topologyDraft = topologyUI.getDraft(); topologyUI.destroy(); topologyUI = null; }
+    if (state.section !== "traffic" && trafficUI) { trafficUI.destroy(); trafficUI = null; }
     var view = $("view");
     var scrollTop = view.scrollTop;
     var scrollLeft = view.scrollLeft;
@@ -11701,31 +11282,29 @@
     return aParams;
   }
 
+  /* The window and scope the summary and the conversations share; the
+     conversation list adds its own search, mark, direction and page size. */
+  var TRAFFIC_SCOPE = ["endpoint_id", "src_ip", "dst_ip", "peer", "process", "domain", "country", "protocol", "port", "direction", "action", "hash", "user", "attribution"];
   function trafficQuery() {
-      var tf = state.trafficFilter || { range: "1h" };
-      var qs = "?range=" + encodeURIComponent(tf.range || "1h");
-      if (tf.endpoint_id) qs += "&endpoint_id=" + encodeURIComponent(tf.endpoint_id);
-      if (tf.src_ip) qs += "&src_ip=" + encodeURIComponent(tf.src_ip);
-      if (tf.dst_ip) qs += "&dst_ip=" + encodeURIComponent(tf.dst_ip);
-      if (tf.process) qs += "&process=" + encodeURIComponent(tf.process);
-      if (tf.domain) qs += "&domain=" + encodeURIComponent(tf.domain);
-      if (tf.country) qs += "&country=" + encodeURIComponent(tf.country);
-      if (tf.protocol) qs += "&protocol=" + encodeURIComponent(tf.protocol);
-      if (tf.port) qs += "&port=" + encodeURIComponent(tf.port);
-      if (tf.direction) qs += "&direction=" + encodeURIComponent(tf.direction);
-      if (tf.action) qs += "&action=" + encodeURIComponent(tf.action);
-      if (tf.hash) qs += "&hash=" + encodeURIComponent(tf.hash);
-      if (tf.user) qs += "&user=" + encodeURIComponent(tf.user);
-      if (tf.attribution) qs += "&attribution=" + encodeURIComponent(tf.attribution);
-      if (tf.measured_only) qs += "&measured_only=true";
-      if (tf.cursor) qs += "&cursor=" + encodeURIComponent(tf.cursor);
-
-      return qs;
+    var tf = state.trafficFilter || { range: "1h" };
+    var qs = "?range=" + encodeURIComponent(tf.range || "1h");
+    TRAFFIC_SCOPE.forEach(function (k) { if (tf[k]) qs += "&" + k + "=" + encodeURIComponent(tf[k]); });
+    if (tf.measured_only) qs += "&measured_only=true";
+    return qs;
+  }
+  function trafficConversationQuery() {
+    var tf = state.trafficFilter || {};
+    var qs = trafficQuery();
+    if (tf.q) qs += "&q=" + encodeURIComponent(tf.q);
+    if (tf.mark) qs += "&mark=" + encodeURIComponent(tf.mark);
+    if (tf.dir) qs += "&dir=" + encodeURIComponent(tf.dir);
+    if (tf.limit) qs += "&limit=" + encodeURIComponent(tf.limit);
+    return qs;
   }
 
   var activeRefreshScope = "";
   function refresh() {
-    var scope = JSON.stringify([state.section, alertQuery(), trafficQuery(), auditQuery(), state.topoWindow, state.vulnFilterStatus]);
+    var scope = JSON.stringify([state.section, alertQuery(), trafficConversationQuery(), auditQuery(), state.topoWindow, state.vulnFilterStatus]);
     if (state.refreshing && scope !== activeRefreshScope) cancelScopeReads();
     activeRefreshScope = scope;
     if (state.refreshing) {
@@ -11879,18 +11458,16 @@
       jobs.push(request("/api/v1/audit/logs" + auditScopeQuery).then(function (d) { if (auditScopeQuery !== auditQuery()) return; state.audit = arrayOf(d && d.entries || d); auditHistory.next = d && d.next_cursor || ""; }));
       jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
       jobs.push(request("/api/v1/storage/report").then(function (d) { state.storageReport = d || null; }).catch(function (e) { state.storageReport = { error: e.message || "request failed", status: e.status }; }));
+      /* The strip's blocked-flow total; it used to load only on Traffic, so
+         Audit showed whatever Traffic last left behind, or 0. */
+      jobs.push(request("/api/v1/analytics/summary").then(function (d) { state.analytics = d || null; }).catch(function () {}));
     }
     if (state.section === "traffic") {
-      var qs = trafficQuery();
-
+      var qs = trafficQuery(), cqs = trafficConversationQuery();
       jobs.push(request("/api/v1/traffic/overview" + qs).then(function (d) { if (qs === trafficQuery()) state.trafficOverview = d || null; }));
-      jobs.push(request("/api/v1/traffic/flows" + qs).then(function (d) { if (qs === trafficQuery()) state.trafficFlows = d || null; }));
-      /* The whole analytics summary existed in this file only as a demo
-         fixture: the hub computes a diurnal baseline, a live diurnal curve,
-         the top talkers by volume and a per-country breakdown with threat
-         counts, and the console read one field of it - total_blocks - from a
-         state slot nothing ever filled. */
-      jobs.push(request("/api/v1/analytics/summary").then(function (d) { state.analytics = d || null; }).catch(function () {}));
+      jobs.push(request("/api/v1/traffic/conversations" + cqs).then(function (d) {
+        if (cqs === trafficConversationQuery()) { state.trafficConversations = d || null; state.trafficError = ""; }
+      }, function (e) { if (cqs === trafficConversationQuery()) state.trafficError = (e && e.message) || "request failed"; }));
     }
     if (state.section === "topology") jobs.push(loadTopology());
 

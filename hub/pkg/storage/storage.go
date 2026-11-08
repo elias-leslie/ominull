@@ -391,12 +391,13 @@ type AuditEntry struct {
 }
 
 type Store struct {
-	db        *sql.DB
-	mu        sync.RWMutex
-	retention sync.Mutex
-	analytics analyticsCache
-	traffic   trafficCache
-	baseline  baselineQueries
+	db          *sql.DB
+	mu          sync.RWMutex
+	retention   sync.Mutex
+	analytics   analyticsCache
+	traffic     trafficCache
+	trafficConv conversationCache
+	baseline    baselineQueries
 	// flowWriter caches flow dictionary ids and open minute aggregates
 	// (flows.go); guarded by mu.
 	flowWriter *flowWriter
