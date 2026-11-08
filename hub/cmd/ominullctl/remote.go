@@ -675,6 +675,35 @@ type holdSpec struct {
 	Debug   bool          `json:"debug,omitempty"`
 }
 
+const remoteHelp = `Remote commands (any enrolled endpoint, over the agent's own outbound channel)
+
+No SSH and nothing listening on the endpoint. Every new session is authorized on the
+first request (the hub signs the grant; nobody is asked), is recorded like a console
+shell, and ends at the hub's limits. Linux runs /bin/sh, Windows PowerShell as SYSTEM.
+
+  ominullctl exec [--timeout S] ENDPOINT -- 'uname -a'   One command; prints its stdout and
+                                                         stderr, exits with its exit code
+  ominullctl shell open [--ttl 90m] ENDPOINT             Hold a session; exec, put and get reuse it
+  ominullctl put ENDPOINT ./fix.sh /tmp/fix.sh           Files up to 2 MiB
+  ominullctl get ENDPOINT /var/log/syslog ./syslog       (- for stdout)
+  ominullctl shell end ENDPOINT                          Always end a held session when done
+  ominullctl --json exec ENDPOINT -- CMD                 {"stdout","stderr","exit"}
+
+shell open asks for the hub's longest session unless --ttl asks for less, and holds it
+until the expires_at the hub answers with, in a background process with a private socket
+under $XDG_RUNTIME_DIR/ominull/. A one-shot exec asks only for its --timeout plus five
+minutes.
+
+Limits: console account menu > Remote shell limits, or GET/PUT /api/v1/terminal/limits.
+Bounds: session 5 minutes to 24 hours, idle 1 minute up to the session length, 1 to 10 per
+endpoint, 1 to 50 in total. Saved values win over the hub's startup flags
+(--terminal-max-duration, --terminal-idle-timeout, --terminal-max-per-endpoint,
+--terminal-max-per-tenant) and survive restarts. Sessions already open keep their limits.
+
+Who acted: the hub records $OMINULL_AGENT, else the agent session this runs in, as a claim.
+Sessions belong to that name, so reattach with the same one.
+`
+
 // runHolder is the background process behind `shell open`: it keeps the
 // session attached and serves jobs on a private socket until the TTL, the
 // hub's own limits or `shell end`.

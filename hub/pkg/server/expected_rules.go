@@ -66,6 +66,12 @@ func lastAddr(p netip.Prefix) netip.Addr {
 // handleExpectedRules lists, saves and deletes expected rules. Reading is open
 // to any authenticated operator (an analyst has to see why a finding did not
 // fire); writing is an administrator's action.
+//
+// GET returns {rules, findings, explicit, now}; POST or PUT upserts one rule by id;
+// DELETE ?id= removes one. A write applies at once, runs the floor drill and is audited
+// as EXPECTED_RULE_SAVED or EXPECTED_RULE_DELETED. Rules lapsing within
+// policy_expiry_warn_days turn ominull.detection.expiring medium; renew by re-POSTing
+// the same id with a later expires_at. The rule's clauses: storage/expected_rules.go.
 func (s *Server) handleExpectedRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Header.Get("X-Role") != "admin" {
 		writeJSONError(w, http.StatusForbidden, "changing what is expected is an administrator action")
@@ -194,6 +200,11 @@ type markRequest struct {
 // it refuses a process nothing attributed, one whose file differs from its
 // path, and findings the floor raises. Cloud storage uploads and lateral
 // sweeps are written as rules by hand, not from a click.
+//
+// The rule's program is the finding's (a /home version folder generalised to *, a
+// root process bound to system); all_hosts widens the host; an expiry is set only when
+// days is given. The finding is acknowledged and the write audited as
+// EXPECTED_RULE_MARKED.
 func (s *Server) handleMarkExpected(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

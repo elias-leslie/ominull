@@ -24,6 +24,19 @@ import (
 //
 // The findings carry counts and states, not telemetry. Messages hold only
 // counts; device names stay in the structured fields.
+// The alert summary is the exception: it is the notice's sentence.
+//
+// Aico owns which machines should be running: each push reply carries its fleet
+// (machine, intent, up, reports), kept in setting aico_fleet. For a machine Aico says
+// is off, a quiet agent is no finding; for one it says is up, a quiet agent past
+// silence_after_minutes (counted from when the hub first heard it was up) pages as a
+// dark sensor. A host Aico cannot speak for (the Windows laptops), or a view older
+// than aico_fleet_fresh_minutes, keeps the stored presence: intermittent hosts are
+// reported after 30 days quiet, parked hosts never. A machine last called off whose
+// intent is not "always" stays off for aico_fleet_off_memory_hours once Aico's word
+// lapses. A stopped always-on guest is sent as not known, so its presence keeps it
+// watched. Presence is only set at enrolment (a server stays always-on, anything else
+// starts intermittent).
 
 const (
 	findingSource = "ominull"

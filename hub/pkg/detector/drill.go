@@ -24,6 +24,31 @@ import (
 // memory and isolates nothing: its isolate hook only notes that
 // it was asked. The server judges the result and reports a miss, or a drill
 // that has stopped running, on the Aico push (server/floor_drill.go).
+//
+// It runs at start, weekly and after every applied detection policy change. A rule
+// that does not raise, does not isolate where it should, or that the feed would
+// explain away (Expected) is a CRITICAL ominull.detection.drill, as is a drill that
+// has not run for over eight days; a missed drill reruns hourly until it passes.
+//
+// Lateral cases use the private /24 holding the most enrolled endpoints and twice
+// each threshold. Both sweeps run again as each program a rule names (path with *
+// filled in, its pinned hash, its account or root), except a resolver or container
+// runtime the code already exempts; a shell or interpreter trips the lateral sweep
+// at a lower count, so its first sweep is recorded rather than paged and the case
+// only has to raise. A rule narrowed to a host, range or port gets the cases its own
+// traffic could make, from its host, by its program, inside its range and on its
+// port: threat-list match, sensitive port, port sweep, lateral sweep on SMB and, for
+// an agent runtime or interpreter, resolver bypass. A case it cannot match is skipped
+// (a port sweep under a one-port rule, a lateral sweep under a public or too small
+// range or inside a container network, the sweeps for an exempt program), and so is
+// the burst, which a rule may cover by design.
+//
+// Every tuning save or rule change is drilled for the floor cases the new policy
+// blinds that the old one did not (a case that raised before and that the new policy
+// no longer builds counts). The audit statement opens with them ("BLINDS 2 FLOOR
+// CASES: lateral sweep, ...", shortened to the count when there is no room) or with
+// "floor drill: blinds no floor case". The drill does not block the save. Retirement
+// reaches no floor rule, so its statement carries no drill.
 
 // DrillEndpointID is the endpoint the synthetic events come from. It is never
 // enrolled; no finding from it is stored.

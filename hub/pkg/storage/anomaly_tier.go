@@ -14,15 +14,23 @@ import (
 // deterministic, explainable rules - a canary or decoy touched, an always-on
 // host gone silent, a sweep, a threat-intelligence match, a policy broken -
 // and they are what the open alert list, the counts and the Nightshift summary
-// describe. Hunt leads come from the behavioural detectors (first-seen
-// destinations, interpreters reaching out, off-hours activity): on a machine
-// where AI agents start programs and open connections all day those describe
-// ordinary work, so they are kept as data an analyst can hunt through and are
-// never raised as alerts.
+// describe. On a machine where AI agents start programs and open connections all
+// day, novelty describes ordinary work, so NOVEL_DESTINATION, NOVEL_PROCESS_EGRESS,
+// OFF_HOURS_ACTIVITY, BANDWIDTH_SPIKE and the first-visit AGENT_NEW_DESTINATION no
+// longer write anything: the hub keeps first-seen history (new-place upload needs
+// it) and raises nothing for novelty, the hour or a rate outlier. Rows they wrote
+// earlier stay readable, and the kinds stay in the expected-rule vocabulary so
+// saved rules naming them still load.
 //
-// A hunt lead is stored like a learning-held finding: written in full, with its
-// evidence, kept out of every open count and off the default list, one filter
-// away. It is bounded by the same retention as every other finding.
+// Earlier hunt leads stay stored in full with their evidence, out of every open
+// count and off the default list (GET /api/v1/anomalies?held=hunt, hunt_total, and
+// ominull.anomalies.hunt, always informational), bounded by the anomaly retention.
+// On agent-heavy endpoints (tuning agent_heavy_endpoints by id, agent_heavy_roles by
+// role, and with agent_heavy_observed any endpoint whose telemetry showed an agent
+// runtime; never the operating system) a lead is muted to LOW. New-device findings
+// from the retired scheduled sweep (alert-disc-*) share the NOVEL_DESTINATION type
+// and keep paging until retention removes them. The replay route's paging field
+// compares every kept finding not held by learning with those from paging detectors.
 const (
 	TierPage = "page"
 	TierHunt = "hunt"

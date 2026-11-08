@@ -41,6 +41,9 @@ func (s *Server) agentVersionRetired(version string) bool {
 	return false
 }
 
+// handleAgentRollback retires an agent release ({version, reason}): halts its staged
+// rollouts, drops its queued updates and refuses to roll it again. Machines already on
+// it stay until a newer release. No authorization needed.
 func (s *Server) handleAgentRollback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")

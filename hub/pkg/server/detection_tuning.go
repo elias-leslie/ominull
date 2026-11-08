@@ -27,6 +27,12 @@ var retiredTuningKeys = map[string]bool{
 // has to be able to see the rule that produced it, and "why did this fire?" is
 // not an administrator's question. Writing is an administrator's action,
 // because loosening a detector is a security decision with no other trace.
+//
+// A save is a patch over what is saved (sending expected_rules replaces the whole
+// list), applies at once and is audited with a detection-policy note, its statement
+// opening with the floor drill's verdict. An invalid draft or one over 16 KiB is
+// refused with the reason. Check a change with the replay route first (cut is the
+// share of recorded findings it silences).
 func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

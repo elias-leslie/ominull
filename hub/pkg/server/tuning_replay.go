@@ -138,6 +138,11 @@ func (s *Server) replayEndpoints() ([]storage.Endpoint, map[string]bool, error) 
 // window that the saved tuning would no longer raise ({"covered": true}), each
 // resolved with the rule that now covers it. Administrator only: closing a
 // finding in bulk is a decision about the whole estate.
+//
+// verdict is benign, malicious or omitted, also on a finding already acknowledged; the
+// covered path records benign by method tuning. A plain acknowledgement (single, batch,
+// acknowledge-all, marking expected) records no verdict. What it closes is recorded as
+// FINDINGS_ACKNOWLEDGED and counted on the detection-policy note.
 func (s *Server) handleResolveAnomalies(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

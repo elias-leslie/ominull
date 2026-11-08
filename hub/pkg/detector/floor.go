@@ -18,6 +18,17 @@ import (
 // says so on the Aico push's detection-policy note. If a threshold here
 // ever moves into the tuning, the bandwidth, sweep and lateral numbers move
 // together.
+//
+// A weaker silence_after_minutes, bandwidth_cooldown_minutes, warmup_hours or rule
+// max_hosts runs at the floor value and the detection-policy note says so
+// (floor_clamped); a stricter value runs as saved. Silence cannot be switched off.
+// The threat-list match, sensitive-port egress, port sweep, lateral sweep and
+// resolver bypass run before the expected rules and ignore them (the infrastructure
+// paths in code, run as their own account, stay exempt from the sweeps), apart from
+// the admin ssh rule bounding a fan-out to inventoried hosts on port 22, never one
+// that reaches a floor port. The 10 MB burst still yields to a rule naming it:
+// Windows Update and Delivery Optimization upload tens of megabytes as svchost.exe,
+// and a backup program's rule for its storage service exists for exactly that.
 
 // floorPorts are SMB, RDP, telnet and RPC: how a worm moves. No expected rule,
 // actor or admin rule explains a flow on one.

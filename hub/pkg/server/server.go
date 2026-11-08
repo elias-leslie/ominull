@@ -1845,6 +1845,8 @@ func (s *Server) handleConsoleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePKIEnroll is kept only for authenticated legacy recovery; new enrollment uses
+// the profile API and returns device identity in the protected response.
 func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

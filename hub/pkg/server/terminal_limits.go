@@ -7,6 +7,7 @@ package server
 // (one row in the settings table). A change applies at once and is recorded in
 // the audit. Sessions
 // already open keep the limits they started with.
+// Each session's authorization names its length ("recorded, up to 4 hours").
 
 import (
 	"encoding/json"

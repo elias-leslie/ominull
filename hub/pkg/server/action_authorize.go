@@ -83,6 +83,13 @@ type actionPlan struct {
 // key gives itself (ominullctl sends it). It is self-declared: the audit
 // shows it as a claim ("an agent calling itself
 // ..."), never as an identity. Per-agent keys would be the real fix.
+//
+// 1 to 64 printable ASCII characters, no quote or backslash, no leading or trailing
+// space; an unusable one reads "admin", and is a 400 on routes that sign a grant. A
+// call without it works and reads "admin". The name appears wherever the hub records
+// who acted: the audit, anomaly_resolutions.resolved_by, tuning saves, expected rules,
+// isolations. X-Username stays the hub's own, cleared on the way in. Sessions an agent
+// opens (terminal, screen) belong to that name, so reattach with the same one.
 const agentLabelHeader = "X-Ominull-Agent"
 
 // agentLabel is the request's self-declared agent label: "" when it carries

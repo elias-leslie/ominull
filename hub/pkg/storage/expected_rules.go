@@ -30,6 +30,42 @@ import (
 // Inside a rule, an exception always wins over a match (ExceptDomains, rented
 // compute), and a rule that does not name the findings it covers never covers a
 // kind that pages on its own account (explicitKinds).
+//
+// Every clause a rule sets must match; a list inside a clause matches on any
+// entry. Past ExpiresAt a rule vouches for nothing and the next save drops it.
+//
+// Program. Programs is [{path, sha256, run_as, exact}]: the lower-cased installed
+// path, * for one path segment such as a version number; run_as is "system" (root
+// and the system accounts) or one account; exact keeps the path as written, with
+// no pattern and no " (deleted)" allowance, as a migrated exclusion had it.
+// Runtime names an agent runtime from agent_runtimes. Workload is an interpreter
+// plus the script it runs (python3.13 /srv/app/.venv/bin/python -m app.worker) or
+// an installed path. A program in a folder any account can write (/tmp, /var/tmp,
+// /dev/shm) needs sha256; one under /home does not, so a self-updating program
+// stays expected after it updates, bound by run_as. A workload needs an absolute
+// script, -m module or -jar file; inline (-c, -e), stdin and preloaded code make
+// it "<interpreter> -c", which never matches. A workload rule needs an expires_at
+// at most 90 days out, and an interpreter workload must name networks or prefixes
+// (* means any named network).
+//
+// Destination. Domains, prefixes and networks (AS numbers, exact network names,
+// or * for any named network). A name is only what a client sent, so domains must
+// be anchored by prefixes or networks, and a rule listing domains needs the name
+// the client asked for under one of them as well as the address. A rule naming a
+// vendor must list its domains; vendor prefixes are no wider than /16 or /32.
+// ExceptDomains are names under the listed domains that are anyone's (Cloud
+// Storage buckets) and never match. Tenancy is "vendor" (only a published maker
+// range), the default (any network that is not rented compute) or "any" (rented
+// compute too, which an implant can hide in). No prefix and no network matches any
+// destination.
+//
+// Narrowing. Hosts (endpoint ids or roles), port, protocol, direction, and
+// max_hosts for a lateral fan-out (at most 8; left out it means 8). A lateral rule
+// names hosts, programs and one port, never a floor port, and a window that touches
+// a floor port is never routine.
+//
+// Effect. Findings lists the kinds it makes expected; empty means every kind except
+// explicitKinds, which a rule covers only when it names them.
 
 // The finding kinds a rule can make expected. A kind is what the detector asks
 // about, which is usually the anomaly type; the bandwidth detector asks twice,

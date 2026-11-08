@@ -28,6 +28,12 @@ func topologyWindow(raw string) time.Duration {
 		return 24 * time.Hour
 	}
 }
+
+// handleTopologyWorkspace keeps machine identity, addresses and observed communication
+// apart: traffic-only addresses stay separate nodes and a matching name never merges
+// hosts. Arrows keep the recorded source and destination and do not prove which side
+// started a session. Counts are observations, which can include several reporters, not
+// sessions.
 func (s *Server) handleTopologyWorkspace(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, 405, "method not allowed")

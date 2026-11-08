@@ -51,6 +51,10 @@ func main() {
 			fmt.Print(screenHelp)
 			return
 		}
+		if len(os.Args) > 2 && os.Args[2] == "remote" {
+			fmt.Print(remoteHelp)
+			return
+		}
 		printUsage()
 		return
 	}
@@ -1491,7 +1495,7 @@ Remote Commands:
   exec [--timeout S] ENDPOINT -- COMMAND  Run COMMAND (sh on Linux, PowerShell on Windows); prints its
                                           stdout and stderr and exits with its exit code (- reads stdin)
   shell open [--ttl 90m] ENDPOINT         Opens a session, then exec/put/get on ENDPOINT reuse the session
-  shell end ENDPOINT                      End the held session
+  shell end ENDPOINT                      End the held session (ominullctl help remote explains these)
   screen open [--view] [--ttl 90m] [--viewer PATH] ENDPOINT
                                           Opens a session and shows ENDPOINT's screen in the screen viewer
                                           (--view: watch only); the session ends when the viewer closes
@@ -1517,7 +1521,7 @@ Console & Trust Commands:
   console status                          Inspect console HTTPS listener, certificate source, and RP ID
 
 Global Flags:
-  --url URL             Hub API URL (default: http://127.0.0.1:9999 or $OMINULL_HUB_URL)
+  --url URL             Hub API URL (default: http://127.0.0.1:9999, answered only on the hub itself, or $OMINULL_HUB_URL)
   --api-key-file FILE   API key file (default: /etc/ominull/admin.key or $OMINULL_API_KEY_FILE)
   --ca FILE             CA certificate for an https hub (default: $OMINULL_HUB_CA)
   --json                Emit versioned JSON output to stdout

@@ -24,6 +24,35 @@ import (
 // the router cannot see. Each runtime keeps its own memory of where it goes
 // (agent_egress_destinations) and how much it sends (agent_egress_hourly), so
 // "Codex reached a new site" is judged against Codex, not against the estate.
+//
+// Runtimes are matched by executable (Claude Code's native build runs as its version
+// number under ~/.local/share/claude/versions/). For agent_baseline_days a runtime's
+// destinations are learned. After that a destination it never reached is
+// AGENT_NEW_DESTINATION: reported (MEDIUM, in the digest) and never paged on its own
+// whoever hosts it, because agents read the web for a living. It pages (HIGH) only
+// when the runtime sends 1 MB or more there within an hour of first reaching it, once,
+// when the total crosses the line (a connection's first report carries no bytes on
+// Linux). An hour above max(agent_upload_floor_mb, agent_upload_factor x its 14-day
+// 95th-percentile hour) is AGENT_UPLOAD_VOLUME; a runtime or interpreter resolving
+// through public DNS, DoT or DoH is AGENT_DNS_BYPASS. When each baseline began is kept
+// apart from its destinations and never pruned, so a runtime idle past retention does
+// not learn silently again. Tools an agent spawns are judged as themselves: the hub
+// sees a parent's instance id, not its executable.
+//
+// Each runtime's maker is an expected rule (vendor-claude, vendor-antigravity):
+// runtime, vendor, domains, except_domains, prefixes, networks and tenancy "vendor".
+// Prefixes are the maker's published service ranges, never on a shared CDN or rented
+// compute. Networks are the maker's AS numbers where its ranges are too many to copy:
+// an address counts when attribution from the maker's own published feed (not the
+// built-in table) places it in that AS as the maker's service, so Google's counts as
+// goog.json less cloud.json. A domain that is a private public suffix (googleapis.com)
+// is accepted only with prefixes or networks. A runtime's flow to its maker's domain
+// inside those skips the per-connection bandwidth baseline (hourly upload volume still
+// judges it) and the new-place upload rule, and the domain is named as the probable
+// cause of a new destination. Adding a domain, prefix or network, or taking an
+// exception away, loosens (authorized and audited); the reverse tightens. A maker behind
+// a shared CDN (OpenAI, Cloudflare) has no rule: an address any site can be fronted
+// from proves nothing.
 
 const (
 	agentUploadDays  = 14
