@@ -7,7 +7,7 @@
 # new endpoint is made monitor-only, so the hub refuses to isolate it.
 #
 # RUN is a command prefix that runs its arguments as root on the host, e.g.
-#   ssh -o BatchMode=yes root@davion-gem pct exec 190 --     (a Proxmox container)
+#   ssh -o BatchMode=yes root@pve-host pct exec 190 --     (a Proxmox container)
 #   ssh -o BatchMode=yes agent-work sudo -n                  (a VM with sudo)
 #
 # Needs OMINULL_HUB_URL (https://HUB:9443) and OMINULL_ADMIN_KEY.
@@ -24,7 +24,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "${ROLE}" ] && [ "$#" -gt 0 ] || { sed -n '2,13p' "$0" >&2; exit 2; }
 RUN=("$@")
-HUB_URL="${OMINULL_HUB_URL:?export OMINULL_HUB_URL, e.g. https://192.168.86.58:9443}"
+HUB_URL="${OMINULL_HUB_URL:?export OMINULL_HUB_URL, e.g. https://10.0.0.58:9443}"
 : "${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY with the hub admin key}"
 # shellcheck source=scripts/hub-request.sh
 . "$(dirname "${BASH_SOURCE[0]}")/hub-request.sh"

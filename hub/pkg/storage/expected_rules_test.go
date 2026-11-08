@@ -472,9 +472,9 @@ const liveRow = `{"first_seen_cooldown_minutes":240,"warmup_hours":12,
 "known_workloads":[
  {"workload":"/opt/google/chrome/chrome","owner":"*","reason":"the owner's browser","expires_at":"2099-01-15T02:32:09Z"},
  {"workload":"/usr/bin/gh","owner":"as36459","reason":"GitHub CLI","expires_at":"2099-01-15T02:32:09Z"},
- {"workload":"node /home/kasadis/.local/bin/pnpm","owner":"as13335","reason":"pnpm","expires_at":"2099-01-15T02:32:09Z"},
+ {"workload":"node /home/owner/.local/bin/pnpm","owner":"as13335","reason":"pnpm","expires_at":"2099-01-15T02:32:09Z"},
  {"workload":"/usr/bin/old","owner":"*","reason":"expired","expires_at":"2020-01-15T02:32:09Z"}],
-"admin_fanout_sources":["linux-davion-sidarli-reenrolled"],"admin_fanout_targets":[],"admin_fanout_max_hosts":8,
+"admin_fanout_sources":["linux-workstation"],"admin_fanout_targets":[],"admin_fanout_max_hosts":8,
 "agent_runtime_vendors":[
  {"runtime":"antigravity","vendor":"Google","domains":["googleapis.com"],"exclude_domains":["content-storage-download.googleapis.com","content-storage-upload.googleapis.com","firebasestorage.googleapis.com","storage-download.googleapis.com","storage-upload.googleapis.com","storage.googleapis.com","storage.mtls.googleapis.com","www.googleapis.com"],"prefixes":[],"networks":["as15169"]},
  {"runtime":"claude","vendor":"Anthropic","domains":["anthropic.com","claude.ai","claude.com","claudeusercontent.com"],"exclude_domains":[],"prefixes":["160.79.104.0/23","2607:6bc0::/48"],"networks":[]},
@@ -492,9 +492,9 @@ func insertLiveExclusions(t *testing.T, s *Store) {
 	}
 	until := time.Now().UTC().Add(60 * 24 * time.Hour)
 	for _, ex := range [][]any{
-		{"ex-backup", "endpoint", "linux-davion-sidarli-reenrolled", "Offsite backup", "/usr/local/bin/rclone", "172.217.0.0/16", 443, "tcp", "restic copy to Google Drive", 1},
-		{"ex-agy", "global", "", "Antigravity developer assistant", "/home/kasadis/.local/bin/agy", "", 0, "", "telemetry", 1},
-		{"ex-py", "global", "", "Local development service", "/home/kasadis/.local/share/uv/python/cpython-3.13.12-linux-x86_64-gnu/bin/python3.13", "127.0.0.1/32", 7070, "tcp", "test runner", 1},
+		{"ex-backup", "endpoint", "linux-workstation", "Offsite backup", "/usr/local/bin/rclone", "172.217.0.0/16", 443, "tcp", "restic copy to Google Drive", 1},
+		{"ex-agy", "global", "", "Antigravity developer assistant", "/home/owner/.local/bin/agy", "", 0, "", "telemetry", 1},
+		{"ex-py", "global", "", "Local development service", "/home/owner/.local/share/uv/python/cpython-3.13.12-linux-x86_64-gnu/bin/python3.13", "127.0.0.1/32", 7070, "tcp", "test runner", 1},
 		{"ex-docker", "global", "", "Docker proxy local bridge", "/usr/bin/docker-proxy", "172.18.0.0/16", 7070, "tcp", "bridge", 1},
 		{"ex-off", "global", "", "Switched off", "/usr/bin/off", "", 0, "", "no longer", 0},
 	} {
@@ -551,11 +551,11 @@ func TestTheLiveRowAndExclusionsMigrateToRulesWithoutLoosening(t *testing.T) {
 		}
 	}
 
-	rclone := ExpectCtx{Kind: KindBandwidthSpike, Host: "linux-davion-sidarli-reenrolled", Path: "/usr/local/bin/rclone", User: "kasadis",
+	rclone := ExpectCtx{Kind: KindBandwidthSpike, Host: "linux-workstation", Path: "/usr/local/bin/rclone", User: "owner",
 		DstIP: "172.217.4.1", Port: 443, Protocol: 6, Direction: "OUTBOUND"}
-	agy := ExpectCtx{Kind: KindNovelDestination, Host: "any", Path: "/home/kasadis/.local/bin/agy", User: "kasadis"}
-	python := ExpectCtx{Kind: KindNovelDestination, Host: "any", User: "kasadis", DstIP: "127.0.0.1", Port: 7070, Protocol: 6, Direction: "OUTBOUND",
-		Path: "/home/kasadis/.local/share/uv/python/cpython-3.13.12-linux-x86_64-gnu/bin/python3.13"}
+	agy := ExpectCtx{Kind: KindNovelDestination, Host: "any", Path: "/home/owner/.local/bin/agy", User: "owner"}
+	python := ExpectCtx{Kind: KindNovelDestination, Host: "any", User: "owner", DstIP: "127.0.0.1", Port: 7070, Protocol: 6, Direction: "OUTBOUND",
+		Path: "/home/owner/.local/share/uv/python/cpython-3.13.12-linux-x86_64-gnu/bin/python3.13"}
 	docker := ExpectCtx{Kind: KindBeacon, Host: "any", Path: "/usr/bin/docker-proxy", User: "root", DstIP: "172.18.0.9", Port: 7070, Protocol: 6, Direction: "OUTBOUND"}
 	for name, c := range map[string]ExpectCtx{"backup": rclone, "agy": agy, "python": python, "docker proxy": docker} {
 		if !expects(got, c) {
@@ -570,8 +570,8 @@ func TestTheLiveRowAndExclusionsMigrateToRulesWithoutLoosening(t *testing.T) {
 		"python on another port":     with(python, func(c *ExpectCtx) { c.Port = 22 }),
 		"docker proxy out of range":  with(docker, func(c *ExpectCtx) { c.DstIP = "10.9.9.9" }),
 		"a lookalike agy":            with(agy, func(c *ExpectCtx) { c.Path = "/tmp/agy" }),
-		"curl uploading to a bucket": {Kind: KindCloudStorage, Path: "/usr/bin/curl", User: "kasadis", Domain: "x.storage.googleapis.com", ASN: "AS15169", Org: "Google LLC", Tenancy: TenancyVendor, Source: "google"},
-		"the switched-off exclusion": {Kind: KindNovelProcess, Path: "/usr/bin/off", User: "kasadis"},
+		"curl uploading to a bucket": {Kind: KindCloudStorage, Path: "/usr/bin/curl", User: "owner", Domain: "x.storage.googleapis.com", ASN: "AS15169", Org: "Google LLC", Tenancy: TenancyVendor, Source: "google"},
+		"the switched-off exclusion": {Kind: KindNovelProcess, Path: "/usr/bin/off", User: "owner"},
 		"a floor finding":            with(agy, func(c *ExpectCtx) { c.Kind = "LAB_ESCAPE" }),
 	} {
 		if expects(got, c) {
@@ -580,16 +580,16 @@ func TestTheLiveRowAndExclusionsMigrateToRulesWithoutLoosening(t *testing.T) {
 	}
 
 	// The pair, as its conversion: that program to Google by name.
-	pair := ExpectCtx{Kind: KindBeacon, Path: "/usr/local/bin/rclone", User: "kasadis", ASN: "AS15169", Org: "google llc", Tenancy: TenancyVendor, Source: "google"}
+	pair := ExpectCtx{Kind: KindBeacon, Path: "/usr/local/bin/rclone", User: "owner", ASN: "AS15169", Org: "google llc", Tenancy: TenancyVendor, Source: "google"}
 	if !expects(got, pair) || expects(got, with(pair, func(c *ExpectCtx) { c.Tenancy = TenancyHosting })) || expects(got, with(pair, func(c *ExpectCtx) { c.Path = "/tmp/rclone" })) {
 		t.Error("the expected pair did not carry over exactly")
 	}
 	// Known workloads keep their reach: an installed program known for any
 	// owner reached anywhere, a named owner never rented compute, an
 	// interpreter only the owner it named, and the expired one nothing.
-	chrome := ExpectCtx{Kind: KindNovelDestination, Path: "/opt/google/chrome/chrome", Workload: "/opt/google/chrome/chrome", ASN: "AS64500", Org: "Example Net", User: "kasadis"}
-	gh := ExpectCtx{Kind: KindNovelDestination, Path: "/usr/bin/gh", Workload: "/usr/bin/gh", ASN: "AS36459", Org: "GitHub, Inc.", Tenancy: TenancyVendor, User: "kasadis"}
-	pnpm := ExpectCtx{Kind: KindNovelProcess, Path: "/usr/bin/node", Workload: "node /home/kasadis/.local/bin/pnpm", ASN: "AS13335", Org: "Cloudflare, Inc.", User: "kasadis"}
+	chrome := ExpectCtx{Kind: KindNovelDestination, Path: "/opt/google/chrome/chrome", Workload: "/opt/google/chrome/chrome", ASN: "AS64500", Org: "Example Net", User: "owner"}
+	gh := ExpectCtx{Kind: KindNovelDestination, Path: "/usr/bin/gh", Workload: "/usr/bin/gh", ASN: "AS36459", Org: "GitHub, Inc.", Tenancy: TenancyVendor, User: "owner"}
+	pnpm := ExpectCtx{Kind: KindNovelProcess, Path: "/usr/bin/node", Workload: "node /home/owner/.local/bin/pnpm", ASN: "AS13335", Org: "Cloudflare, Inc.", User: "owner"}
 	if !expects(got, chrome) || !expects(got, gh) || !expects(got, pnpm) {
 		t.Error("a known workload no longer vouches")
 	}
@@ -603,13 +603,13 @@ func TestTheLiveRowAndExclusionsMigrateToRulesWithoutLoosening(t *testing.T) {
 		t.Error("an expired known workload still vouches")
 	}
 	// Admin ssh.
-	ssh := ExpectCtx{Kind: KindLateralSweep, Host: "linux-davion-sidarli-reenrolled", Path: "/usr/bin/ssh", Port: 22, Targets: 8}
+	ssh := ExpectCtx{Kind: KindLateralSweep, Host: "linux-workstation", Path: "/usr/bin/ssh", Port: 22, Targets: 8}
 	if !expects(got, ssh) || expects(got, with(ssh, func(c *ExpectCtx) { c.Targets = 9 })) || expects(got, with(ssh, func(c *ExpectCtx) { c.Host = "x" })) {
 		t.Error("the admin ssh source did not carry over exactly")
 	}
 	// Vendors: the 1.8.111 shape with exclude_domains and networks.
 	agyAPI := with(googleOwn, func(c *ExpectCtx) {
-		c.Kind, c.Path, c.User, c.Domain = KindBandwidthSpike, "/home/kasadis/.local/bin/agy.real", "kasadis", "oauth2.googleapis.com"
+		c.Kind, c.Path, c.User, c.Domain = KindBandwidthSpike, "/home/owner/.local/bin/agy.real", "owner", "oauth2.googleapis.com"
 	})
 	agyAPI.Path = "/usr/bin/agy"
 	if !expects(got, with(agyAPI, func(c *ExpectCtx) { c.Domain = "generativelanguage.googleapis.com" })) ||
