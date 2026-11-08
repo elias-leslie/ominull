@@ -23,12 +23,13 @@
 
 #include "terminal_frame.h"
 
-#define SCRIPT_PARAM_NAME_MAX 64
+#define SCRIPT_PARAM_NAME_MAX 65   /* the hub allows 64 characters */
 #define SCRIPT_PARAM_VALUE_MAX 2048
 
 typedef struct {
     char name[SCRIPT_PARAM_NAME_MAX];
     char value[SCRIPT_PARAM_VALUE_MAX];
+    bool env_skip;   /* too long for an environment variable: the script reads it from the params file */
 } ScriptParam;
 
 /* Where ScriptPayload_Parse writes; the platform structs own the storage. */
@@ -44,7 +45,7 @@ typedef struct {
     size_t* max_output_bytes; size_t max_output_min; size_t max_output_max;   /* min exclusive */
 } ScriptPayloadFields;
 
-/* ScriptParam_NameOK: 1-63 of [A-Za-z0-9_-] (hub scripts.paramNameRe). The name
+/* ScriptParam_NameOK: 1-64 of [A-Za-z0-9_-] (hub scripts.paramNameRe). The name
  * becomes part of an environment variable name. */
 static inline bool ScriptParam_NameOK(const char* n) {
     size_t i = 0;
@@ -72,6 +73,21 @@ static inline bool ScriptParam_Identifier(const char* n, bool lower_only) {
  * executor takes any identifier the environment block does not hold yet. */
 static inline bool ScriptParam_BareExport(const char* n) { return ScriptParam_Identifier(n, true); }
 
+/* ScriptParam_BareExportWindows: a lower-case identifier outside the names
+ * Windows, the .NET runtime and PowerShell read (environment names ignore case
+ * there, so cor_profiler is COR_PROFILER), and never OMINULL_*. The executor
+ * also skips a name its environment block already holds. */
+static inline bool ScriptParam_BareExportWindows(const char* n) {
+    static const char* const denied[] = {"ominull_", "cor_", "coreclr_", "dotnet_", "complus_", "ps", "powershell",
+                                         "__", "windir", "path", "comspec", "system", "temp", "tmp", "program",
+                                         "appdata", "localappdata", "userprofile", "public", "allusersprofile",
+                                         "processor_", "number_of_processors", "os", "homedrive", "homepath"};
+    if (!ScriptParam_Identifier(n, true)) return false;
+    for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); i++)
+        if (strncmp(n, denied[i], strlen(denied[i])) == 0) return false;
+    return true;
+}
+
 /* Integer member: decimal digits with an optional minus, nothing else. */
 static inline bool ScriptPayload_Int(const char* v, size_t vl, long long* out) {
     size_t i = 0;
@@ -88,8 +104,10 @@ static inline bool ScriptPayload_Int(const char* v, size_t vl, long long* out) {
 }
 
 /* ScriptPayload_Params reads the parameters object v (vl bytes): names per
- * ScriptParam_NameOK, each once, values strings (decoded) or plain literals
- * (as written), at most cap of them. */
+ * ScriptParam_NameOK, each once (ignoring case), values strings (decoded) or
+ * plain literals (as written), at most cap of them. A value too long for an
+ * environment variable (the software catalog) is kept out of the environment
+ * (env_skip) and read from the params file; it never fails the payload. */
 static inline bool ScriptPayload_Params(const char* v, size_t vl, ScriptParam* params, size_t cap, size_t* count) {
     *count = 0;
     TermJson j;
@@ -106,12 +124,21 @@ static inline bool ScriptPayload_Params(const char* v, size_t vl, ScriptParam* p
         if (!TermJson_DecodeString(k, kl, e->name, sizeof(e->name), NULL) || !ScriptParam_NameOK(e->name)) return false;
         for (size_t i = 0; i < n; i++)
             if (strcasecmp(params[i].name, e->name) == 0) return false;   /* OMINULL_PARAM_<UPPER> must stay unique */
+        e->env_skip = false;
         if (vt == 's') {
-            if (!TermJson_DecodeString(pv, pl, e->value, sizeof(e->value), NULL)) return false;
+            if (!TermJson_DecodeString(pv, pl, e->value, sizeof(e->value), NULL)) {
+                if (!TermJson_DecodeString(pv, pl, NULL, 0, NULL)) return false;   /* malformed */
+                e->value[0] = '\0';
+                e->env_skip = true;
+            }
         } else if (vt == 'n') {   /* a number or literal, as written */
-            if (pl >= sizeof(e->value)) return false;
-            memcpy(e->value, pv, pl);
-            e->value[pl] = '\0';
+            if (pl >= sizeof(e->value)) {
+                e->value[0] = '\0';
+                e->env_skip = true;
+            } else {
+                memcpy(e->value, pv, pl);
+                e->value[pl] = '\0';
+            }
         } else {
             return false;
         }
@@ -143,10 +170,9 @@ static inline bool ScriptPayload_Parse(const char* json, const ScriptPayloadFiel
         int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
         if (r == 0) break;
         if (r < 0) return false;
-        int m = -1;
-        for (int i = 0; i < S_N; i++)
-            if (TermJson_KeyIs(k, kl, names[i])) m = i;
-        if (m < 0) continue;   /* unknown members are the hub's to add */
+        int m = TermJson_Member(k, kl, names, S_N);
+        if (m == -2) return false;   /* an escaped or case-folded twin of a known member */
+        if (m < 0) continue;         /* unknown members are the hub's to add */
         if (seen[m]) return false;
         seen[m] = true;
         long long x = 0;

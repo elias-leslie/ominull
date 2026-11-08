@@ -320,3 +320,12 @@ func TestScripts_SchedulesLifecycleAndFreezing(t *testing.T) {
 		t.Fatalf("expected ErrScriptRetired when scheduling retired script, got: %v", err)
 	}
 }
+
+func TestScripts_ParameterNamesUniqueIgnoringCase(t *testing.T) {
+	if _, err := ValidateSchema(`{"parameters":[{"name":"Mode","type":"string"},{"name":"mode","type":"string"}]}`); err == nil {
+		t.Fatal("names differing only in case must be refused: the agent exports both as OMINULL_PARAM_MODE")
+	}
+	if _, err := ValidateSchema(`{"parameters":[{"name":"mode","type":"string"},{"name":"mode_2","type":"string"}]}`); err != nil {
+		t.Fatalf("distinct names: %v", err)
+	}
+}

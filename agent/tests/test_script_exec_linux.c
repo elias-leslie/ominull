@@ -750,6 +750,31 @@ static void test_strict_payload_reader(void) {
         snprintf(big + n + SCRIPT_EXEC_MAX_SOURCE_BYTES, 8, "\"}");
         !ScriptExec_ParsePayload(big, &g_sp);
     }));
+    expect("escaped twin of a known member refused (Go would read it as source)",
+           !ScriptExec_ParsePayload("{\"source\":\"a\",\"sour\\u0063e\":\"b\"}", &g_sp));
+    expect("other-case twin of a known member refused",
+           !ScriptExec_ParsePayload("{\"source\":\"a\",\"Source\":\"b\"}", &g_sp));
+    expect("unknown member still skipped", ScriptExec_ParsePayload("{\"source\":\"a\",\"future\":\"b\"}", &g_sp));
+    expect("64-character parameter name accepted (the hub allows 64)",
+           ScriptExec_ParsePayload("{\"source\":\"a\",\"parameters\":{\"p123456789012345678901234567890123456789012345678901234567890123\":\"v\"}}", &g_sp) &&
+               g_sp.param_count == 1);
+    expect("value past the environment cap: kept in the params file, out of the environment", ({
+        /* The Windows software-removal catalog runs about 3 KiB. */
+        static char big[SCRIPT_EXEC_MAX_PARAMS_BYTES];
+        int n = snprintf(big, sizeof(big), "{\"source\":\"a\",\"parameters\":{\"catalog\":\"");
+        memset(big + n, 'c', 3072);
+        snprintf(big + n + 3072, 64, "\",\"mode\":\"audit\"}}");
+        ScriptExec_ParsePayload(big, &g_sp) && g_sp.param_count == 2 && g_sp.params[0].env_skip &&
+            g_sp.params[0].value[0] == '\0' && !g_sp.params[1].env_skip && strcmp(g_sp.params[1].value, "audit") == 0 &&
+            strstr(g_sp.parameters_json, "ccccccccc") != NULL;
+    }));
+    expect("malformed long value still refused", ({
+        static char big[SCRIPT_EXEC_MAX_PARAMS_BYTES];
+        int n = snprintf(big, sizeof(big), "{\"source\":\"a\",\"parameters\":{\"catalog\":\"");
+        memset(big + n, 'c', 3072);
+        snprintf(big + n + 3072, 64, "\\ud800\"}}");
+        !ScriptExec_ParsePayload(big, &g_sp);
+    }));
     expect("bare export only for lower-case identifiers",
            ScriptParam_BareExport("mode") && ScriptParam_BareExport("log_keep") && !ScriptParam_BareExport("PATH") &&
                !ScriptParam_BareExport("LD_PRELOAD") && !ScriptParam_BareExport("Mode") && !ScriptParam_BareExport("a-b") &&

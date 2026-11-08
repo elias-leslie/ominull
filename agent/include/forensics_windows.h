@@ -2104,7 +2104,8 @@ static inline bool Forensics_RunDiagnosticCollectionWin(
 
     ForensicCollectionParamsWin params;
     if (!Forensics_ParsePayloadWin(payload_json, &params)) return false;
-    const char* bundle_id = (params.bundle_id[0] != '\0') ? params.bundle_id : job_id;
+    const char* bundle_id = Response_BundleId(params.bundle_id, job_id);
+    if (!bundle_id) return false;
     const char* tenant_id = "default";
 
     ForensicCollectedItemWin items[8];
@@ -2137,7 +2138,8 @@ static inline bool Forensics_RunLiveVolatileCollectionWin(
 
     ForensicCollectionParamsWin params;
     if (!Forensics_ParsePayloadWin(payload_json, &params)) return false;
-    const char* bundle_id = (params.bundle_id[0] != '\0') ? params.bundle_id : job_id;
+    const char* bundle_id = Response_BundleId(params.bundle_id, job_id);
+    if (!bundle_id) return false;
     const char* tenant_id = "default";
 
     ForensicCollectedItemWin items[6];
@@ -2168,7 +2170,8 @@ static inline bool Forensics_RunIRStandardCollectionWin(
 
     ForensicCollectionParamsWin params;
     if (!Forensics_ParsePayloadWin(payload_json, &params)) return false;
-    const char* bundle_id = (params.bundle_id[0] != '\0') ? params.bundle_id : job_id;
+    const char* bundle_id = Response_BundleId(params.bundle_id, job_id);
+    if (!bundle_id) return false;
     const char* tenant_id = "default";
 
     ForensicCollectedItemWin items[18];

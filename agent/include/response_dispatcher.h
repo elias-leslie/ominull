@@ -359,11 +359,11 @@ static inline bool ParseBoundedString(const char** p, char* out, size_t outCap) 
  * capability manifest); a bound on the reader's recursion, not a format rule. */
 #define RESPONSE_REPLY_MAX_DEPTH 32
 
-/* Response_JsonSpan: the extent of the JSON value at s (a NUL-terminated
- * reply), read with the strict reader, so braces and quotes inside strings
- * never move the end. */
-static inline bool Response_JsonSpan(const char* s, size_t* len) {
-    TermJson j = {.s = s, .n = strlen(s), .i = 0, .first = true, .max_depth = RESPONSE_REPLY_MAX_DEPTH};
+/* Response_JsonSpan: the extent of the JSON value at s, at most n bytes,
+ * read with the strict reader, so braces and quotes inside strings never move
+ * the end. */
+static inline bool Response_JsonSpan(const char* s, size_t n, size_t* len) {
+    TermJson j = {.s = s, .n = n, .i = 0, .first = true, .max_depth = RESPONSE_REPLY_MAX_DEPTH};
     if (!TermJson_SkipValue(&j, 0)) return false;
     *len = j.i;
     return true;
@@ -410,14 +410,16 @@ static inline bool Response_Int64(char vt, const char* v, size_t vl, int64_t* ou
     return ParseInt64Field(&q, out) && *q == '\0';
 }
 
-/* ExtractGrantObject reads the grant object at *p and moves *p past it. Top
- * level members only, each known member at most once, strings fully decoded;
- * unknown members (any JSON value) are skipped by the strict reader. */
-static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
-    SkipWhitespace(p);
+/* ExtractGrantObjectN reads the grant object at *p (at most n bytes) and
+ * moves *p past it. Top level members only, each known member at most once,
+ * strings fully decoded; unknown members (any JSON value) are skipped by the
+ * strict reader, and a key another reader could take for a known one (an
+ * escape, other case) refuses the grant. */
+static inline bool ExtractGrantObjectN(const char** p, size_t n, ResponseGrant* grant) {
     memset(grant, 0, sizeof(*grant));
+    while (n && (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r')) { (*p)++; n--; }
     size_t span = 0;
-    if (**p != '{' || !Response_JsonSpan(*p, &span)) return false;
+    if (!n || **p != '{' || !Response_JsonSpan(*p, n, &span)) return false;
     TermJson j;
     if (!TermJson_Begin(&j, *p, span)) return false;
     enum { G_VERSION, G_GRANT_ID, G_TENANT, G_ENDPOINT, G_KIND, G_DIGEST, G_OPERATOR, G_SESSION, G_ISSUED, G_EXPIRES,
@@ -433,9 +435,8 @@ static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
         int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
         if (r == 0) break;
         if (r < 0) return false;
-        int m = -1;
-        for (int i = 0; i < G_N; i++)
-            if (TermJson_KeyIs(k, kl, names[i])) m = i;
+        int m = TermJson_Member(k, kl, names, G_N);
+        if (m == -2) return false;
         if (m < 0) continue;   /* forward compatible */
         if (seen[m]) return false;
         seen[m] = true;
@@ -474,16 +475,41 @@ static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
     return true;
 }
 
+static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
+    return *p && ExtractGrantObjectN(p, strlen(*p), grant);
+}
+
+/* Response_BundleIdOK: bundle ids go into evidence URLs and the manifest. */
+static inline bool Response_BundleIdOK(const char* s) {
+    if (!s || !*s) return false;
+    for (const char* c = s; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '.' || *c == '_' || *c == '-'))
+            return false;
+    return true;
+}
+
+/* Response_BundleId: the payload's bundle id, else the job id; NULL when the
+ * one it would use is not a safe bundle id. */
+static inline const char* Response_BundleId(const char* bundle_id, const char* job_id) {
+    const char* b = (bundle_id && bundle_id[0]) ? bundle_id : job_id;
+    return Response_BundleIdOK(b) ? b : NULL;
+}
+
 /* Response_ForensicsPayload reads a forensic_collection payload
  * {"profile","max_bytes","timeout_seconds"[,"bundle_id"][,"options"]} with the
  * strict reader: top-level members once each, strings decoded, numbers plain
  * integers. bundle_id goes into evidence URLs and the manifest, so it is
- * [A-Za-z0-9._-] only. Values out of range keep the caller's defaults. */
+ * [A-Za-z0-9._-] only. An empty payload, empty string or value <= 0 keeps the
+ * caller's default; a timeout over a day is clamped to a day. */
 static inline bool Response_ForensicsPayload(const char* json, char* bundle_id, size_t bundle_cap, char* profile,
                                              size_t profile_cap, int64_t* max_bytes, int* timeout_seconds) {
     if (!json) return false;
+    const char* q = json;
+    SkipWhitespace(&q);
+    if (*q == '\0') return true;   /* no payload: the defaults */
     TermJson j;
     if (!TermJson_Begin(&j, json, strlen(json))) return false;
+    static const char* const known[] = {"bundle_id", "profile", "max_bytes", "timeout_seconds"};
     bool seen_bundle = false, seen_profile = false, seen_max = false, seen_timeout = false;
     for (;;) {
         const char *k = NULL, *v = NULL;
@@ -493,15 +519,21 @@ static inline bool Response_ForensicsPayload(const char* json, char* bundle_id, 
         if (r == 0) break;
         if (r < 0) return false;
         int64_t x = 0;
+        if (TermJson_Member(k, kl, known, 4) == -2) return false;
         if (TermJson_KeyIs(k, kl, "bundle_id")) {
-            if (seen_bundle || !Response_DecodeMember(vt, v, vl, bundle_id, bundle_cap)) return false;
+            char tmp[128];
+            if (seen_bundle || vt != 's' || !TermJson_DecodeString(v, vl, tmp, sizeof(tmp), NULL)) return false;
             seen_bundle = true;
-            for (const char* c = bundle_id; *c; c++)
-                if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '.' || *c == '_' || *c == '-'))
-                    return false;
+            if (tmp[0] == '\0') continue;   /* empty: the job id */
+            if (!Response_BundleIdOK(tmp) || strlen(tmp) >= bundle_cap) return false;
+            memcpy(bundle_id, tmp, strlen(tmp) + 1);
         } else if (TermJson_KeyIs(k, kl, "profile")) {
-            if (seen_profile || !Response_DecodeMember(vt, v, vl, profile, profile_cap)) return false;
+            char tmp[128];
+            if (seen_profile || vt != 's' || !TermJson_DecodeString(v, vl, tmp, sizeof(tmp), NULL)) return false;
             seen_profile = true;
+            if (tmp[0] == '\0') continue;   /* empty: the default profile */
+            if (strlen(tmp) >= profile_cap) return false;
+            memcpy(profile, tmp, strlen(tmp) + 1);
         } else if (TermJson_KeyIs(k, kl, "max_bytes")) {
             if (seen_max || !Response_Int64(vt, v, vl, &x)) return false;
             seen_max = true;
@@ -509,7 +541,7 @@ static inline bool Response_ForensicsPayload(const char* json, char* bundle_id, 
         } else if (TermJson_KeyIs(k, kl, "timeout_seconds")) {
             if (seen_timeout || !Response_Int64(vt, v, vl, &x)) return false;
             seen_timeout = true;
-            if (x > 0 && x <= 86400) *timeout_seconds = (int)x;
+            if (x > 0) *timeout_seconds = x > 86400 ? 86400 : (int)x;
         }
     }
     return true;
@@ -522,6 +554,7 @@ static inline bool Response_ReadOffer(const char* s, size_t len, ResponseJobOffe
     TermJson j;
     if (!TermJson_Begin(&j, s, len)) return false;
     bool has_job_id = false, has_lease_id = false, has_kind = false, has_grant = false, has_payload = false;
+    static const char* const known[] = {"job_id", "lease_id", "kind", "grant", "payload_json"};
     for (;;) {
         const char *k = NULL, *v = NULL;
         size_t kl = 0, vl = 0;
@@ -529,6 +562,7 @@ static inline bool Response_ReadOffer(const char* s, size_t len, ResponseJobOffe
         int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
         if (r == 0) break;
         if (r < 0) return false;
+        if (TermJson_Member(k, kl, known, 5) == -2) return false;
         if (TermJson_KeyIs(k, kl, "job_id")) {
             if (has_job_id || !Response_DecodeMember(vt, v, vl, offer->job_id, sizeof(offer->job_id))) return false;
             has_job_id = true;
@@ -540,7 +574,7 @@ static inline bool Response_ReadOffer(const char* s, size_t len, ResponseJobOffe
             has_kind = true;
         } else if (TermJson_KeyIs(k, kl, "grant")) {
             const char* g = v;
-            if (has_grant || vt != 'x' || !ExtractGrantObject(&g, &offer->grant) || g != v + vl) return false;
+            if (has_grant || vt != 'x' || !ExtractGrantObjectN(&g, vl, &offer->grant) || g != v + vl) return false;
             has_grant = true;
         } else if (TermJson_KeyIs(k, kl, "payload_json")) {
             if (has_payload) return false;
@@ -578,7 +612,10 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
         int r = TermJson_Next(&top, &k, &kl, &vt, &v, &vl);
         if (r == 0) break;
         if (r < 0) return 0;
-        if (!TermJson_KeyIs(k, kl, "response_offers")) continue;
+        static const char* const top_names[] = {"response_offers"};
+        int m = TermJson_Member(k, kl, top_names, 1);
+        if (m == -2) return 0;
+        if (m < 0) continue;
         if (arr || vt != 'x' || v[0] != '[') return 0;
         arr = v;
         arr_len = vl;
@@ -628,7 +665,11 @@ static inline bool ScreenCanonicalFromOffer(const char* payload_json, char* out,
         int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
         if (r == 0) break;
         if (r < 0) return false;
-        /* A repeated member is refused, so the digest and the worker read one value. */
+        /* A repeated member, or a key another reader could take for one
+         * (escaped, other case), is refused: the digest and the worker read
+         * one value. */
+        static const char* const known[] = {"session_id", "mode", "connect_token", "operator", "unattended", "ask_first"};
+        if (TermJson_Member(k, kl, known, 6) == -2) return false;
         if (TermJson_KeyIs(k, kl, "mode")) {
             if (have_mode || vt != 's' || !TermJson_CopyString(v, vl, mode, sizeof(mode))) return false;
             have_mode = true;

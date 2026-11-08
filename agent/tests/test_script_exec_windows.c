@@ -211,7 +211,7 @@ static void test_parameter_delivery(void) {
     params.timeout_seconds = 10;
     params.max_output_bytes = 65536;
 
-    const char* pjson = "{\"TARGET\":\"192.0.2.1\",\"port\":\"9090\"}";
+    const char* pjson = "{\"target\":\"192.0.2.1\",\"port\":\"9090\"}";
     snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson);
     params.parameters_len = strlen(pjson);
     ScriptPayload_Params(pjson, strlen(pjson), params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
@@ -531,6 +531,18 @@ static void test_parameter_once_per_name(void) {
     expect("param once: exit code is 0", exit_code == 0);
     expect("param once: OMINULL_PARAM_MODE arrives", strstr(output, "OMINULL_PARAM_MODE=audit") != NULL);
     expect("param once: no lowercase duplicate", strstr(output, "OMINULL_PARAM_mode=") == NULL && lines == 1);
+
+    /* ominull_param_mode would fold onto OMINULL_PARAM_MODE: never exported bare. */
+    const char* pjson2 = "{\"mode\":\"audit\",\"ominull_param_mode\":\"evil\"}";
+    snprintf(params.parameters_json, sizeof(params.parameters_json), "%s", pjson2);
+    params.parameters_len = strlen(pjson2);
+    ScriptPayload_Params(pjson2, strlen(pjson2), params.params, SCRIPT_EXEC_MAX_PARAM_COUNT, &params.param_count);
+    memset(output, 0, sizeof(output));
+    exit_code = ScriptExec_RunContainedWin(&params, "job-win-param-once2", output, sizeof(output), &truncated, &timed_out,
+                                           &duration_ms, error_code, sizeof(error_code));
+    expect("param once: a bare ominull_ name cannot shadow OMINULL_PARAM_MODE",
+           exit_code == 0 && strstr(output, "OMINULL_PARAM_MODE=audit") != NULL && strncmp(output, "OMINULL_PARAM_MODE=evil", 23) != 0 &&
+               strstr(output, "\nOMINULL_PARAM_MODE=evil") == NULL && strstr(output, "\nominull_param_mode=") == NULL);
 }
 
 static bool probe_idle(DWORD* sessionId, DWORD* idleSeconds) { *sessionId = 3; *idleSeconds = 1234; return true; }
@@ -595,6 +607,14 @@ static void test_bare_names(void) {
                g_spw.param_count == 2 && strcmp(g_spw.params[0].value, "C:\\temp\\") == 0);
     expect("bad parameter name refused",
            !ScriptExec_ParsePayloadWin("{\"interpreter\":\"cmd.exe\",\"source\":\"x\",\"parameters\":{\"a=b\":\"c\"}}", &g_spw));
+    expect("bare export: lower-case names outside what Windows, .NET and PowerShell read",
+           ScriptParam_BareExportWindows("mode") && ScriptParam_BareExportWindows("target") &&
+               ScriptParam_BareExportWindows("catalog") && !ScriptParam_BareExportWindows("TARGET") &&
+               !ScriptParam_BareExportWindows("cor_enable_profiling") && !ScriptParam_BareExportWindows("cor_profiler") &&
+               !ScriptParam_BareExportWindows("dotnet_startup_hooks") && !ScriptParam_BareExportWindows("psmodulepath") &&
+               !ScriptParam_BareExportWindows("windir") && !ScriptParam_BareExportWindows("__compat_layer") &&
+               !ScriptParam_BareExportWindows("ominull_param_x") && !ScriptParam_BareExportWindows("comspec") &&
+               !ScriptParam_BareExportWindows("pathext") && !ScriptParam_BareExportWindows("systemroot"));
 }
 
 int main(void) {

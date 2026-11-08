@@ -77,10 +77,12 @@ func ValidateSchema(rawJSON string) (*ParameterSchema, error) {
 		if !paramNameRe.MatchString(p.Name) {
 			return nil, fmt.Errorf("%w: parameter[%d] invalid name %q (must match ^[a-zA-Z0-9_-]{1,64}$)", ErrInvalidSchema, i, p.Name)
 		}
-		if seenNames[p.Name] {
+		// Unique ignoring case: the agent exports OMINULL_PARAM_<UPPER> and
+		// refuses a payload with two names that fold to the same variable.
+		if seenNames[strings.ToLower(p.Name)] {
 			return nil, fmt.Errorf("%w: duplicate parameter name %q", ErrInvalidSchema, p.Name)
 		}
-		seenNames[p.Name] = true
+		seenNames[strings.ToLower(p.Name)] = true
 
 		switch p.Type {
 		case "string":

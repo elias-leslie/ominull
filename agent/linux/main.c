@@ -3006,7 +3006,11 @@ static void ProcessResponseOffers(const LINUX_AGENT_CONFIG* config, const char* 
         if (strcmp(offer->kind, "forensic_collection") == 0) {
             ForensicCollectionParams params;
             bool params_ok = Forensics_ParsePayload(offer->payload_json, &params);   /* malformed: the worker reports failure */
-            const char* bundle_id = params.bundle_id[0] ? params.bundle_id : offer->job_id;
+            const char* bundle_id = Response_BundleId(params.bundle_id, offer->job_id);
+            if (!bundle_id) {
+                params_ok = false;
+                bundle_id = "invalid";
+            }
 
             int pipefd[2];
             if (pipe(pipefd) != 0) {

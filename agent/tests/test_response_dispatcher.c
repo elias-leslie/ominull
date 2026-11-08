@@ -224,6 +224,31 @@ static void test_offer_parser_strict(void) {
     ResponseGrant gr;
     expect("grant with unknown nested member reads", ExtractGrantObject(&q, &gr), true);
     expect("cursor ends after the grant object", strcmp(q, " tail") == 0, true);
+
+    /* Keys Go's encoding/json would read as a known member (escaped, other case) refuse the value. */
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"Kind\":\"x\",\"grant\":" T_GRANT "}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("other-case offer member refused", n == 0, true);
+    n = ParseResponseOffers("{\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":"
+                            "{\"version\":2,\"grant_id\":\"g\",\"endpoint_id\":\"ep\",\"action_kind\":\"a\",\"action_digest\":\"d\","
+                            "\"signature\":\"s1\",\"action_dig\\u0065st\":\"e\"}}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("escaped grant member refused", n == 0, true);
+    n = ParseResponseOffers("{\"Response_Offers\":[],\"response_offers\":[{\"job_id\":\"j\",\"lease_id\":\"l\",\"kind\":\"k\",\"grant\":" T_GRANT "}]}",
+                            offers, MAX_RESPONSE_OFFERS);
+    expect("other-case response_offers refuses the reply", n == 0, true);
+    char canon[128];
+    expect("screen canonical refuses an other-case mode",
+           ScreenCanonicalFromOffer("{\"mode\":\"view\",\"MODE\":\"control\"}", canon, sizeof(canon)), false);
+    expect("terminal canonical refuses an escaped program",
+           TerminalCanonicalFromOffer("{\"session_id\":\"s\",\"program\":\"/bin/sh\",\"pro\\u0067ram\":\"/bin/bash\",\"connect_token\":\"t\"}",
+                                      canon, sizeof(canon)), false);
+    /* A grant bounded by its offer: the reader never runs past the length it is given. */
+    const char* gb = "{\"version\":2,\"grant_id\":\"g\",\"endpoint_id\":\"ep\",\"action_kind\":\"a\",\"action_digest\":\"d\",\"signature\":\"s\"}";
+    q = gb;
+    expect("bounded grant read", ExtractGrantObjectN(&q, strlen(gb), &gr) && *q == '\0', true);
+    q = gb;
+    expect("grant cut short by its bound refused", ExtractGrantObjectN(&q, strlen(gb) - 1, &gr), false);
 }
 
 /* 2d. Forensic collection payloads: strict, one meaning, a safe bundle id. */
@@ -243,6 +268,14 @@ static void test_forensics_payload(void) {
     expect("max_bytes as text refused", FP("{\"max_bytes\":\"9\"}"), false);
     expect("negative max_bytes keeps the default", FP("{\"max_bytes\":-5}") && mb == 7, true);
     expect("trailing bytes refused", FP("{\"profile\":\"diagnostic\"} x"), false);
+    expect("empty payload means the defaults", FP("") && strcmp(profile, "diagnostic") == 0 && mb == 7 && to == 60, true);
+    expect("empty profile and bundle id mean the defaults",
+           FP("{\"profile\":\"\",\"bundle_id\":\"\"}") && strcmp(profile, "diagnostic") == 0 && bundle[0] == 0, true);
+    expect("timeout over a day clamped to a day", FP("{\"timeout_seconds\":999999}") && to == 86400, true);
+    expect("other-case member refused", FP("{\"profile\":\"a\",\"Profile\":\"b\"}"), false);
+    expect("job id fallback must be a safe bundle id", Response_BundleId("", "job-1") != NULL &&
+                                                          Response_BundleId("", "../x") == NULL &&
+                                                          strcmp(Response_BundleId("b1", "../x"), "b1") == 0, true);
 #undef FP
 }
 

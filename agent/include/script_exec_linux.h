@@ -436,10 +436,11 @@ static inline int ScriptExec_RunSupervised(
 
         // Export individual parameters as OMINULL_PARAM_<NAME>, OMINULL_PARAM_<UPPER_NAME>, and <NAME> (bare only for a lower-case identifier: ScriptParam_BareExport)
         for (size_t i = 0; i < params->param_count; i++) {
+            if (params->params[i].env_skip) continue;   /* too long for the environment: in the params file only */
             char env_name[128];
             snprintf(env_name, sizeof(env_name), "OMINULL_PARAM_%s", params->params[i].name);
             setenv(env_name, params->params[i].value, 1);
-            char upper_name[64];
+            char upper_name[SCRIPT_PARAM_NAME_MAX];
             size_t k = 0;
             for (; k < sizeof(upper_name) - 1 && params->params[i].name[k]; k++) {
                 upper_name[k] = (char)toupper((unsigned char)params->params[i].name[k]);

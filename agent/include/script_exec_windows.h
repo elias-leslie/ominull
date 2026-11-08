@@ -618,13 +618,14 @@ static inline int ScriptExec_RunSupervisedWin(
     for (size_t i = 0; i < params->param_count; i++) {
         const char* pname = params->params[i].name;
         const char* pval = params->params[i].value;
+        if (params->params[i].env_skip) continue;   /* too long for the environment: in the params file only */
 
         // OMINULL_PARAM_<UPPER_NAME> only: Windows environment names ignore
         // case, so OMINULL_PARAM_<name> as well would be a duplicate that
         // PowerShell's Start-Process (and .NET's environment dictionary)
         // refuses with "Item has already been added". $env:OMINULL_PARAM_mode
         // still reads it.
-        char upper_name[64];
+        char upper_name[SCRIPT_PARAM_NAME_MAX];
         strncpy(upper_name, pname, sizeof(upper_name) - 1);
         upper_name[sizeof(upper_name) - 1] = '\0';
         for (int k = 0; upper_name[k]; k++) {
@@ -634,9 +635,10 @@ static inline int ScriptExec_RunSupervisedWin(
         snprintf(var2, sizeof(var2), "OMINULL_PARAM_%s=%s", upper_name, pval);
         APPEND_ENV(var2);
 
-        // Bare <name>: an identifier that no variable above already holds
-        // (names ignore case here, so "path" would shadow PATH).
-        if (ScriptParam_Identifier(pname, false) && !ScriptExec_EnvBlockHas(env_block, env_pos, pname)) {
+        // Bare <name>: a lower-case identifier outside the names Windows, .NET
+        // and PowerShell read, that no variable above already holds (names
+        // ignore case here, so "path" would shadow PATH).
+        if (ScriptParam_BareExportWindows(pname) && !ScriptExec_EnvBlockHas(env_block, env_pos, pname)) {
             char var3[256 + 2048];
             snprintf(var3, sizeof(var3), "%s=%s", pname, pval);
             APPEND_ENV(var3);

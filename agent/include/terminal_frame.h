@@ -158,6 +158,30 @@ static inline bool TermJson_KeyIs(const char* key, size_t key_len, const char* w
     return key_len == w && memcmp(key, want, w) == 0;
 }
 
+/* TermJson_Member classifies a raw member key against the names a reader
+ * knows: the index on an exact match, -1 for an unknown member, -2 for a key
+ * another JSON reader could take for a known member (one holding an escape,
+ * or one equal to a known name ignoring ASCII case: Go's encoding/json does
+ * both). Readers refuse -2, so the hub and the agent read the same member. */
+static inline int TermJson_Member(const char* key, size_t key_len, const char* const* names, int n) {
+    for (size_t i = 0; i < key_len; i++)
+        if (key[i] == '\\') return -2;
+    for (int m = 0; m < n; m++) {
+        size_t nl = strlen(names[m]);
+        if (nl != key_len) continue;
+        if (memcmp(key, names[m], nl) == 0) return m;
+        size_t i = 0;
+        for (; i < nl; i++) {
+            char a = key[i], b = names[m][i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b) break;
+        }
+        if (i == nl) return -2;
+    }
+    return -1;
+}
+
 /* Copies a raw JSON string span into out, resolving simple escapes. Fails rather
  * than truncates. \u escapes are accepted only for ASCII. */
 static inline bool TermJson_CopyString(const char* raw, size_t raw_len, char* out, size_t out_max) {
@@ -216,15 +240,20 @@ static inline int TermJson_Hex4(const char* p) {
     return v;
 }
 
+/* With out NULL it only checks the string (out_max is ignored) and reports
+ * the decoded length: a caller can tell a malformed value from one too long
+ * for its buffer. */
 static inline bool TermJson_DecodeString(const char* raw, size_t raw_len, char* out, size_t out_max, size_t* out_len) {
-    if (!out || out_max == 0) return false;
+    if (out && out_max == 0) return false;
+    const size_t cap = out ? out_max : (size_t)-1;
     size_t o = 0;
     for (size_t i = 0; i < raw_len; i++) {
         unsigned char c = (unsigned char)raw[i];
         if (c < 0x20) return false;
         if (c != '\\') {
-            if (o + 1 >= out_max) return false;
-            out[o++] = (char)c;
+            if (o + 1 >= cap) return false;
+            if (out) out[o] = (char)c;
+            o++;
             continue;
         }
         if (++i >= raw_len) return false;
@@ -242,8 +271,9 @@ static inline bool TermJson_DecodeString(const char* raw, size_t raw_len, char* 
         default: return false;
         }
         if (e != 'u') {
-            if (o + 1 >= out_max) return false;
-            out[o++] = d;
+            if (o + 1 >= cap) return false;
+            if (out) out[o] = d;
+            o++;
             continue;
         }
         if (i + 4 >= raw_len) return false;
@@ -271,11 +301,11 @@ static inline bool TermJson_DecodeString(const char* raw, size_t raw_len, char* 
             u[0] = (unsigned char)(0xF0 | (cp >> 18)); u[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
             u[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F)); u[3] = (unsigned char)(0x80 | (cp & 0x3F)); n = 4;
         }
-        if (o + n >= out_max) return false;
-        memcpy(out + o, u, n);
+        if (o + n >= cap) return false;
+        if (out) memcpy(out + o, u, n);
         o += n;
     }
-    out[o] = '\0';
+    if (out) out[o] = '\0';
     if (out_len) *out_len = o;
     return true;
 }
@@ -352,6 +382,8 @@ static inline bool TermPayload_Parse(const char* json, char* session_id, size_t 
         char* dst = NULL;
         size_t max = 0;
         bool* seen = NULL;
+        static const char* const known[] = {"session_id", "program", "connect_token"};
+        if (TermJson_Member(k, kl, known, 3) == -2) return false;   /* escaped or other-case twin */
         if (TermJson_KeyIs(k, kl, "session_id")) {
             dst = session_id;
             max = sid_max;

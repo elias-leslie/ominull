@@ -325,6 +325,8 @@ static inline bool Screen_ParsePayloadWindows(const char* json, ScreenSessionPar
         int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
         if (r == 0) break;
         if (r < 0) return false;
+        static const char* const known[] = {"session_id", "mode", "connect_token", "operator", "unattended", "ask_first"};
+        if (TermJson_Member(k, kl, known, 6) == -2) return false;
         if (TermJson_KeyIs(k, kl, "session_id")) {
             if (seen_sid) return false;
             seen_sid = true;
