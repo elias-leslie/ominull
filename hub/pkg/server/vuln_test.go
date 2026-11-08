@@ -494,7 +494,9 @@ func TestAMachineReportsOnlyItsOwnSoftware(t *testing.T) {
 		t.Fatal(err)
 	}
 	post := func(endpoint string) int {
-		body := fmt.Sprintf(`{"endpoint_id":%q,"packages":[{"source":"dpkg","vendor":"x","product":"openssh-server","version":"1"}]}`, endpoint)
+		// Field for field what agent/include/software_inventory_linux.h writes.
+		body := fmt.Sprintf(`{"endpoint_id":%q,"source":"dpkg","packages":[{"source":"dpkg","vendor":"ubuntu","product":"openssh-server","version":"1",`+
+			`"architecture":"amd64","install_scope":"system","confidence":"authoritative","raw_vendor":"v","raw_product":"p","raw_version":"1","observed_at":"1794147645"}]}`, endpoint)
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/software", strings.NewReader(body))
 		r.Header.Set(deviceCredentialHeader, cred)
 		w := httptest.NewRecorder()

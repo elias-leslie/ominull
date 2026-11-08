@@ -1,6 +1,9 @@
 package vuln
 
 import (
+	"encoding/json"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -38,6 +41,33 @@ type InstalledSoftware struct {
 	RawProduct   string             `json:"raw_product,omitempty"`   // Raw package name or display name
 	RawVersion   string             `json:"raw_version,omitempty"`   // Raw version string before normalization
 	ObservedAt   time.Time          `json:"observed_at"`
+}
+
+// UnmarshalJSON takes observed_at as agents send it, Unix seconds in a string, or
+// as RFC 3339. A time that can't be read is left zero for the store to stamp, so
+// one odd package doesn't lose the machine's whole report.
+func (p *InstalledSoftware) UnmarshalJSON(raw []byte) error {
+	type plain InstalledSoftware
+	aux := struct {
+		*plain
+		ObservedAt json.RawMessage `json:"observed_at"`
+	}{plain: (*plain)(p)}
+	if err := json.Unmarshal(raw, &aux); err != nil {
+		return err
+	}
+	p.ObservedAt = parseObservedAt(aux.ObservedAt)
+	return nil
+}
+
+func parseObservedAt(raw json.RawMessage) time.Time {
+	text := strings.Trim(string(raw), `"`)
+	if secs, err := strconv.ParseInt(text, 10, 64); err == nil && secs > 0 {
+		return time.Unix(secs, 0).UTC()
+	}
+	if at, err := time.Parse(time.RFC3339Nano, text); err == nil {
+		return at
+	}
+	return time.Time{}
 }
 
 // SoftwareFilter provides tenant-scoped querying criteria for installed software.
