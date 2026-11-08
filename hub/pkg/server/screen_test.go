@@ -354,16 +354,37 @@ func TestServer_ScreenLaunchWatchAudit(t *testing.T) {
 	watcher := dial(agentID, wt["token"].(string))
 	defer watcher.Close()
 	tile := []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 2, 0, 0, 0, 0xff, 0xd9}
-	deadline := time.Now().Add(3 * time.Second)
-	for got := false; !got; {
-		if time.Now().After(deadline) {
-			t.Fatal("watcher never saw a tile")
+	// The dial returns before the hub attaches the watcher, so keep sending. A
+	// read that times out leaves the connection failed for good (gorilla panics
+	// after repeated reads), so it gets one deadline, not one per try.
+	stopTiles := make(chan struct{})
+	tilesDone := make(chan struct{})
+	go func() {
+		defer close(tilesDone)
+		for {
+			_ = ag.WriteMessage(websocket.BinaryMessage, tile)
+			select {
+			case <-stopTiles:
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
-		_ = ag.WriteMessage(websocket.BinaryMessage, tile)
-		_ = watcher.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-		if typ, b, err := watcher.ReadMessage(); err == nil && typ == websocket.BinaryMessage && bytes.Equal(b, tile) {
-			got = true
+	}()
+	_ = watcher.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		typ, b, err := watcher.ReadMessage()
+		if err != nil {
+			t.Errorf("watcher never saw a tile: %v", err)
+			break
 		}
+		if typ == websocket.BinaryMessage && bytes.Equal(b, tile) {
+			break
+		}
+	}
+	close(stopTiles)
+	<-tilesDone
+	if t.Failed() {
+		t.FailNow()
 	}
 
 	// A console-opened session: the console gets launch codes, never a token.

@@ -279,10 +279,12 @@ func TestScreenWatchers(t *testing.T) {
 	var watchers []*websocket.Conn
 	for i := 0; i < MaxWatchers; i++ {
 		watchers = append(watchers, h.dial("/watch", q))
+		// A dial returns before the hub has counted the socket. Wait for each
+		// one, or a later dial can count first and pace in place of the oldest;
+		// the cap also only refuses once all of them are counted.
+		want := i + 1
+		waitFor(t, func() bool { return h.mgr.WatcherCount(sess.SessionID) == want })
 	}
-	// A dial returns before the hub has counted the socket; the cap can only
-	// refuse once all of them are counted.
-	waitFor(t, func() bool { return h.mgr.WatcherCount(sess.SessionID) == MaxWatchers })
 	u, _ := url.Parse(h.srv.URL)
 	u.Scheme, u.Path, u.RawQuery = "ws", "/watch", q.Encode()
 	if c, _, err := websocket.DefaultDialer.Dial(u.String(), nil); err == nil {
