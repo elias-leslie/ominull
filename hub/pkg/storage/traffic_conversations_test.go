@@ -300,3 +300,24 @@ func TestTrafficConversationsNewNeedsHistory(t *testing.T) {
 		t.Fatalf("known-since and latest flow are reported: %+v", res)
 	}
 }
+
+// A long traffic read must not hold the store lock: ingest would wait for it
+// and every other request would queue behind ingest.
+func TestTrafficOverviewDoesNotWaitForTheStoreLock(t *testing.T) {
+	store := conversationStore(t)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.QueryTrafficOverview(TrafficFilter{TenantID: "default", Range: "1h"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("QueryTrafficOverview: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("QueryTrafficOverview waited for the store lock")
+	}
+}

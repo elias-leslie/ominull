@@ -362,9 +362,9 @@ func (s *Store) QueryTrafficOverview(filter TrafficFilter) (*TrafficOverview, er
 	start, end, bucketSize, bucketDur := ResolveTrafficWindow(filter)
 	whereClause, args, activeFilters := buildTrafficWhere(filter, start, end)
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	// No store lock: WAL reads don't block writers, and every read here is SQL
+	// only. A long read under s.mu holds up each batch waiting to write, and
+	// every other request queues behind that writer.
 	overview := &TrafficOverview{
 		AsOf:          now,
 		WindowStart:   start,

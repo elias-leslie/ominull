@@ -14,7 +14,6 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - Platform-native code signing on top of the portable release signature
 - Port posture data from SHA: 17 controls as data, IR-readiness pack, Nightshift pack scoring, archive SHA
 ## Later
-- Console: leftovers from the Traffic rebuild: its filters are not in the address (a reload drops them, a view cannot be shared); the Response unlock dialog is written in key-handling terms; the conversation fold holds the store read lock for about 2 s on a 7-day view while the page is open and the 15 s cache lapses, so measure ingest delay and narrow the lock if it shows
 - Evaluate BloodHound CE and OpenGraph, then build the AI weak-point finder
 - Household: back up the router and repair the approved parental, DNS and Ominull config; then IoT segmentation and DNS filtering (vault proposal direction-2026-10)
 - Phase 2: AI-agent egress policy with agent-session attribution, and data inventory contract v4 (vault proposal direction-2026-10)

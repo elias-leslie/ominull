@@ -179,18 +179,64 @@
      The URL is a hash. A path would need the hub to serve index.html for
      arbitrary routes, and it serves exactly the files it embeds. */
 
-  var URL_KEYS = ["q", "f", "row", "route"];
+  /* Traffic's filters are in the address too, under their own names, so a
+     reload keeps them and a view can be shared. tq is its search; q belongs to
+     Assets. Traffic's scope filters reach the hub under these same names. */
+  var TRAFFIC_SCOPE = ["endpoint_id", "src_ip", "dst_ip", "process", "domain", "country", "protocol", "port", "direction", "action", "hash", "user", "attribution"];
+  var TRAFFIC_CHOICES = {
+    range: ["15m", "1h", "6h", "24h", "7d", "all"],
+    mark: ["flagged", "new", "blocked"],
+    dir: ["in", "out"],
+    sort: ["volume", "recent", "flows"]
+  };
+  var TRAFFIC_URL_KEYS = ["range", "tq", "mark", "dir", "sort", "measured_only"].concat(TRAFFIC_SCOPE);
+  var URL_KEYS = ["q", "f", "row", "route"].concat(TRAFFIC_URL_KEYS);
   var suppressHistory = false;
+
+  function trafficURLState(u) {
+    var tf = state.trafficFilter || {};
+    TRAFFIC_SCOPE.forEach(function (k) { if (tf[k]) u[k] = String(tf[k]); });
+    if (tf.range && tf.range !== "1h") u.range = tf.range;
+    if (tf.q) u.tq = tf.q;
+    if (tf.mark) u.mark = tf.mark;
+    if (tf.dir) u.dir = tf.dir;
+    if (tf.sort) u.sort = tf.sort;
+    if (tf.measured_only) u.measured_only = "1";
+  }
+
+  /* An address can come from anywhere: a value the page has no choice for is
+     dropped, not sent to the hub. A different view shows as loading rather than
+     as the last view's rows under the new filter. */
+  function applyTrafficURL(u) {
+    var tf = { range: "1h" };
+    Object.keys(TRAFFIC_CHOICES).forEach(function (k) {
+      if (TRAFFIC_CHOICES[k].indexOf(u[k]) >= 0) tf[k] = u[k];
+    });
+    TRAFFIC_SCOPE.forEach(function (k) { if (u[k]) tf[k] = u[k]; });
+    if (u.tq) tf.q = u.tq;
+    if (u.measured_only) tf.measured_only = true;
+    var was = Object.assign({}, state.trafficFilter || { range: "1h" });
+    delete was.limit;
+    var sameKeys = function (a, b) {
+      return Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(function (k) { return String(a[k]) === String(b[k]); });
+    };
+    if (sameKeys(was, tf)) return;
+    state.trafficFilter = tf;
+    state.trafficConversations = null;
+    state.trafficOverview = null;
+  }
 
   function currentURLState() {
     var f = Object.keys(state.filters || {}).filter(function (k) { return state.filters[k]; });
-    return {
+    var u = {
       section: state.section,
       q: state.query || "",
       f: f.sort().join(","),
       row: state.expandedKey || "",
       route: state.routeKey || ""
     };
+    if (state.section === "traffic") trafficURLState(u);
+    return u;
   }
 
   function encodeURLState(u) {
@@ -253,6 +299,7 @@
     if (!u) return;
     var section = u.section === "discovery" ? "assets" : u.section;
     if (SECTIONS.some(function (sec) { return sec.id === section; })) state.section = section;
+    if (state.section === "traffic") applyTrafficURL(u);
     state.query = u.q || "";
     state.filters = {};
     (u.f || "").split(",").forEach(function (k) {
@@ -4902,6 +4949,9 @@
       if (patch.clear || patch.range || TRAFFIC_SCOPE.some(function (k) { return patch[k] !== undefined; })) state.trafficOverview = null;
     }
     state.trafficError = "";
+    /* Back undoes a filter; typing in the search and "Show more" add no step. */
+    var noStep = patch.q !== undefined || (Object.keys(patch).length === 1 && patch.limit !== undefined);
+    syncURL(!noStep);
     renderBody();
     refresh();
   }
@@ -6525,7 +6575,7 @@
 
   function signActionProof(actionKind, actionDigestHex, targetEndpoints) {
     if (!state.responseSession || !ephemeralResponseKey) {
-      return Promise.reject(new Error("Response session is locked. Multi-factor unlock required."));
+      return Promise.reject(new Error("Response is locked. Unlock it with your authenticator code first."));
     }
     var nonceBytes = new Uint8Array(16);
     window.crypto.getRandomValues(nonceBytes);
@@ -6560,7 +6610,7 @@
 
     if (!state.responseSession) {
       btn.setAttribute("data-status", "locked");
-      btn.title = "Response Authority Locked. Click to unlock with MFA/Passkey.";
+      btn.title = "Collecting evidence and running scripts is locked. Click to unlock with your authenticator code.";
       txt.textContent = "Response Locked";
       var icon = btn.querySelector("use");
       if (icon) icon.setAttribute("href", "#i-lock");
@@ -6575,17 +6625,17 @@
       state.responseSession = null;
       ephemeralResponseKey = null;
       btn.setAttribute("data-status", "locked");
-      btn.title = "Response session expired. Click to unlock.";
+      btn.title = "Response locked itself: the unlock ran out. Click to unlock again.";
       txt.textContent = "Response Locked";
       var icon = btn.querySelector("use");
       if (icon) icon.setAttribute("href", "#i-lock");
-      toast("Response session expired.", "warn");
+      toast("Response locked itself: the unlock ran out.", "warn");
       if (state.section === "response") renderBody();
       return;
     }
 
     btn.setAttribute("data-status", "unlocked");
-    btn.title = "Response Authority Unlocked. Click to view session details or lock.";
+    btn.title = "Collecting evidence and running scripts is unlocked. Click for details or to lock.";
     var icon = btn.querySelector("use");
     if (icon) icon.setAttribute("href", "#i-unlock");
 
@@ -6658,10 +6708,10 @@
      finished for this purpose too. */
   function confirmLockResponseSession() {
     confirmSheet({
-      title: "Lock response authority",
-      consequence: "The browser signing key is destroyed and active response authority is dropped. Any response action you start after this needs a fresh unlock with your authenticator before it will run.",
-      detail: "Response jobs already dispatched to an agent keep running.",
-      confirmLabel: "Lock authority",
+      title: "Lock response",
+      consequence: "Collecting evidence and running scripts stops working in this browser until you unlock again with your authenticator code.",
+      detail: "Jobs already sent to a host keep running.",
+      confirmLabel: "Lock",
       stack: true,
       onConfirm: lockResponseSession
     });
@@ -6675,7 +6725,7 @@
     state.responseSession = null;
     ephemeralResponseKey = null;
     updateResponseButton();
-    toast("Response authority locked.", "info");
+    toast("Response locked.", "info");
     if (state.section === "response") renderBody();
   }
 
@@ -6686,24 +6736,23 @@
 
     var body = h("div", { cls: "card-body stack" },
       h("div", { cls: "form-row" },
-        chip("ok", "Session Active"),
-        h("span", { cls: "dim-2", text: "Session ID: " + (sess.session_id ? sess.session_id.slice(0, 16) + "\u2026" : "") })
+        chip("ok", "Unlocked"),
+        h("span", { cls: "dim-2", text: "Session " + (sess.session_id ? sess.session_id.slice(0, 16) + "\u2026" : "") })
       ),
       h("dl", { cls: "kv" },
         h("dt", { text: "Operator" }), h("dd", {}, h("b", { text: sess.operator_id || OPERATOR || "admin" })),
         h("dt", { text: "Tenant" }), h("dd", { text: sess.tenant_id || "default" }),
-        h("dt", { text: "Auth Method" }), h("dd", { text: sess.auth_method || "totp" }),
-        h("dt", { text: "Browser Key" }), h("dd", { cls: "ip", text: keyFp }),
-        h("dt", { text: "Absolute Expiry" }), h("dd", { text: sess.expires_at ? new Date(sess.expires_at).toLocaleTimeString() : "8h" }),
-        h("dt", { text: "Idle Expiry" }), h("dd", { text: sess.idle_expires_at ? new Date(sess.idle_expires_at).toLocaleTimeString() : "30m" })
-      ),
-      h("p", { cls: "pending", text: "Locking the session immediately revokes the browser signing key and drops active response authority." })
+        h("dt", { text: "Unlocked with" }), h("dd", { text: !sess.auth_method || sess.auth_method === "totp" ? "Authenticator code" : sess.auth_method }),
+        h("dt", { text: "Browser key" }), h("dd", { cls: "ip", text: keyFp }),
+        h("dt", { text: "Locks at" }), h("dd", { text: sess.expires_at ? new Date(sess.expires_at).toLocaleTimeString() : "8h" }),
+        h("dt", { text: "Locks if idle at" }), h("dd", { text: sess.idle_expires_at ? new Date(sess.idle_expires_at).toLocaleTimeString() : "30m" })
+      )
     );
 
     var lockBtn = h("button", {
       cls: "btn btn-crit",
       type: "button",
-      text: "Lock Response Authority",
+      text: "Lock",
       /* confirmLockResponseSession, not lockResponseSession - see there. */
       on: {
         click: function () {
@@ -6718,16 +6767,24 @@
       lockBtn
     ];
 
-    openSheet("Response Authority Controller", body, foot);
+    openSheet("Response unlocked", body, foot);
+  }
+
+  /* The authority's own errors, as the person at the dialog needs them. */
+  function unlockErrorText(err) {
+    var text = (err && err.message) || "";
+    if (/invalid or expired TOTP/i.test(text)) return "That code is wrong or has run out. Try the next one from your app.";
+    if (/no authenticators enrolled/i.test(text)) return "No authenticator is set up for you yet. Add one below.";
+    return text || "Couldn't unlock. Try again.";
   }
 
   function openUnlockResponseSheet(onSuccess) {
     if (!hasWebCrypto()) {
-      openSheet("Secure Context Required",
+      openSheet("Can't unlock on this connection",
         h("div", { cls: "card-body stack" },
-          h("div", { cls: "st-banner", "data-state": "crit", text: "WebCrypto & Secure Context Unavailable" }),
-          h("p", { cls: "pending", text: "Response authority operations require an ephemeral in-memory Ed25519 browser key signed via the WebCrypto API. Browsers disable WebCrypto on unencrypted or non-secure origins." }),
-          h("p", { text: "To unlock response sessions, connect over HTTPS with a trusted certificate (such as the hub's dedicated console TLS listener)." })
+          h("div", { cls: "st-banner", "data-state": "crit", text: "This connection isn't secure enough to unlock" }),
+          h("p", { text: "Browsers only allow the key this unlock needs on a secure connection." }),
+          h("p", { text: "Open the console over HTTPS with a trusted certificate (the hub's console TLS address), then unlock there." })
         ),
         [h("button", { cls: "btn", type: "button", text: "Dismiss", on: { click: closeSheet } })]
       );
@@ -6735,11 +6792,6 @@
     }
 
     var op = state.you || OPERATOR || "admin";
-    var tenant = "default";
-    if (state.hierarchy && state.hierarchy.length && state.hierarchy[0].tenant) {
-      tenant = state.hierarchy[0].tenant.id || "default";
-    }
-
     var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
     var codeInput = h("input", {
       type: "text",
@@ -6755,19 +6807,19 @@
     var submitBtn = h("button", {
       cls: "btn btn-primary",
       type: "button",
-      text: "Unlock Response Session",
+      text: "Unlock",
       on: {
         click: function () {
           var code = (codeInput.value || "").trim().replace(/\s+/g, "");
           if (code.length < 6) {
-            errBox.textContent = "Please enter a valid 6-digit TOTP code.";
+            errBox.textContent = "Enter the 6-digit code from your authenticator app.";
             errBox.removeAttribute("hidden");
             codeInput.focus();
             return;
           }
 
           submitBtn.disabled = true;
-          submitBtn.textContent = "Generating Key & Unlocking\u2026";
+          submitBtn.textContent = "Unlocking\u2026";
           errBox.setAttribute("hidden", "");
 
           var browserSessionId = "sess-browser-" + bufToHex(window.crypto.getRandomValues(new Uint8Array(16)).buffer);
@@ -6792,7 +6844,7 @@
                     };
                     closeSheet();
                     updateResponseButton();
-                    toast("Response authority unlocked for 8 hours (30m idle).", "ok");
+                    toast(session.expires_at ? "Response unlocked until " + new Date(session.expires_at).toLocaleTimeString() + ", or until it sits idle." : "Response unlocked.", "ok");
                     if (state.section === "response") renderBody();
                     if (typeof onSuccess === "function") onSuccess(session);
                   });
@@ -6800,8 +6852,8 @@
             })
             .catch(function (err) {
               submitBtn.disabled = false;
-              submitBtn.textContent = "Unlock Response Session";
-              errBox.textContent = err.message || "Failed to unlock response session.";
+              submitBtn.textContent = "Unlock";
+              errBox.textContent = unlockErrorText(err);
               errBox.removeAttribute("hidden");
               codeInput.focus();
             });
@@ -6820,42 +6872,42 @@
     var enrollBtn = h("button", {
       cls: "btn mini",
       type: "button",
-      text: "Setup / Reset Authenticator (TOTP)",
+      text: "Add an authenticator",
       on: {
         click: function () {
           enrollBtn.disabled = true;
-          enrollBtn.textContent = "Generating Secret…";
+          enrollBtn.textContent = "Creating setup key…";
           request("/api/v1/response/auth/totp/enroll", "POST", { operator_id: op })
             .then(function (res) {
               enrollBtn.style.display = "none";
               enrollBox.style.display = "block";
               enrollBox.innerHTML = "";
               var keyRow = h("div", { cls: "stack-s totp-key-row" },
-                h("div", { cls: "label-meta", text: "Manual Entry Secret Key (Base32):" }),
+                h("div", { cls: "label-meta", text: "Setup key" }),
                 h("div", { cls: "row-acts uf uf-g3" },
                   h("code", { cls: "cmd u-strong u-break", text: res.secret }),
                   h("button", {
                     cls: "btn mini",
                     type: "button",
-                    text: "Copy Key",
+                    text: "Copy key",
                     on: {
-                      click: function () { copyText(res.secret, "TOTP Secret Key"); }
+                      click: function () { copyText(res.secret, "Setup key"); }
                     }
                   })
                 ),
                 h("div", { cls: "why u-mt1" },
-                  h("span", { text: "Add this key into your authenticator app (Google Authenticator, 1Password, Aegis, Bitwarden, etc.). " }),
-                  res.otpauth_url ? h("a", { href: res.otpauth_url, target: "_blank", rel: "noopener", text: "Open in Authenticator App" }) : null
+                  h("span", { text: "Add this key to your authenticator app, then enter the 6-digit code it shows. " }),
+                  res.otpauth_url ? h("a", { href: res.otpauth_url, target: "_blank", rel: "noopener", text: "Open in authenticator app" }) : null
                 )
               );
               enrollBox.appendChild(keyRow);
-              toast("Authenticator enrolled. Enter the generated 6-digit code above.", "ok");
+              toast("Setup key ready. Add it to your app, then enter its code.", "ok");
               codeInput.focus();
             })
             .catch(function (err) {
               enrollBtn.disabled = false;
-              enrollBtn.textContent = "Setup / Reset Authenticator (TOTP)";
-              errBox.textContent = "Enrollment failed: " + (err.message || err);
+              enrollBtn.textContent = "Add an authenticator";
+              errBox.textContent = "Couldn't add an authenticator: " + (err.message || err);
               errBox.removeAttribute("hidden");
             });
         }
@@ -6863,13 +6915,12 @@
     });
 
     var body = h("div", { cls: "card-body stack" },
-      h("p", { cls: "pending", text: "Response authority operations require multi-factor proof and an ephemeral in-memory Ed25519 keypair. Your private key remains exclusively in browser memory and is never written to disk." }),
+      h("p", { text: "Collecting evidence and running scripts needs your authenticator code. It locks again by itself when it sits idle, and the key it uses stays in this browser's memory." }),
       h("div", { cls: "form-row" },
-        h("span", { cls: "dim-2", text: "Operator: " }), h("b", { text: op }),
-        h("span", { cls: "dim-2", text: " \u00b7 Tenant: " }), h("b", { text: tenant })
+        h("span", { cls: "dim-2", text: "Unlocking as " }), h("b", { text: op })
       ),
       h("div", { cls: "form-row stack-s" },
-        h("label", { "for": "unlock-totp-code", text: "Enter 6-Digit Authenticator Code (TOTP):" }),
+        h("label", { "for": "unlock-totp-code", text: "Authenticator code" }),
         codeInput
       ),
       h("div", { cls: "form-row u-mt1" }, enrollBtn),
@@ -6882,7 +6933,7 @@
       submitBtn
     ];
 
-    openSheet("Unlock Response Authority", body, foot);
+    openSheet("Unlock response", body, foot);
     setTimeout(function () { codeInput.focus(); }, 100);
   }
 
@@ -7024,7 +7075,7 @@
           h("button", { cls: "btn btn-crit", type: "button", text: "Lock", on: { click: confirmLockResponseSession } })
         ]
       : [
-          h("button", { cls: "btn btn-primary", type: "button", text: "Unlock", title: "Unlock with your authenticator code or passkey", disabled: READ_ONLY, on: { click: function () { openUnlockResponseSheet(); } } })
+          h("button", { cls: "btn btn-primary", type: "button", text: "Unlock", title: "Unlock with your authenticator code", disabled: READ_ONLY, on: { click: function () { openUnlockResponseSheet(); } } })
         ];
 
     /* Terminals and response jobs have their own pages; this bar says how
@@ -7045,7 +7096,7 @@
         authActions),
       { key: "Response access", text: isUnlocked
         ? "Unlocked: you can collect evidence and run scripts. Each one is signed with a key this browser holds in memory until you lock it." + (auth.signer_key_id ? " Signing key " + auth.signer_key_id.slice(0, 16) + "\u2026." : "") + " Terminals don't use this unlock."
-        : "Collecting evidence and running scripts need an unlocked session. Unlock with your authenticator code or passkey. Terminals don't use this unlock." });
+        : "Collecting evidence and running scripts need an unlocked session. Unlock with your authenticator code. Terminals don't use this unlock." });
 
     var scriptRows = (state.scripts || []).map(function (sc) {
       return [
@@ -11316,7 +11367,6 @@
 
   /* The window and scope the summary and the conversations share; the
      conversation list adds its own search, mark, direction and page size. */
-  var TRAFFIC_SCOPE = ["endpoint_id", "src_ip", "dst_ip", "process", "domain", "country", "protocol", "port", "direction", "action", "hash", "user", "attribution"];
   function trafficQuery() {
     var tf = state.trafficFilter || { range: "1h" };
     var qs = "?range=" + encodeURIComponent(tf.range || "1h");

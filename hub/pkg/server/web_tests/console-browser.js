@@ -298,6 +298,7 @@
   chip('Flagged').click();
   for(let i=0;i<100 && rows().length!==flagged;i++) await wait();
   assert(a.state.trafficFilter.mark==='flagged' && chip('Flagged').getAttribute('aria-pressed')==='true','Flagged did not turn on');
+  assert(/[?&]mark=flagged/.test(location.hash),'The filter is not in the address: '+location.hash);
   assert(rows().length===flagged && rows().every(r=>r.querySelector('.tf-mark[data-kind="finding"]')),'Flagged shows rows without a finding');
   assert(document.querySelector('.tf-shown').textContent===flagged+' conversations','The count does not follow the filter: '+document.querySelector('.tf-shown').textContent);
   const opener=rows()[0].querySelector('.tf-open'); opener.focus(); opener.click(); await wait();
@@ -327,6 +328,10 @@
   await a.refresh(); await wait();
   assert(!/paused/.test(document.getElementById('connection-status').textContent),'Traffic claims it is paused while it keeps painting');
   assert(rows().length && rows().every(r=>/nginx/.test(r.textContent)),'The list did not follow the search while the box had focus');
+  window.dispatchEvent(new PopStateEvent('popstate',{state:{section:'traffic',range:'7d',mark:'nonsense',tq:'nginx',dst_ip:'203.0.113.9'}}));
+  for(let i=0;i<100 && a.state.trafficFilter.range!=='7d';i++) await wait();
+  const tf=a.state.trafficFilter;
+  assert(tf.range==='7d' && tf.q==='nginx' && tf.dst_ip==='203.0.113.9' && !tf.mark,'An address did not set the filters, or a bad value got through: '+JSON.stringify(tf));
   box.value=''; a.state.trafficFilter=saved; a.state.section='assets'; a.render();
  });
  await check('a gated-looking action completes on the first request', async () => {

@@ -285,8 +285,9 @@ func (s *Store) foldConversations(filter TrafficFilter, eph int, now time.Time) 
 		GROUP BY endpoint_id, process_path, dir, peer, svc, protocol`
 	qargs := append([]interface{}{eph, eph, eph, eph}, args...)
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// No store lock: WAL reads don't block writers, and every read here is SQL
+	// only. A long read under s.mu holds up each batch waiting to write, and
+	// every other request queues behind that writer.
 	meta.RetainedFrom = s.earliestRetainedEvent(filter.TenantID)
 
 	rs, err := s.db.Query(query, qargs...)
