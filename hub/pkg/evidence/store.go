@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1126,16 +1127,29 @@ func (s *Store) ExportBundleToTarGz(tenantID, bundleID string, out io.Writer) er
 	return nil
 }
 
+// prunePerRun bounds one retention run, so a wrong clock or a bad expiry value
+// can't empty the store in one go.
+const prunePerRun = 200
+
 // PruneExpiredBundles purges completed bundles that have exceeded their retention period and are not on legal hold.
 // Associated unreferenced encrypted storage objects on disk are securely deleted.
+// A clock ahead of the real one is ignored, each run removes at most
+// prunePerRun bundles (oldest expiry first; the next run takes the rest), and
+// every removed bundle is logged by id.
 func (s *Store) PruneExpiredBundles(now time.Time) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if real := time.Now().UTC(); now.After(real) {
+		now = real
+	}
+
 	rows, err := s.db.Query(`
 		SELECT id, tenant_id FROM evidence_bundles
 		WHERE retention_expires_at <= ? AND legal_hold = 0
-	`, now)
+		ORDER BY retention_expires_at
+		LIMIT ?
+	`, now, prunePerRun)
 	if err != nil {
 		return 0, err
 	}
@@ -1197,6 +1211,7 @@ func (s *Store) PruneExpiredBundles(now time.Time) (int, error) {
 			}
 		}
 
+		log.Printf("[+] Evidence retention: removed bundle %s (tenant %s, %d object(s))", eb.id, eb.tenantID, len(digests))
 		prunedCount++
 	}
 

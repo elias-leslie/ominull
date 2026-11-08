@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -468,6 +469,46 @@ func TestEvidence_RetentionPruningAndLegalHold(t *testing.T) {
 	// Verify Bundle 3 (unexpired) is preserved
 	if b3Got, err := store.GetBundle(tenantID, b3.ID); err != nil || b3Got == nil {
 		t.Fatalf("expected b3 to be preserved: %v", err)
+	}
+}
+
+func TestEvidence_PruneIgnoresAClockAheadOfTheRealOne(t *testing.T) {
+	store, _, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	bundle, err := store.CreateBundle("tenant-clock", "ep-1", "job-1", "quick", 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := store.PruneExpiredBundles(time.Now().UTC().AddDate(5, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 0 {
+		t.Fatalf("a future clock pruned %d unexpired bundle(s)", pruned)
+	}
+	if _, err := store.GetBundle("tenant-clock", bundle.ID); err != nil {
+		t.Fatalf("unexpired bundle gone: %v", err)
+	}
+}
+
+func TestEvidence_PruneStopsAtTheRunLimitAndTheNextRunContinues(t *testing.T) {
+	store, _, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	for i := 0; i < prunePerRun+3; i++ {
+		if _, err := store.CreateBundle("tenant-cap", "ep-1", fmt.Sprintf("job-%d", i), "quick", -time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for run, want := range []int{prunePerRun, 3, 0} {
+		pruned, err := store.PruneExpiredBundles(time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pruned != want {
+			t.Fatalf("run %d pruned %d, want %d", run, pruned, want)
+		}
 	}
 }
 
