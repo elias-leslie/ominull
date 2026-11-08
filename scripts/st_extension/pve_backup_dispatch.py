@@ -48,8 +48,7 @@ PUBLISHED = "artifact.json"
 RECIPIENT = re.compile(r"age1[0-9a-z]{58}")
 
 # Selected by prefix, so a key added later under these trees is covered too.
-# The retired signer's state still holds private keys until it is removed.
-SECRET_PREFIXES = ("var/lib/ominull/grants/", "var/lib/ominull-response-authority/", "etc/ominull/", "var/lib/ominull/evidence/")
+SECRET_PREFIXES = ("var/lib/ominull/grants/", "etc/ominull/", "var/lib/ominull/evidence/")
 SECRET_FILES = {"var/lib/ominull/evidence.key"}
 KEY_FILE_DIR = "opt/ominull/bin/certs/"
 
