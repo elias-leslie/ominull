@@ -140,3 +140,40 @@ func TestDomainFeedFollowsNoRedirect(t *testing.T) {
 		t.Fatalf("redirect followed: err %v, hops %d", err, hops.Load())
 	}
 }
+
+// How long a list has been failing runs from its first failure, not its last good
+// fetch, and ends with the next good one.
+func TestDomainFeedFailingSince(t *testing.T) {
+	var fail atomic.Bool
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte("c2.bad.example\n"))
+	}))
+	defer srv.Close()
+	m := New(nil)
+	m.domainHTTP = srv.Client()
+	feeds := []storage.DomainIntelFeed{{Name: "a", URL: srv.URL + "/a", Confidence: 90}}
+	refresh := func() DomainFeedStatus {
+		t.Helper()
+		m.RefreshDomainFeeds(context.Background(), feeds, "/nonexistent")
+		return m.DomainFeedStatuses()[0]
+	}
+	if st := refresh(); st.FailingSince != nil {
+		t.Fatalf("a good fetch has a failure time: %+v", st)
+	}
+	fail.Store(true)
+	first := refresh()
+	if first.FailingSince == nil {
+		t.Fatalf("a failure has no time: %+v", first)
+	}
+	if st := refresh(); st.FailingSince == nil || !st.FailingSince.Equal(*first.FailingSince) {
+		t.Fatalf("a second failure restarted the clock: %v then %v", first.FailingSince, st.FailingSince)
+	}
+	fail.Store(false)
+	if st := refresh(); st.FailingSince != nil {
+		t.Fatalf("a good fetch kept the failure time: %+v", st)
+	}
+}

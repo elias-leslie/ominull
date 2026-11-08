@@ -153,6 +153,8 @@ type enrollmentBundle struct {
 	PFXBase64        string `json:"pfx_base64,omitempty"`
 }
 
+// handleEnrollmentRedeem turns an enrollment code into a device identity. The code
+// comes only in the request body, never the URL.
 func (s *Server) handleEnrollmentRedeem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")

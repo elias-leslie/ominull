@@ -71,7 +71,7 @@ func (s *Server) verifiedRouter(r *http.Request) (string, bool) {
 }
 
 // handleRouterIdentity issues a gateway client certificate. Admin only: the
-// response carries a private key.
+// response carries a private key. Reissuing revokes the previous certificate.
 func (s *Server) handleRouterIdentity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")

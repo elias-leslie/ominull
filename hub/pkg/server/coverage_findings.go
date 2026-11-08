@@ -42,9 +42,11 @@ func (s *Server) domainFeedFinding(now time.Time) feedFinding {
 		nil, map[string]any{"feeds": statuses})
 }
 
-// judgeDomainFeeds grades the listed feeds. A missing key is low: the list never
-// worked and someone has been asked for it, so it is no daily item. A list that fails
-// past stale is medium, whether it never loaded or is running on its last good fetch.
+// judgeDomainFeeds grades the listed feeds. A list that never loaded for want of a key
+// is low: someone has been asked for it, so it is no daily item. A list that has failed
+// for longer than stale is medium, whether it never loaded or is running on its last
+// good fetch. Messages name lists only: a fetch error can hold the hub's and its
+// resolver's addresses, so the error stays in the finding's feeds detail.
 func judgeDomainFeeds(feeds []storage.DomainIntelFeed, statuses []threatintel.DomainFeedStatus, now time.Time, stale time.Duration) (severity, status int, message string) {
 	if len(feeds) == 0 {
 		return ocsfSevInformational, ocsfStatusResolved, "No bad-domain lists are set up"
@@ -53,7 +55,7 @@ func judgeDomainFeeds(feeds []storage.DomainIntelFeed, statuses []threatintel.Do
 	for _, st := range statuses {
 		byName[st.Name] = st
 	}
-	var needKey, failing, wobbling []string
+	var needKey, failing, wobbling, retrying []string
 	loaded, names, pending := 0, 0, 0
 	for _, feed := range feeds {
 		st, known := byName[feed.Name]
@@ -63,24 +65,29 @@ func judgeDomainFeeds(feeds []storage.DomainIntelFeed, statuses []threatintel.Do
 		case st.Error == "":
 			loaded++
 			names += st.Domains
-		case st.NeedsKey:
+		case st.NeedsKey && st.FetchedAt == nil:
 			needKey = append(needKey, feed.Name)
-		case st.FetchedAt == nil || now.Sub(*st.FetchedAt) >= stale:
-			failing = append(failing, feed.Name+" ("+st.Error+")")
-		default:
+		case st.FailingSince != nil && now.Sub(*st.FailingSince) >= stale:
+			failing = append(failing, feed.Name)
+		case st.FetchedAt != nil:
 			wobbling = append(wobbling, feed.Name)
+		default:
+			retrying = append(retrying, feed.Name)
 		}
 	}
 	switch {
 	case len(failing) > 0:
 		return ocsfSevMedium, ocsfStatusNew, fmt.Sprintf("%s not loading for over %d h: %s",
-			plural(len(failing), "bad-domain list", "bad-domain lists"), int(stale.Hours()), strings.Join(failing, "; "))
+			plural(len(failing), "bad-domain list", "bad-domain lists"), int(stale.Hours()), strings.Join(failing, ", "))
 	case len(needKey) > 0:
 		return ocsfSevLow, ocsfStatusNew, fmt.Sprintf("%s can't load without an abuse.ch key on the hub, so those bad names aren't checked: %s",
 			plural(len(needKey), "bad-domain list", "bad-domain lists"), strings.Join(needKey, ", "))
 	case len(wobbling) > 0:
 		return ocsfSevInformational, ocsfStatusResolved, fmt.Sprintf("%s failed its last fetch and is using its last good copy: %s",
 			plural(len(wobbling), "bad-domain list", "bad-domain lists"), strings.Join(wobbling, ", "))
+	case len(retrying) > 0:
+		return ocsfSevInformational, ocsfStatusResolved, fmt.Sprintf("%s failed its first fetch and will retry: %s",
+			plural(len(retrying), "bad-domain list", "bad-domain lists"), strings.Join(retrying, ", "))
 	case pending > 0:
 		return ocsfSevInformational, ocsfStatusResolved, fmt.Sprintf("%s still loading", plural(pending, "bad-domain list", "bad-domain lists"))
 	}

@@ -11,8 +11,8 @@ import (
 // decoy hits, silence and return against expected presence, sweeps, threat
 // intelligence, beaconing, volume and the agent egress rules.
 //
-// Their code stays: the plan retires them from paging only, and deletes them
-// only after labelled drills compare both tiers.
+// Those detectors no longer write findings; this keeps the tier of the rows they
+// wrote until retention removes them.
 var huntTypes = map[string]bool{
 	"NOVEL_DESTINATION": true,
 }

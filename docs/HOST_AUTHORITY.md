@@ -11,9 +11,10 @@ authority are therefore the part that holds against a compromised hub or a leake
 what they forbid even when the response key signed it.
 
 Current state (2026-11-08): the workstation and the Proxmox host pin keys, but the signer retired with Nightshift, so no
-grant reaches them. Each pin now works as a lock: the hub can't run scripts there, and both take them by hand over root
-SSH (`scripts/posture-collect.sh` does for the baseline). The pins stay on purpose. Removing one on the workstation, whose
-level is `engagement`, would hand the hub script rights on it.
+script grant can reach them. Each pin now works as a lock on script jobs only: the hub can't run those there, and they run
+by hand as root (`scripts/posture-collect.sh` does for the baseline). Everything else still verifies against the response
+key, so only the lock level limits it: at `engagement` the workstation still takes hub-signed terminal sessions and
+`ominullctl exec`. The pins stay on purpose. Removing one on the workstation would hand the hub script rights on it too.
 
 Agents from 1.8.81 implement everything here. Code: `agent/include/agent_trust.h` (ceilings, host files, offer
 checks, report), `agent/include/response_canonical.h` (grant bytes), `agent/include/response_dispatcher.h` (grant

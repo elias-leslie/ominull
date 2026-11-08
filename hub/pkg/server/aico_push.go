@@ -129,7 +129,8 @@ func (s *Server) aicoPushState() aicoPushState {
 	return st
 }
 
-// handleAicoPush: GET/POST /api/v1/integrations/aico (fleet administrator).
+// handleAicoPush: GET/POST /api/v1/integrations/aico (fleet administrator). The key
+// itself is never returned, only its hash.
 func (s *Server) handleAicoPush(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	switch r.Method {

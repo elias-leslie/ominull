@@ -13,6 +13,9 @@ func TestJudgeDomainFeeds(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	recent, old := now.Add(-2*time.Hour), now.Add(-48*time.Hour)
+	failing := func(name string, fetched, since *time.Time, err string, needsKey bool) threatintel.DomainFeedStatus {
+		return threatintel.DomainFeedStatus{Name: name, Domains: 10, FetchedAt: fetched, FailingSince: since, Error: err, NeedsKey: needsKey}
+	}
 	feeds := []storage.DomainIntelFeed{{Name: "a"}, {Name: "b"}}
 	stale := 24 * time.Hour
 	good := func(name string) threatintel.DomainFeedStatus {
@@ -28,21 +31,33 @@ func TestJudgeDomainFeeds(t *testing.T) {
 		{"none set up", nil, nil, ocsfSevInformational, "No bad-domain lists"},
 		{"all loaded", feeds, []threatintel.DomainFeedStatus{good("a"), good("b")}, ocsfSevInformational, "2 bad-domain lists loaded, 20 names"},
 		{"first fetch not done", feeds, []threatintel.DomainFeedStatus{good("a")}, ocsfSevInformational, "still loading"},
-		{"one failed fetch is weather", feeds, []threatintel.DomainFeedStatus{good("a"), {Name: "b", Domains: 10, FetchedAt: &recent, Error: "HTTP 503"}},
+		{"one failed fetch is weather", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", &recent, &recent, "HTTP 503", false)},
 			ocsfSevInformational, "using its last good copy: b"},
-		{"no key", feeds, []threatintel.DomainFeedStatus{{Name: "a", Error: "no key", NeedsKey: true}, {Name: "b", Error: "no key", NeedsKey: true}},
+		// A last good fetch long ago says nothing about how long it has been failing.
+		{"a first failure after a long good run is weather", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", &old, &recent, "HTTP 503", false)},
+			ocsfSevInformational, "using its last good copy: b"},
+		{"a first fetch failing right after a restart is weather", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", nil, &recent, "HTTP 503", false)},
+			ocsfSevInformational, "failed its first fetch and will retry: b"},
+		{"no key", feeds, []threatintel.DomainFeedStatus{failing("a", nil, &old, "no key", true), failing("b", nil, &old, "no key", true)},
 			ocsfSevLow, "abuse.ch key"},
-		{"failing past the line", feeds, []threatintel.DomainFeedStatus{good("a"), {Name: "b", Domains: 10, FetchedAt: &old, Error: "HTTP 503"}},
-			ocsfSevMedium, "b (HTTP 503)"},
-		{"never loaded", feeds, []threatintel.DomainFeedStatus{good("a"), {Name: "b", Error: "the list held no names"}},
-			ocsfSevMedium, "the list held no names"},
-		{"a real failure outranks a missing key", feeds, []threatintel.DomainFeedStatus{{Name: "a", Error: "no key", NeedsKey: true}, {Name: "b", Error: "HTTP 500"}},
-			ocsfSevMedium, "b (HTTP 500)"},
+		{"a key lost after a good fetch still has its copy", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", &recent, &recent, "no key", true)},
+			ocsfSevInformational, "using its last good copy: b"},
+		{"a key lost long ago is a failing list", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", &old, &old, "no key", true)},
+			ocsfSevMedium, "over 24 h: b"},
+		{"failing past the line", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", &old, &old, "HTTP 503", false)},
+			ocsfSevMedium, "over 24 h: b"},
+		{"never loaded past the line", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", nil, &old, "the list held no names", false)},
+			ocsfSevMedium, "over 24 h: b"},
+		{"a real failure outranks a missing key", feeds, []threatintel.DomainFeedStatus{failing("a", nil, &old, "no key", true), failing("b", nil, &old, "HTTP 500", false)},
+			ocsfSevMedium, "over 24 h: b"},
 	}
 	for _, c := range cases {
 		severity, status, message := judgeDomainFeeds(c.feeds, c.statuses, now, stale)
 		if severity != c.severity || !strings.Contains(message, c.want) {
 			t.Errorf("%s: severity %d, message %q", c.name, severity, message)
+		}
+		if strings.Contains(message, "HTTP") || strings.Contains(message, "held no names") {
+			t.Errorf("%s: a fetch error reached the message: %q", c.name, message)
 		}
 		if raised := severity > ocsfSevInformational; raised != (status == ocsfStatusNew) {
 			t.Errorf("%s: severity %d with status %d", c.name, severity, status)

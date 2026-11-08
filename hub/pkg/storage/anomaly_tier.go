@@ -28,8 +28,8 @@ import (
 // On agent-heavy endpoints (tuning agent_heavy_endpoints by id, agent_heavy_roles by
 // role, and with agent_heavy_observed any endpoint whose telemetry showed an agent
 // runtime; never the operating system) a lead is muted to LOW. New-device findings
-// from the retired scheduled sweep (alert-disc-*) share the NOVEL_DESTINATION type
-// and keep paging until retention removes them. The replay route's paging field
+// from the retired scheduled sweep (alert-disc-*) share the NOVEL_DESTINATION type and
+// stay digest items (page, if stored before classes) until retention removes them. The replay route's paging field
 // compares every kept finding not held by learning with those from paging detectors.
 const (
 	TierPage = "page"

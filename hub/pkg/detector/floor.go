@@ -26,9 +26,7 @@ import (
 // resolver bypass run before the expected rules and ignore them (the infrastructure
 // paths in code, run as their own account, stay exempt from the sweeps), apart from
 // the admin ssh rule bounding a fan-out to inventoried hosts on port 22, never one
-// that reaches a floor port. The 10 MB burst still yields to a rule naming it:
-// Windows Update and Delivery Optimization upload tens of megabytes as svchost.exe,
-// and a backup program's rule for its storage service exists for exactly that.
+// that reaches a floor port.
 
 // floorPorts are SMB, RDP, telnet and RPC: how a worm moves. No expected rule,
 // actor or admin rule explains a flow on one.

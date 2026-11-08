@@ -43,12 +43,9 @@ import (
 // range or inside a container network, the sweeps for an exempt program), and so is
 // the burst, which a rule may cover by design.
 //
-// Every tuning save or rule change is drilled for the floor cases the new policy
-// blinds that the old one did not (a case that raised before and that the new policy
-// no longer builds counts). The audit statement opens with them ("BLINDS 2 FLOOR
-// CASES: lateral sweep, ...", shortened to the count when there is no room) or with
-// "floor drill: blinds no floor case". The drill does not block the save. Retirement
-// reaches no floor rule, so its statement carries no drill.
+// Every tuning save or rule change is drilled at once against the policy now live
+// (notePolicyChange). The verdict goes on the ominull.detection.drill finding, not in
+// the audit statement, and the drill does not block the save.
 
 // DrillEndpointID is the endpoint the synthetic events come from. It is never
 // enrolled; no finding from it is stored.

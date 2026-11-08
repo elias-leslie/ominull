@@ -146,6 +146,8 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(setupGateDocument(gateNonce, s.agentVersion))
 }
 
+// handleSetupSession exchanges the local setup token for a session. The token comes
+// only in the request body, never the URL.
 func (s *Server) handleSetupSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")

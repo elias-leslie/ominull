@@ -35,6 +35,9 @@ type DomainFeedStatus struct {
 	Error string `json:"error,omitempty"`
 	// NeedsKey says the last failure was the hub having no abuse.ch key.
 	NeedsKey bool `json:"needs_key,omitempty"`
+	// FailingSince is when the current run of failures began, as far as this
+	// process knows: a restart starts counting again.
+	FailingSince *time.Time `json:"failing_since,omitempty"`
 }
 
 var errNoAbuseCHKey = errors.New("no abuse.ch Auth-Key")
@@ -204,6 +207,11 @@ func (m *Manager) RefreshDomainFeeds(ctx context.Context, feeds []storage.Domain
 		names, err := fetchDomainFeed(ctx, m.domainHTTP, feed, keyFile)
 		if err != nil {
 			set.status.Error, set.status.NeedsKey = err.Error(), errors.Is(err, errNoAbuseCHKey)
+			since := time.Now().UTC()
+			if old := previous[feed.Name]; old != nil && old.status.FailingSince != nil {
+				since = *old.status.FailingSince
+			}
+			set.status.FailingSince = &since
 			log.Printf("[-] domain feed %s: %v (kept %d names from the last good fetch)", feed.Name, err, len(set.names))
 		} else {
 			fetched := time.Now().UTC()
