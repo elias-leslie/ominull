@@ -42,6 +42,5 @@ Proven on a lab VM with real Codex and a real tmux window on 2026-11-08: the blo
 - A Traffic row says **blocks this** only for a Linux machine on 1.8.122 or later that the hub still sends the rule to; otherwise it says **would block this**. That reads the agent's version, not its answer: a refusal shows only on the machine page.
 - Cold storage keeps hourly flow totals without the session, so which session made a connection is only known while the raw flows are kept.
 - Flows are seen on the machine that made them, so what an agent does over `ssh` on another host has no session there unless the agent's own connection is the row you're reading.
-- Traffic labels Claude's own rows by its binary's filename, which is its version number (`2.1.319`). The session beside it says what it is; `runtime` in the API already holds `claude`, so the row could show that instead.
 - Blocking real Claude isn't proven, because of the lab VM's CPU (above).
 - This is attribution, not authentication. A process that scrubs its environment or installs itself at an agent's path can change what it's called. It's for seeing and limiting our own agents, not for containing a hostile one.

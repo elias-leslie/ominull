@@ -699,6 +699,20 @@ func (c TrafficConversation) onlySession(key string) (TrafficConversation, bool)
 	return c, false
 }
 
+// isVersionName says a program's file is named only for its version, as in
+// claude/versions/2.1.319, which says nothing about what it is.
+func isVersionName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r != '.' && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func egressRank(v *EgressVerdict) int {
 	switch {
 	case v == nil:
@@ -716,6 +730,9 @@ func egressRank(v *EgressVerdict) int {
 // connection is not this agent reaching out, so the policy has no say.
 func (c TrafficConversation) judged(t DetectionTuning) TrafficConversation {
 	c.Runtime = t.AgentRuntimeOf(c.ProcessPath)
+	if c.Runtime != "" && isVersionName(c.Process) {
+		c.Process = c.Runtime
+	}
 	if len(c.Sessions) > 0 {
 		c.Sessions = append([]ConversationSession(nil), c.Sessions...)
 	}

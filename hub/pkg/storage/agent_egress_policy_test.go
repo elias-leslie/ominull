@@ -123,7 +123,7 @@ func TestConversationsCarryThePolicyVerdict(t *testing.T) {
 	if res.EgressMode != EgressObserve {
 		t.Fatalf("mode: %q", res.EgressMode)
 	}
-	api := findConversation(t, res.Conversations, "2.1.296", "160.79.104.10")
+	api := findConversation(t, res.Conversations, "claude", "160.79.104.10")
 	if api.Verdict == nil || api.Verdict.Action != EgressAllow || api.Runtime != "claude" {
 		t.Fatalf("allowed row: %+v", api)
 	}
@@ -329,5 +329,21 @@ func TestOlderDatabaseGainsAgentSession(t *testing.T) {
 	// The trigger is back too, for tools that insert into the view.
 	if _, err := store.db.Exec(`INSERT INTO events (tenant_id, endpoint_id, timestamp, protocol, src_ip, dst_ip, src_port, dst_port) VALUES ('default', 'e', ?, 6, '10.0.0.1', '203.0.113.1', 1, 2)`, flowTime(at)); err != nil {
 		t.Fatalf("insert through the view: %v", err)
+	}
+}
+
+func TestAgentRowNamedOnlyForItsVersionShowsTheRuntime(t *testing.T) {
+	tuning := DefaultDetectionTuning()
+	row := TrafficConversation{Process: "2.1.319", ProcessPath: "/home/someone/.local/share/claude/versions/2.1.319"}.judged(tuning)
+	if row.Runtime == "" || row.Process != row.Runtime {
+		t.Fatalf("process %q runtime %q", row.Process, row.Runtime)
+	}
+	other := TrafficConversation{Process: "codex", ProcessPath: "/usr/local/bin/codex"}.judged(tuning)
+	if other.Process != "codex" {
+		t.Fatalf("a named program keeps its name, got %q", other.Process)
+	}
+	plain := TrafficConversation{Process: "7.2", ProcessPath: "/opt/app/7.2"}.judged(tuning)
+	if plain.Process != "7.2" {
+		t.Fatalf("not an agent keeps its name, got %q", plain.Process)
 	}
 }
