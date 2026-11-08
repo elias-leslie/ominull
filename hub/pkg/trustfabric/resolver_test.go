@@ -268,6 +268,7 @@ func TestNormalizeRefusals(t *testing.T) {
 	for _, r := range []Rule{
 		{ScopeType: "planet", ScopeID: "x", Kind: "ip", Value: "192.0.2.1", Action: Allow},
 		{ScopeType: ScopeSite, Kind: "ip", Value: "192.0.2.1", Action: Allow},
+		{ScopeType: "Provider", ScopeID: "t-01", Kind: "ip", Value: "192.0.2.1", Action: Allow},
 		{ScopeType: ScopeProvider, Kind: "ip", Value: "not-an-ip", Action: Allow},
 		{ScopeType: ScopeProvider, Kind: "ip", Value: "192.0.2.0/24", Action: Allow},
 		{ScopeType: ScopeProvider, Kind: "ip", Value: "fe80::1%eth0", Action: Allow},
@@ -287,7 +288,7 @@ func TestNormalizeRefusals(t *testing.T) {
 			t.Errorf("Normalize accepted %+v", r)
 		}
 	}
-	n, err := Normalize(Rule{ScopeType: "Provider", ScopeID: "ignored", Kind: "cidr", Value: "192.0.2.77/24", Action: "DENY"})
+	n, err := Normalize(Rule{ScopeType: "Provider", Kind: "cidr", Value: "192.0.2.77/24", Action: "DENY"})
 	if err != nil || n.Value != "192.0.2.0/24" || n.ScopeID != "" || n.Direction != DirBoth || n.Proto != ProtoAny || n.Action != Deny {
 		t.Errorf("Normalize = %+v, %v", n, err)
 	}

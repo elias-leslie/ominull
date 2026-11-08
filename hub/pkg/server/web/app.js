@@ -8370,6 +8370,7 @@
     var scope = hostScopes[key] || { alerts: null, flows: null };
     if (scope.loading) return;
     scope.loading = true;
+    scope.readBy = asset.endpoint ? asset.endpoint.id : "";
     hostScopes[key] = scope;
     function read(kind, path) {
       scope[kind + "Loading"] = true;
@@ -10211,8 +10212,9 @@
     var asset = state.assetByKey[state.routeKey];
     if (!asset) { if (state.assetsLoaded) state.routeKey = ""; return; }
     loadRouteDetail(state.routeKey);
-    /* A linked machine with no agent gets no other first read of its scope. */
-    if (!hostScopes[state.routeKey]) loadHostScope(state.routeKey);
+    /* A linked machine with no agent gets no other first read of its scope, and one
+       read before its agent's row arrived was by address alone, so read it again. */
+    if (!hostScopes[state.routeKey] || hostScopes[state.routeKey].readBy !== (asset.endpoint ? asset.endpoint.id : "")) loadHostScope(state.routeKey);
 
     var ep = asset.endpoint;
     var sc = asset.scan;
@@ -10880,7 +10882,8 @@
       if (ctxMenu) { closeCtx(); return; }
       if (accountPop) { closeAccountPop(); return; }
       /* A link still waiting for the list counts: Escape cancels it. */
-      if (routeEl || state.routeKey) { closeRoute(); return; }
+      if (routeEl) { closeRoute(); return; }
+      if (state.routeKey) { closeRoute(); syncURL(true); return; }
       if (openDrawer) { closeDrawer(); return; }
       if (state.query) { state.query = ""; render(); return; }
       return;

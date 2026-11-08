@@ -40,7 +40,7 @@ func (s *Server) domainFeedStale() time.Duration {
 func (s *Server) domainFeedFinding(now time.Time) feedFinding {
 	var statuses []threatintel.DomainFeedStatus
 	if s.ti != nil {
-		statuses = s.domainFeedFailures(s.ti.DomainFeedStatuses(), now)
+		statuses = s.domainFeedFailures(s.domainIntelFeeds(), s.ti.DomainFeedStatuses(), now)
 	}
 	severity, status, message := judgeDomainFeeds(s.domainIntelFeeds(), statuses, now, s.domainFeedStale())
 	return s.feedFinding(now, "ominull.threatintel.domain_feeds", "Bad-domain lists", severity, status, message,
@@ -48,8 +48,9 @@ func (s *Server) domainFeedFinding(now time.Time) feedFinding {
 }
 
 // domainFeedFailures gives each failing list its earliest known first failure and
-// keeps that record for the next hub run.
-func (s *Server) domainFeedFailures(statuses []threatintel.DomainFeedStatus, now time.Time) []threatintel.DomainFeedStatus {
+// keeps that record for the next hub run. A list with no status yet keeps its record:
+// a hub just started hasn't fetched anything. Only leaving the tuning drops it.
+func (s *Server) domainFeedFailures(feeds []storage.DomainIntelFeed, statuses []threatintel.DomainFeedStatus, now time.Time) []threatintel.DomainFeedStatus {
 	raw, _ := s.store.GetSetting(domainFeedFailingSetting)
 	saved := map[string]time.Time{}
 	if raw != "" {
@@ -58,10 +59,18 @@ func (s *Server) domainFeedFailures(statuses []threatintel.DomainFeedStatus, now
 		}
 	}
 	next := make(map[string]time.Time, len(saved))
+	listed := make(map[string]bool, len(feeds))
+	for _, feed := range feeds {
+		listed[feed.Name] = true
+		if first, ok := saved[feed.Name]; ok {
+			next[feed.Name] = first
+		}
+	}
 	out := make([]threatintel.DomainFeedStatus, len(statuses))
 	for i, st := range statuses {
 		out[i] = st
 		if st.Error == "" {
+			delete(next, st.Name)
 			continue
 		}
 		since := now
@@ -71,7 +80,9 @@ func (s *Server) domainFeedFailures(statuses []threatintel.DomainFeedStatus, now
 		if first, ok := saved[st.Name]; ok && first.Before(since) {
 			since = first
 		}
-		next[st.Name] = since
+		if listed[st.Name] {
+			next[st.Name] = since
+		}
 		out[i].FailingSince = &since
 	}
 	if encoded, err := json.Marshal(next); err == nil && string(encoded) != raw && !(raw == "" && len(next) == 0) {

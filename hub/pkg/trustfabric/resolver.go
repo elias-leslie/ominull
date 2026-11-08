@@ -137,7 +137,10 @@ func Normalize(r Rule) (Rule, error) {
 		return bad("scope_type must be provider, client, site, group or endpoint")
 	}
 	if r.ScopeType == ScopeProvider {
-		r.ScopeID = ""
+		// Dropping an id here would turn a rule meant for one client into the whole fleet's.
+		if r.ScopeID != "" {
+			return bad("provider means the whole fleet and takes no id")
+		}
 	} else if r.ScopeID == "" || len(r.ScopeID) > 128 {
 		return bad("scope_id is required for a %s rule", r.ScopeType)
 	}

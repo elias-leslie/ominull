@@ -76,23 +76,30 @@ func TestDomainFeedFailureCountSurvivesARestart(t *testing.T) {
 	failing := func(since time.Time) []threatintel.DomainFeedStatus {
 		return []threatintel.DomainFeedStatus{{Name: "b", Error: "HTTP 503", FailingSince: &since}}
 	}
-	if got := srv.domainFeedFailures(failing(first), first); !got[0].FailingSince.Equal(first) {
+	feeds := []storage.DomainIntelFeed{{Name: "b"}}
+	if got := srv.domainFeedFailures(feeds, failing(first), first); !got[0].FailingSince.Equal(first) {
 		t.Fatalf("first failure: %v", got[0].FailingSince)
 	}
-	got := srv.domainFeedFailures(failing(restarted), now)
+	// A hub just started judges before its first fetch.
+	srv.domainFeedFailures(feeds, nil, restarted)
+	got := srv.domainFeedFailures(feeds, failing(restarted), now)
 	if !got[0].FailingSince.Equal(first) {
 		t.Fatalf("a restart restarted the count: %v", got[0].FailingSince)
 	}
-	feeds := []storage.DomainIntelFeed{{Name: "b"}}
 	if severity, _, _ := judgeDomainFeeds(feeds, got, now, 24*time.Hour); severity != ocsfSevMedium {
 		t.Fatalf("a list down for 30 h across a restart graded %d", severity)
 	}
 	fetched := now
-	if good := srv.domainFeedFailures([]threatintel.DomainFeedStatus{{Name: "b", FetchedAt: &fetched}}, now); good[0].FailingSince != nil {
+	if good := srv.domainFeedFailures(feeds, []threatintel.DomainFeedStatus{{Name: "b", FetchedAt: &fetched}}, now); good[0].FailingSince != nil {
 		t.Fatalf("a good fetch kept a failure time: %+v", good[0])
 	}
-	if got := srv.domainFeedFailures(failing(now), now); !got[0].FailingSince.Equal(now) {
+	if got := srv.domainFeedFailures(feeds, failing(now), now); !got[0].FailingSince.Equal(now) {
 		t.Fatalf("a good fetch didn't end the count: %v", got[0].FailingSince)
+	}
+	srv.domainFeedFailures(feeds, failing(first), now)
+	srv.domainFeedFailures(nil, nil, now)
+	if got := srv.domainFeedFailures(feeds, failing(now), now); !got[0].FailingSince.Equal(now) {
+		t.Fatalf("a list taken out of the tuning kept its count: %v", got[0].FailingSince)
 	}
 }
 

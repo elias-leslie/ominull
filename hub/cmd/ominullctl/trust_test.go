@@ -49,7 +49,8 @@ func TestTrustRuleFromArgs(t *testing.T) {
 		"allow 10.0.0.5 --scope provider --expires 2x": "--expires takes",
 		"allow 10.0.0.5 --scope provider --port x":     "--port",
 		"allow 10.0.0.5 --scope provider --nope":       "nope",
-		"allow 10.0.0.5 --scope provider:t-01":         "did you mean client:t-01",
+		"allow 10.0.0.5 --scope provider:t-01":         "takes no id",
+		"allow 10.0.0.5 --scope PROVIDER:t-01":         "takes no id",
 	} {
 		if _, err := trustRuleFromArgs(strings.Fields(args), now); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: want error with %q, got %v", args, want, err)
@@ -136,7 +137,7 @@ func TestTrustCommandsTalkToTheHub(t *testing.T) {
 	if effective != "addr=10.0.0.2&direction=out&endpoint_id=ep-1&port=443&proto=tcp" {
 		t.Errorf("show asked %q", effective)
 	}
-	for _, want := range []string{"10.0.0.2: the rules say allow (most_specific, rule r-1 at client); on the isolated allow list: yes", "Agent would enforce: 10.0.0.0/30", "Doesn't fit, stays closed: 10.0.1.0/24\n", "rule r-2: names a port", "Agent's last report: dropped 1 range"} {
+	for _, want := range []string{"10.0.0.2, tcp 443 out: the rules say allow (most_specific, rule r-1 at client); on the isolated allow list: yes", "Agent would enforce: 10.0.0.0/30", "Doesn't fit, stays closed: 10.0.1.0/24\n", "rule r-2: names a port", "Agent's last report: dropped 1 range"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show output lacks %q: %s", want, out)
 		}
@@ -144,10 +145,19 @@ func TestTrustCommandsTalkToTheHub(t *testing.T) {
 	if out = captureStdout(t, func() error { return c.cmdTrust(strings.Fields("show ep-1 --addr 192.0.2.1")) }); !strings.Contains(out, "allow list: no") {
 		t.Errorf("an address off the list: %s", out)
 	}
+	if !strings.Contains(out, "192.0.2.1, the address as a whole:") {
+		t.Errorf("the answer should say what it answers: %s", out)
+	}
+	if out = captureStdout(t, func() error { return c.cmdTrust(strings.Fields("show ep-1 --addr ::ffff:10.0.0.2")) }); !strings.Contains(out, "allow list: yes") {
+		t.Errorf("a mapped address read as off the list: %s", out)
+	}
+	if err := c.cmdTrust(strings.Fields("show ep-1 --addr 192.0.2.1")); err != nil {
+		t.Fatal(err)
+	}
 	if effective != "addr=192.0.2.1&endpoint_id=ep-1" {
 		t.Errorf("a question about the whole address asked %q", effective)
 	}
-	for _, args := range []string{"show ep-1 --port 443 --proto tcp", "show ep-1 --addr 10.0.0.5 --port 443"} {
+	for _, args := range []string{"show ep-1 --port 443 --proto tcp", "show ep-1 --addr 10.0.0.5 --port 443", "show ep-1 --addr 10.0.0.5 --port 443 --proto any", "show ep-1 --addr 10.0.0.5 --direction both"} {
 		if err := c.cmdTrust(strings.Fields(args)); err == nil {
 			t.Errorf("%s was accepted", args)
 		}

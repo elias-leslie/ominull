@@ -544,14 +544,17 @@
   a.closeRoute();
   a.state.routeKey=bare.key;
   assert(!document.querySelector('.route'),'The route was already painted');
-  a.render();
+  a.refresh();
+  for(let i=0;i<40&&!document.querySelector('.route');i++) await wait();
   assert(document.querySelector('.route'),'The link stayed blank after the list arrived');
   for(let i=0;i<40&&document.querySelector('.route').textContent.includes('Loading host alerts');i++) await wait();
   assert(!document.querySelector('.route').textContent.includes('Loading host alerts'),'The linked machine never read its alerts');
   a.closeRoute();
   a.state.routeKey=bare.key;
+  history.replaceState(null,'','#/assets?route='+encodeURIComponent(bare.key));
   document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
   assert(a.state.routeKey==='','Escape did not cancel a link still waiting for the list');
+  assert(!location.href.includes('route='),'Escape left the cancelled link in the address: '+location.href);
   a.render();
   assert(!document.querySelector('.route'),'A cancelled link opened anyway');
  });

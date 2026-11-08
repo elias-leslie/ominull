@@ -132,10 +132,6 @@ func trustRuleFromArgs(args []string, now time.Time) (trustfabric.Rule, error) {
 		return trustfabric.Rule{}, fmt.Errorf("--scope is required\n%s", trustUsage)
 	}
 	scopeType, scopeID, _ := strings.Cut(*scope, ":")
-	// The hub would drop the id and apply the rule to the whole fleet.
-	if scopeType == trustfabric.ScopeProvider && scopeID != "" {
-		return trustfabric.Rule{}, fmt.Errorf("provider means the whole fleet and takes no id; did you mean client:%s?", scopeID)
-	}
 	rule := trustfabric.Rule{
 		ScopeType: scopeType, ScopeID: scopeID, Action: args[0], Value: args[1], Kind: trustValueKind(args[1]),
 		Port: *port, Proto: *proto, Direction: *direction, Locked: *locked, Justification: *reason,
@@ -146,6 +142,9 @@ func trustRuleFromArgs(args []string, now time.Time) (trustfabric.Rule, error) {
 			return trustfabric.Rule{}, err
 		}
 		rule.ExpiresAt = &at
+	}
+	if _, err := trustfabric.Normalize(rule); err != nil {
+		return trustfabric.Rule{}, err
 	}
 	return rule, nil
 }
@@ -224,6 +223,7 @@ func trustListHolds(list []string, addr string) bool {
 	if err != nil {
 		return false
 	}
+	target = target.Unmap()
 	for _, item := range list {
 		if a, err := netip.ParseAddr(item); err == nil && a == target {
 			return true
@@ -259,11 +259,18 @@ func (c *APIClient) trustShow(args []string) error {
 	if *port != "" && *proto == "" {
 		return fmt.Errorf("--port needs --proto\n%s", trustUsage)
 	}
+	*proto, *direction = strings.ToLower(*proto), strings.ToLower(*direction)
+	if *proto != "" && *proto != trustfabric.ProtoTCP && *proto != trustfabric.ProtoUDP {
+		return fmt.Errorf("--proto must be tcp or udp\n%s", trustUsage)
+	}
+	if *direction != "" && *direction != trustfabric.DirIn && *direction != trustfabric.DirOut {
+		return fmt.Errorf("--direction must be in or out\n%s", trustUsage)
+	}
 	if (*port != "" || *proto != "") && *direction == "" {
 		*direction = trustfabric.DirOut
 	}
 	query := url.Values{"endpoint_id": {args[0]}}
-	for key, value := range map[string]string{"addr": *addr, "port": *port, "proto": strings.ToLower(*proto), "direction": strings.ToLower(*direction)} {
+	for key, value := range map[string]string{"addr": *addr, "port": *port, "proto": *proto, "direction": *direction} {
 		if value != "" {
 			query.Set(key, value)
 		}
@@ -298,7 +305,14 @@ func (c *APIClient) trustShow(args []string) error {
 		if trustListHolds(out.Policy.Enforced, *addr) {
 			onList = "yes"
 		}
-		fmt.Printf("%s: the rules say %s (%s); on the isolated allow list: %s\n", *addr, out.Decision.Action, because, onList)
+		asked := strings.Join(strings.Fields(*proto+" "+*port+" "+*direction), " ")
+		if asked == "" {
+			asked = "the address as a whole"
+		}
+		fmt.Printf("%s, %s: the rules say %s (%s); on the isolated allow list: %s\n", *addr, asked, out.Decision.Action, because, onList)
+		if out.Decision.Action == trustfabric.Deny {
+			fmt.Println("The hub and the signed baseline stay reachable whatever the rules say.")
+		}
 	}
 	printTrustList := func(label string, items []string) {
 		if len(items) == 0 {
