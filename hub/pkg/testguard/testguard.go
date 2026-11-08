@@ -18,7 +18,7 @@ import (
 )
 
 var blocked = []string{"systemd-run", "pkexec", "sudo", "su", "doas", "run0", "machinectl",
-	"tmux", "ssh", "scp", "rsync", "qm", "pct", "reboot", "shutdown", "poweroff"}
+	"tmux", "ssh", "scp", "rsync", "qm", "pct", "reboot", "shutdown", "poweroff", "btrfs", "restic", "rclone"}
 
 var hits string
 
