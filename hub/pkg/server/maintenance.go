@@ -377,6 +377,7 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevCritical, ocsfStatusNew,
 			fmt.Sprintf("%s failed on %s", plural(len(failures), "maintenance package run", "maintenance package runs"), plural(len(failed), "host", "hosts")), failed, unmapped))
 	} else if len(waiting) > 0 {
+		unmapped[pendingHostKey] = true
 		out = append(out, s.feedFinding(now, uid, title, ocsfSevLow, ocsfStatusNew, waitingMessage(waiting[0].Package, waiting[0].Endpoint,
 			waiting[0].Reason, waiting[0].OffSince, len(waiting), len(away)), away, unmapped))
 	} else {
@@ -391,6 +392,10 @@ func (s *Server) maintenanceFindings(now time.Time) ([]feedFinding, error) {
 	}
 	return out, nil
 }
+
+// pendingHostKey marks a finding that only waits on a machine that is off: Aico shows its row as off
+// (pending until the machine is back), not as a warning nobody can act on.
+const pendingHostKey = "pending_host"
 
 // waitingMessage says why a failed run waits on its host: the machine is off
 // and the run needs repeating when it is back.

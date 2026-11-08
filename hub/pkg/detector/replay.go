@@ -299,6 +299,12 @@ func endpointOf(endpoints []storage.Endpoint, id string) storage.Endpoint {
 // expectedRuleFor says whether the tuning's expected rules make a stored
 // finding expected. A lateral sweep is left as it was: its host count is not
 // stored whole.
+// ExpectedBy says whether the tuning's rules make a stored finding expected today, and by which rule.
+// A finding it covers would not be raised again; role is its endpoint's role (ClassContext.RoleOf).
+func ExpectedBy(t storage.DetectionTuning, a storage.AnomalyAlert, role string) (storage.ExpectedRule, bool) {
+	return expectedRuleFor(t, a, role)
+}
+
 func expectedRuleFor(t storage.DetectionTuning, a storage.AnomalyAlert, role string) (storage.ExpectedRule, bool) {
 	kinds := FindingKinds(a)
 	if a.AnomalyType == storage.KindLateralSweep {

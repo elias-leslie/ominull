@@ -135,11 +135,17 @@ func TestMaintenanceFailureWaitsOnOfflineHost(t *testing.T) {
 		!strings.Contains(string(raw), `"off_since"`) || len(f.Resources) != 1 || f.Resources[0].UID != "ep-lap" {
 		t.Fatalf("a failure on a host that is off should wait on it: %+v %s", f, raw)
 	}
+	// Aico shows it as off (pending until the machine is back), not as a warning nobody can act on.
+	if rows := aicoFindingRows([]feedFinding{f}, off); len(rows) != 1 || rows[0].State != "off" || rows[0].Meaning == "" {
+		t.Fatalf("a run waiting on an off machine is an off row: %+v", rows)
+	}
 	ep.LastSeenAt = off
 	if err := srv.store.UpsertEndpoint(*ep); err != nil {
 		t.Fatal(err)
 	}
 	if f := record(off.Add(time.Minute)); f.SeverityID != ocsfSevCritical || f.Unmapped["waiting"] != nil {
 		t.Fatalf("back online and not repeated: critical again: %+v", f)
+	} else if rows := aicoFindingRows([]feedFinding{f}, off); rows[0].State != "warn" {
+		t.Fatalf("critical again is a warning row: %+v", rows)
 	}
 }

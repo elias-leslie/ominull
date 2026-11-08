@@ -542,10 +542,14 @@ func foldRowID(uid string) string {
 	return aicoRowIDBad.ReplaceAllString(uid, "-")
 }
 
-// aicoRowState is warn for a finding that is open and not merely a note.
+// aicoRowState is warn for a finding that is open and not merely a note. A finding that only waits on a
+// machine that is off is off: nothing can be done until the machine is back, so it is not a problem.
 func aicoRowState(f feedFinding) string {
 	if f.StatusID == ocsfStatusResolved || f.SeverityID <= ocsfSevInformational {
 		return "ok"
+	}
+	if pending, _ := f.Unmapped[pendingHostKey].(bool); pending {
+		return "off"
 	}
 	return "warn"
 }

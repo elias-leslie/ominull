@@ -262,34 +262,29 @@ func (s *Store) OpenIncident(tenantID, endpointID, key string, since time.Time) 
 	return id, worst, rows.Err()
 }
 
-// PagedIncident is one incident that paged in a window.
-type PagedIncident struct {
-	Incident string
-	Type     string
-	Host     string
-	Alerts   int
-}
-
-// PagedIncidents lists the incidents of the paging findings raised since a
-// point in time, the drill endpoint aside, most alerts first.
-func (s *Store) PagedIncidents(since time.Time, excludeEndpoint string) ([]PagedIncident, error) {
+// PagedAlerts lists the paging findings raised since a point in time, the
+// drill endpoint aside, oldest first. A page that joined an open incident is
+// included: the caller groups them by evidence.incident.
+func (s *Store) PagedAlerts(since time.Time, excludeEndpoint string) ([]AnomalyAlert, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.Query(`SELECT COALESCE(json_extract(evidence, '$.incident'), id), anomaly_type, hostname, COUNT(*) FROM anomaly_alerts
+	rows, err := s.db.Query(`SELECT id, tenant_id, endpoint_id, hostname, anomaly_type, severity, title, description,
+		COALESCE(evidence, ''), held_reason, process_path, dst_ip, dst_port, timestamp FROM anomaly_alerts
 		WHERE timestamp >= ? AND held_reason IN ('', ?) AND endpoint_id != ? AND json_valid(evidence)
 			AND json_extract(evidence, '$.class') = ?
-		GROUP BY 1 ORDER BY 4 DESC`, since.UTC(), HeldIncident, excludeEndpoint, ClassPage)
+		ORDER BY timestamp`, since.UTC(), HeldIncident, excludeEndpoint, ClassPage)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []PagedIncident
+	var out []AnomalyAlert
 	for rows.Next() {
-		var p PagedIncident
-		if err := rows.Scan(&p.Incident, &p.Type, &p.Host, &p.Alerts); err != nil {
+		var a AnomalyAlert
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.EndpointID, &a.Hostname, &a.AnomalyType, &a.Severity, &a.Title,
+			&a.Description, &a.Evidence, &a.HeldReason, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp); err != nil {
 			return nil, err
 		}
-		out = append(out, p)
+		out = append(out, a)
 	}
 	return out, rows.Err()
 }
