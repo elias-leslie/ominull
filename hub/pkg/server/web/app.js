@@ -1309,7 +1309,6 @@
       beacon_enabled: true, beacon_min_samples: 12, beacon_min_span_minutes: 10,
       beacon_min_interval_seconds: 5, beacon_max_interval_seconds: 3600,
       beacon_score_threshold: 0.8, beacon_cooldown_minutes: 30,
-      first_seen_enabled: true, first_seen_cooldown_minutes: 30,
       bandwidth_enabled: true, bandwidth_cooldown_minutes: 5,
       warmup_hours: 24,
       expected_rules: arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/detection/expected"] && DEMO_CACHE["/api/v1/detection/expected"].rules)
@@ -4101,8 +4100,8 @@
       }
     }) : null;
 
-    /* Hunt leads are the behavioural detectors' findings: first-seen
-       destinations, interpreters reaching out, off-hours activity. They are
+    /* Hunt leads are the behavioural detectors' findings (older ones also
+       include first-seen destinations, interpreters and off-hours activity). They are
        kept for hunting and triage and never raised as alerts, because on a
        host where agents work they describe the agents' ordinary day. */
     var huntTotal = Number(state.huntAlertsTotal) || 0;
@@ -6352,16 +6351,13 @@
     var hiInt = numberField(t.beacon_max_interval_seconds, 10, 86400, 10);
     var bCool = numberField(t.beacon_cooldown_minutes, 1, 1440, 1);
 
-    var ohOn = toggleField(t.off_hours_enabled, "Report off-hours workstation activity");
+    var ohOn = toggleField(t.off_hours_enabled, "Sweep sooner at night");
     var ohStart = numberField(t.off_hours_start, 0, 23, 1);
     var ohEnd = numberField(t.off_hours_end, 0, 23, 1);
     var ohZone = h("input", { type: "text", value: t.off_hours_zone || "Local", placeholder: "Local, UTC, or America/New_York" });
 
-    var fsOn = toggleField(t.first_seen_enabled, "Report first-seen external destinations");
-    var fsCool = numberField(t.first_seen_cooldown_minutes, 1, 1440, 1);
-    var bwOn = toggleField(t.bandwidth_enabled, "Report bandwidth spikes");
+    var bwOn = toggleField(t.bandwidth_enabled, "Report bulk uploads to cloud storage");
     var bwCool = numberField(t.bandwidth_cooldown_minutes, 1, 1440, 1);
-    var bwSamples = numberField(t.bandwidth_min_samples, 4, 1000, 1);
 
     var silenceAfter = numberField(t.silence_after_minutes, 5, 1440, 1);
 
@@ -6381,25 +6377,22 @@
         tuningRow("Interval band", "Seconds. Conversations faster or slower than this are not considered.", h("div", { cls: "form-row" }, loInt, hiInt)),
         tuningRow("Repeat at most every", "Minutes between alerts about the same conversation.", bCool)),
 
-      h("h4", { cls: "tune-head", text: "Off-hours activity" }),
+      h("h4", { cls: "tune-head", text: "Night hours" }),
       h("div", { cls: "tune-list" },
         tuningRow("", "", ohOn.node),
-        tuningRow("Window", "Start and end hour. Wraps midnight when the start is later than the end.", h("div", { cls: "form-row" }, ohStart, ohEnd)),
-        tuningRow("Time zone", "The hub's own zone unless you name one. Written as UTC, this window called an ordinary evening suspicious.", ohZone)),
+        tuningRow("Window", "Start and end hour. A workstation scanning the LAN trips the lateral sweep with fewer hosts inside it. Wraps midnight when the start is later than the end.", h("div", { cls: "form-row" }, ohStart, ohEnd)),
+        tuningRow("Time zone", "The hub's own zone unless you name one.", ohZone)),
 
       h("h4", { cls: "tune-head", text: "Other detectors" }),
       h("div", { cls: "tune-list" },
-        tuningRow("", "", fsOn.node),
-        tuningRow("Repeat at most every", "Minutes, per destination.", fsCool),
         tuningRow("", "", bwOn.node),
-        tuningRow("Transfers required", "A spike is measured against what this process normally sends. Below this many observed transfers the baseline is guesswork, and every large-ish upload looks like an outlier. Shipped default " + (d.bandwidth_min_samples || 20) + ".", bwSamples),
         tuningRow("Repeat at most every", "Minutes, per process.", bwCool),
         tuningRow("", "", h("span", { text: "Agents that stop reporting are always reported. This detector cannot be switched off." })),
         tuningRow("Silent after", "Minutes without a heartbeat before a host is reported as dark. Every other detector here needs telemetry, so stopping the agent is the cheapest way to blind all of them - and a crashed, rebuilt or disconnected host looks the same. One finding per host, and a recovery note when it returns.", silenceAfter)),
 
       h("h4", { cls: "tune-head", text: "New endpoints" }),
       h("div", { cls: "tune-list" },
-        tuningRow("New-host warm-up", "Hours. A host installed this morning has no baseline to be unusual against, and every ordinary thing it does is a first-seen destination. Behavioural findings are held and logged during this window. Set to 0 to judge a host from its first packet.", warmup)),
+        tuningRow("New-host warm-up", "Hours. A host installed this morning has no baseline to be unusual against, and every ordinary thing it does is new to the baseline. Behavioural findings are held and logged during this window. Set to 0 to judge a host from its first packet.", warmup)),
 
       h("h4", { cls: "tune-head", text: "Expected" }),
       h("p", { cls: "why", text: "What counts as expected (a program talking to its vendor, a backup to a known network) is kept as expected rules, one list for every detector. See the Expected rules card on this page. The Expected button on a finding adds a narrow rule there; removing a rule applies at once." }));
@@ -6417,11 +6410,8 @@
         off_hours_start: parseInt(ohStart.value, 10) || 0,
         off_hours_end: parseInt(ohEnd.value, 10) || 0,
         off_hours_zone: ohZone.value.trim() || "Local",
-        first_seen_enabled: fsOn.input.checked,
-        first_seen_cooldown_minutes: parseInt(fsCool.value, 10) || 0,
         bandwidth_enabled: bwOn.input.checked,
         bandwidth_cooldown_minutes: parseInt(bwCool.value, 10) || 0,
-        bandwidth_min_samples: parseInt(bwSamples.value, 10) || 0,
         silence_after_minutes: parseInt(silenceAfter.value, 10) || 0,
         warmup_hours: parseInt(warmup.value, 10) || 0,
         container_cidrs: parseList(containers.value)
@@ -6477,16 +6467,15 @@
     };
     var details = [];
     if (t.beacon_enabled !== false) details.push("Beaconing: " + (t.beacon_min_samples || "\u2014") + " check-ins over " + (t.beacon_min_span_minutes || "\u2014") + " min, confidence " + (t.beacon_score_threshold || "\u2014"));
-    if (t.off_hours_enabled !== false && wrap.window) details.push("Off-hours: " + wrap.window + (wrap.now ? " (hub time " + wrap.now + ")" : ""));
+    if (t.off_hours_enabled !== false && wrap.window) details.push("Night hours: " + wrap.window + (wrap.now ? " (hub time " + wrap.now + ")" : ""));
     details.push(t.warmup_hours ? "New hosts judged after " + t.warmup_hours + "h" : "New hosts judged from their first packet");
     details.push("Expected rules: " + arrayOf(t.expected_rules).length);
 
     var body = h("div", { cls: "card-body stack" },
       h("div", { cls: "uf uf-wrap uf-g2" },
         onOff("Beaconing", t.beacon_enabled === false),
-        onOff("Off-hours", t.off_hours_enabled === false),
-        onOff("First-seen", t.first_seen_enabled === false),
-        onOff("Bandwidth", t.bandwidth_enabled === false)),
+        onOff("Night hours", t.off_hours_enabled === false),
+        onOff("Cloud uploads", t.bandwidth_enabled === false)),
       h("ul", { cls: "det-details" }, details.map(function (x) { return h("li", { text: x }); })));
 
     return card("Detection tuning", body, [

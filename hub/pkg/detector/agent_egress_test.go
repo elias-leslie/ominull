@@ -75,11 +75,11 @@ func TestAnAgentReachingANewDestinationAfterItsBaselineIsReported(t *testing.T) 
 	}
 }
 
-// Agents read the web: a first visit is reported in the digest, never paged,
-// whoever hosts the site. Owner, 2026-10-31, about k8s-kind.netlify.app
+// Agents read the web: a first visit is remembered and nothing is written for
+// it, whoever hosts the site. Owner, 2026-10-31, about k8s-kind.netlify.app
 // (Netlify sits in an AWS customer range): "completely normal for agents to
 // reach websites".
-func TestAnAgentsFirstVisitIsReportedNotPagedWhateverItsHosting(t *testing.T) {
+func TestAnAgentsFirstVisitIsRememberedNotReportedWhateverItsHosting(t *testing.T) {
 	engine, store := noiseEngine(t)
 	start := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	engine.Evaluate(agentEvent("linux-76", claudePath, "api.anthropic.com", "160.79.104.10", 443, 2000, start))
@@ -97,14 +97,13 @@ func TestAnAgentsFirstVisitIsReportedNotPagedWhateverItsHosting(t *testing.T) {
 		engine.checkAgentDestination(ev, c.geo, storage.Endpoint{Hostname: "h76"}, storage.DefaultDetectionTuning(), "claude",
 			agentDestination(ev.Domain, ev.SNI, ev.DstIP, c.geo), false, ev.Timestamp)
 	}
-	got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION")
-	if len(got) != 3 {
-		t.Fatalf("three first visits should raise three findings, got %d", len(got))
+	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 0 {
+		t.Fatalf("three first visits wrote %d findings, want none", len(got))
 	}
-	for _, a := range got {
-		if a.Severity != "MEDIUM" {
-			t.Errorf("%q is %s, want MEDIUM (report only)", a.Title, a.Severity)
-		}
+	// The visits are in the runtime's memory, which a later upload is judged against.
+	list, err := store.ListAgentDestinations("", 10)
+	if err != nil || len(list) != 4 {
+		t.Fatalf("remembered destinations = %d %v, want the baseline one and the three first visits", len(list), err)
 	}
 }
 
@@ -120,8 +119,8 @@ func TestALargeUploadToANewDestinationPagesOnce(t *testing.T) {
 	at := func(d time.Duration) time.Time { return now.Add(d) }
 	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 0, at(0)))
 	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 600<<10, at(30*time.Second)))
-	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 1 || got[0].Severity != "MEDIUM" {
-		t.Fatalf("first contact and 600 KB: want one MEDIUM, got %+v", got)
+	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 0 {
+		t.Fatalf("first contact and 600 KB: want nothing written, got %+v", got)
 	}
 	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 600<<10, at(time.Minute)))
 	engine.Evaluate(agentEvent("linux-77", claudePath, "drop.attacker.example", "198.51.100.40", 443, 2<<20, at(2*time.Minute)))
@@ -208,8 +207,8 @@ func TestAgentBaselinesAreSeededFromProfilesOnce(t *testing.T) {
 	if err != nil || len(list) != 1 || list[0].Destination != "anthropic.com" || list[0].Runtime != "claude" {
 		t.Fatalf("seeded baseline = %+v %v", list, err)
 	}
-	// The seeded history means the baseline week is long over: a new domain now is reported.
-	engine.Evaluate(agentEvent("linux-73", claudePath, "drop.attacker.example", "198.51.100.40", 443, 100, time.Now().UTC()))
+	// The seeded history means the baseline week is long over: a 4 MB first contact now pages.
+	engine.Evaluate(agentEvent("linux-73", claudePath, "drop.attacker.example", "198.51.100.40", 443, 4<<20, time.Now().UTC()))
 	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 1 {
 		t.Fatalf("after seeding, a new destination should be reported, got %d", len(got))
 	}
@@ -226,7 +225,7 @@ func TestAFirstLiveEventDoesNotCancelTheSeed(t *testing.T) {
 	now := time.Now().UTC()
 	engine.Evaluate(agentEvent("linux-74", claudePath, "statsig.anthropic.com", "160.79.104.12", 443, 100, now))
 	engine.SeedAgentBaselines()
-	engine.Evaluate(agentEvent("linux-74", claudePath, "drop.attacker.example", "198.51.100.40", 443, 100, now.Add(time.Second)))
+	engine.Evaluate(agentEvent("linux-74", claudePath, "drop.attacker.example", "198.51.100.40", 443, 4<<20, now.Add(time.Second)))
 	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 1 {
 		t.Fatalf("after a seed that followed a live event, a new destination should be reported, got %d", len(got))
 	}
@@ -250,7 +249,7 @@ func TestRetentionDoesNotReopenTheLearningWeek(t *testing.T) {
 	if removed["agent_egress_destinations"] != 2 || removed["agent_egress_hourly"] != 1 {
 		t.Fatalf("retention removed %v", removed)
 	}
-	engine.Evaluate(agentEvent("linux-75", claudePath, "drop.attacker.example", "198.51.100.40", 443, 100, time.Now().UTC()))
+	engine.Evaluate(agentEvent("linux-75", claudePath, "drop.attacker.example", "198.51.100.40", 443, 4<<20, time.Now().UTC()))
 	if got := anomaliesOfType(t, store, "AGENT_NEW_DESTINATION"); len(got) != 1 {
 		t.Fatalf("a runtime whose destinations aged out is still past its baseline, got %d findings", len(got))
 	}
@@ -267,66 +266,21 @@ func TestANameOnSharedHostingIsKeyedWithItsOwner(t *testing.T) {
 
 // Claude Code sends each turn's whole context to api.anthropic.com, a few
 // megabytes whenever a session is long, and its native build runs as its
-// version number. Production raised seven CRITICAL "far more data than usual"
-// pages in a day for exactly that. The runtime's own maker is judged by the
-// runtime's hourly volume, not the per-connection spike; any other process,
-// any other destination, and a path the agent could not match still are.
-func TestAnAgentRuntimeTalkingToItsOwnMakerIsNotABandwidthSpike(t *testing.T) {
+// version number. Production once raised seven CRITICAL "far more data than
+// usual" pages in a day for exactly that. No per-connection rate finding is
+// written any more; the runtime is judged by its hourly volume.
+func TestAnAgentRuntimeUploadIsJudgedByItsHourlyVolume(t *testing.T) {
 	const claude = "/home/u/.local/share/claude/versions/2.1.301"
-	spike := func(t *testing.T, ev storage.Event) []storage.AnomalyAlert {
-		t.Helper()
-		engine, store := noiseEngine(t)
-		now := time.Now().UTC()
-		for i := 0; i < 40; i++ {
-			base := ev
-			base.Timestamp, base.BytesOut = now.Add(time.Duration(i)*time.Second), 2000+int64(i)
-			engine.Evaluate(base)
-		}
-		ev.Timestamp, ev.BytesOut = now.Add(time.Minute), 150*1024*1024
-		engine.Evaluate(ev)
-		return anomaliesOfType(t, store, "BANDWIDTH_SPIKE")
-	}
-	flow := func(path, ip, domain string) storage.Event {
-		return storage.Event{TenantID: "default", EndpointID: "linux-ws", Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: ip, DstPort: 443, Domain: domain, ProcessPath: path}
-	}
-
-	own := flow(claude, "160.79.104.10", "api.anthropic.com")
-	if got := spike(t, own); len(got) != 0 {
-		t.Fatalf("claude uploading to its own API raised %d bandwidth alert(s): %q", len(got), got[0].Title)
-	}
-	if got := spike(t, flow(claude, "2607:6bc0::10", "api.anthropic.com")); len(got) != 0 {
-		t.Fatalf("claude uploading to its own API over IPv6 raised %d bandwidth alert(s)", len(got))
-	}
-	// Its volume is still judged, against its own hours.
 	engine, store := noiseEngine(t)
-	own.Timestamp, own.BytesOut = time.Now().UTC(), 150*1024*1024
-	engine.Evaluate(own)
+	ev := storage.Event{TenantID: "default", EndpointID: "linux-ws", Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "160.79.104.10", DstPort: 443, Domain: "api.anthropic.com", ProcessPath: claude,
+		Timestamp: time.Now().UTC(), BytesOut: 150 * 1024 * 1024}
+	engine.Evaluate(ev)
+	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
+		t.Fatalf("a per-connection rate finding was written: %q", got[0].Title)
+	}
 	if got := anomaliesOfType(t, store, "AGENT_UPLOAD_VOLUME"); len(got) != 1 {
 		t.Fatalf("150 MB in an hour from claude raised %d upload-volume alerts, want 1", len(got))
-	}
-
-	mismatch := flow(claude, "160.79.104.10", "api.anthropic.com")
-	mismatch.AttributionStatus = pathMismatch
-	spoofedSNI := flow(claude, "198.51.100.9", "")
-	spoofedSNI.SNI = "api.anthropic.com"
-	for name, ev := range map[string]storage.Event{
-		"runtime to elsewhere":     flow(claude, "198.51.100.9", "paste.example.net"),
-		"runtime with no name":     flow(claude, "198.51.100.9", ""),
-		"other process to the API": flow("/usr/bin/curl", "160.79.104.10", "api.anthropic.com"),
-		"unmatched path":           mismatch,
-		"look-alike name":          flow(claude, "198.51.100.9", "anthropic.com.example.net"),
-		// The SNI is the client's to choose: Anthropic's name on any other
-		// address is not Anthropic's service.
-		"own name, other address": flow(claude, "198.51.100.9", "api.anthropic.com"),
-		"own SNI, other address":  spoofedSNI,
-		"own name, next to range": flow(claude, "160.79.106.10", "api.anthropic.com"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if got := spike(t, ev); len(got) != 1 {
-				t.Fatalf("%s raised %d bandwidth alerts, want 1", name, len(got))
-			}
-		})
 	}
 }
 

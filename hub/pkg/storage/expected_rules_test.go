@@ -526,8 +526,8 @@ func TestTheLiveRowAndExclusionsMigrateToRulesWithoutLoosening(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := s.GetDetectionTuning()
-	if got.UpdatedBy != "upgrade" || got.FirstSeenCooldown != 240 || got.WarmupHours != 12 {
-		t.Fatalf("migrated row: by %q cooldown %d warmup %d", got.UpdatedBy, got.FirstSeenCooldown, got.WarmupHours)
+	if got.UpdatedBy != "upgrade" || got.WarmupHours != 12 {
+		t.Fatalf("migrated row (it still holds the retired first_seen_cooldown_minutes): by %q warmup %d", got.UpdatedBy, got.WarmupHours)
 	}
 	if _, err := PrepareDetectionTuning(got); err != nil {
 		t.Fatalf("the migrated row is not one a save would accept: %v", err)

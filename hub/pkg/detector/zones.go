@@ -55,7 +55,7 @@ func labEscapeQuietPort(port uint16) bool {
 // guest's DNS, DHCP and time lookups do not count.
 func (e *Engine) checkLabEscape(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
 	role, quietPath string, now time.Time) {
-	if role != storage.RoleLab || ev.Direction != "OUTBOUND" || !isPrivateIP(ev.DstIP) || netaddr.IsLoopback(ev.DstIP) ||
+	if role != storage.RoleLab || ev.Direction != "OUTBOUND" || servedFlow(ev, cfg) || !isPrivateIP(ev.DstIP) || netaddr.IsLoopback(ev.DstIP) ||
 		labEscapeQuietPort(ev.DstPort) || cfg.IsContainerAddress(ev.DstIP) || isSensorProcess(quietPath) {
 		return
 	}

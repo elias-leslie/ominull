@@ -177,11 +177,8 @@ func TestDetectorEngine(t *testing.T) {
 		}
 	}
 
-	if !foundOffHours {
-		t.Errorf("expected OFF_HOURS_ACTIVITY anomaly to be recorded")
-	}
-	if !foundBwSpike {
-		t.Errorf("expected BANDWIDTH_SPIKE anomaly to be recorded")
+	if foundOffHours || foundBwSpike {
+		t.Errorf("the retired off-hours and bandwidth-spike findings were written (off-hours %v, spike %v)", foundOffHours, foundBwSpike)
 	}
 	if !foundBeacon {
 		t.Errorf("expected C2_BEACONING anomaly to be recorded")

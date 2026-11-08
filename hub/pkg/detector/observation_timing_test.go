@@ -83,22 +83,3 @@ func TestCollectorLossInvalidatesEarlierCadenceWindow(t *testing.T) {
 		t.Fatalf("cadence survived known gaps: %s", found[0].Title)
 	}
 }
-
-func TestBandwidthUsesObservedIntervalRatherThanBatchSize(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		duration time.Duration
-		want     bool
-	}{{"deferred", time.Hour, false}, {"burst", time.Second, true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			engine, db := noiseEngine(t)
-			at := time.Now().UTC()
-			first := at.Add(-tc.duration)
-			engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "rate-host", Timestamp: at, Action: "PERMIT", Direction: "OUTBOUND", Protocol: 17, DstIP: "198.51.100.77", DstPort: 443, BytesOut: 20 * 1024 * 1024, ProcessPath: "/usr/bin/observer-demo", Observation: storage.FlowObservation{Source: "linux-bpf-udp", ByteBasis: "udp_payload", Timing: "socket_io", Count: 1000, FirstAt: &first, LastAt: &at}})
-			found := anomaliesOfType(t, db, "BANDWIDTH_SPIKE")
-			if (len(found) > 0) != tc.want {
-				t.Fatalf("%s interval produced %d bandwidth findings", tc.duration, len(found))
-			}
-		})
-	}
-}

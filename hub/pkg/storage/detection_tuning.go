@@ -38,17 +38,11 @@ type DetectionTuning struct {
 	BeaconScore       float64 `json:"beacon_score_threshold"`
 	BeaconCooldownMin int     `json:"beacon_cooldown_minutes"`
 
-	FirstSeenOn       bool `json:"first_seen_enabled"`
-	FirstSeenCooldown int  `json:"first_seen_cooldown_minutes"`
+	// BandwidthOn and BandwidthCooldown govern the bulk cloud-storage upload
+	// report. The first-seen, off-hours and bandwidth-spike findings were
+	// retired; a saved row that still holds their fields loads without them.
 	BandwidthOn       bool `json:"bandwidth_enabled"`
 	BandwidthCooldown int  `json:"bandwidth_cooldown_minutes"`
-
-	// BandwidthMinSamples is how many transfers a process must have made before
-	// its mean and standard deviation are treated as a baseline. This was four,
-	// compiled in: four observations do not describe a process's normal volume,
-	// and the first genuinely large upload after them scores an enormous
-	// z-score against the noise of the previous three.
-	BandwidthMinSamples int `json:"bandwidth_min_samples"`
 
 	// SilenceOn and SilenceAfterMinutes are the alert-on-absence rule: an agent
 	// that stops reporting is a finding, not a gap.
@@ -156,6 +150,13 @@ type DetectionTuning struct {
 	// collector trouble, noted as such, never an alert or a baseline sample.
 	MaxPlausibleRateMbps int `json:"max_plausible_rate_mbps"`
 
+	// EphemeralPortFrom is the first port the network's clients take for their
+	// own end of a connection (Linux 32768, Windows and the IANA range 49152).
+	// A flow from a port below it to a port at or above it is a listener
+	// answering a client, which is served, not this host reaching out: the
+	// sweep and lab-escape rules leave it alone.
+	EphemeralPortFrom int `json:"ephemeral_port_from"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy string    `json:"updated_by"`
 }
@@ -198,11 +199,8 @@ func defaultDetectionTuning() DetectionTuning {
 		BeaconScore:       0.80,
 		BeaconCooldownMin: 30,
 
-		FirstSeenOn:         true,
-		FirstSeenCooldown:   30,
-		BandwidthOn:         true,
-		BandwidthCooldown:   5,
-		BandwidthMinSamples: 20,
+		BandwidthOn:       true,
+		BandwidthCooldown: 5,
 
 		SilenceOn:           true,
 		SilenceAfterMinutes: 15,
@@ -225,6 +223,7 @@ func defaultDetectionTuning() DetectionTuning {
 		NewDestUploadMB:      1,
 		NewDestWindowMin:     60,
 		MaxPlausibleRateMbps: 10000,
+		EphemeralPortFrom:    32768,
 	}
 }
 
@@ -401,9 +400,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 		t.BeaconScore = 0.80
 	}
 	t.BeaconCooldownMin = clampInt(t.BeaconCooldownMin, 1, 1440, 30)
-	t.FirstSeenCooldown = clampInt(t.FirstSeenCooldown, 1, 1440, 30)
 	t.BandwidthCooldown = clampInt(t.BandwidthCooldown, 1, 1440, 5)
-	t.BandwidthMinSamples = clampInt(t.BandwidthMinSamples, 4, 1000, 20)
 	// Below five minutes this reports every reboot and every flaky link; above
 	// a day it is not alerting on absence, it is noticing it eventually.
 	t.SilenceAfterMinutes = clampInt(t.SilenceAfterMinutes, 5, 1440, 15)
@@ -446,6 +443,7 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.NewDestUploadMB = clampInt(t.NewDestUploadMB, 1, 100000, 1)
 	t.NewDestWindowMin = clampInt(t.NewDestWindowMin, 1, 1440, 60)
 	t.MaxPlausibleRateMbps = clampInt(t.MaxPlausibleRateMbps, 100, 1000000, 10000)
+	t.EphemeralPortFrom = clampInt(t.EphemeralPortFrom, 1024, 65535, 32768)
 	return t
 }
 

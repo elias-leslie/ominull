@@ -3,8 +3,8 @@ package detector
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -63,133 +63,6 @@ func anomaliesOfType(t *testing.T, store *storage.Store, kind string) []storage.
 	return out
 }
 
-// The fleet's own Windows agent reported six CRITICAL "Bandwidth Exfiltration
-// Spike" findings for its mTLS heartbeat to its own hub. The destination is on
-// the LAN, and the process is the one this product installs.
-func TestTheAgentsOwnHubTrafficIsNotExfiltration(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	for i := 0; i < 40; i++ {
-		bytes := int64(2000)
-		if i == 39 {
-			bytes = 40 * 1024 * 1024
-		}
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "win-01", Timestamp: now.Add(time.Duration(i) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "10.0.0.58", DstPort: 9443, BytesOut: bytes,
-			ProcessPath: `C:\Program Files\Ominull\ominulld.exe`,
-		})
-	}
-	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
-		t.Errorf("the agent reporting to its own hub raised %d exfiltration alert(s): %+v", len(got), got[0])
-	}
-}
-
-// svchost.exe is the first name in the shipped quiet-process list and it still
-// raised spikes, because the bandwidth detector never consulted the list.
-func TestAQuietProcessDoesNotRaiseABandwidthSpike(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	for i := 0; i < 40; i++ {
-		bytes := int64(1500)
-		if i == 39 {
-			bytes = 80 * 1024 * 1024
-		}
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "win-02", Timestamp: now.Add(time.Duration(i) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "20.190.135.3", DstPort: 443, BytesOut: bytes,
-			ProcessPath: `C:\Windows\System32\svchost.exe`, UserIdentity: `NT AUTHORITY\NETWORK SERVICE`,
-		})
-	}
-	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
-		t.Errorf("a quiet process raised %d bandwidth alert(s)", len(got))
-	}
-}
-
-// The detector still has to fire on a real one, against a real baseline, and
-// say which it is.
-func TestARealSpikeAgainstARealBaselineStillFires(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	for i := 0; i < 30; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-01", Timestamp: now.Add(time.Duration(i) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "198.51.100.9", DstPort: 443, BytesOut: 1000 + int64(i),
-			ProcessPath: "/usr/bin/suspicious",
-		})
-	}
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-01", Timestamp: now.Add(time.Minute),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "198.51.100.9", DstPort: 443, BytesOut: 500 * 1024 * 1024,
-		ProcessPath: "/usr/bin/suspicious",
-	})
-	got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE")
-	if len(got) != 1 {
-		t.Fatalf("expected one bandwidth alert for a genuine outlier, got %d", len(got))
-	}
-	if got[0].Severity != "CRITICAL" {
-		t.Errorf("a transfer hundreds of deviations out is CRITICAL, got %q", got[0].Severity)
-	}
-	if !strings.Contains(got[0].Details, "Samples:") {
-		t.Errorf("the alert must carry the baseline it was judged against: %q", got[0].Details)
-	}
-}
-
-// The first CRITICAL production raised after the scoring fix was chrome sending
-// 255KB to Google: 51 standard deviations out, because a browser's transfer
-// sizes are heavy-tailed and the 50KB floor was below a single page load. The
-// destination is in the shipped quiet-organisation list, so the operator has
-// already answered this.
-func TestAnOrdinaryBrowserUploadToAVouchedNetworkIsNotASpike(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	for i := 0; i < 30; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-10", Timestamp: now.Add(time.Duration(i) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "142.250.176.69", DstPort: 443, BytesOut: 6000 + int64(i*10),
-			ProcessPath: "/usr/bin/chrome",
-		})
-	}
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-10", Timestamp: now.Add(time.Minute),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "142.250.176.69", DstPort: 443, BytesOut: 255536,
-		ProcessPath: "/usr/bin/chrome",
-	})
-	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
-		t.Fatalf("a quarter-megabyte upload to a vouched network raised %d alerts: %q", len(got), got[0].Title)
-	}
-}
-
-// The same transfer to a network nobody has vouched for is still below the
-// floor: a megabyte is the smallest transfer worth waking someone for.
-func TestATransferBelowTheFloorIsNotASpikeAnywhere(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	for i := 0; i < 30; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-11", Timestamp: now.Add(time.Duration(i) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "198.51.100.40", DstPort: 443, BytesOut: 6000 + int64(i*10),
-			ProcessPath: "/usr/bin/chrome",
-		})
-	}
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-11", Timestamp: now.Add(time.Minute),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "198.51.100.40", DstPort: 443, BytesOut: 255536,
-		ProcessPath: "/usr/bin/chrome",
-	})
-	if got := anomaliesOfType(t, store, "BANDWIDTH_SPIKE"); len(got) != 0 {
-		t.Fatalf("a quarter-megabyte upload raised %d bandwidth alerts", len(got))
-	}
-}
-
 // Chrome and the ChatGPT client holding Google's push channel open scored 1.00
 // with zero payload variation. Google is in the shipped quiet-organisation
 // list; the exemption applied only on port 443, and the push channel is 5228.
@@ -229,176 +102,7 @@ func TestBeaconingToAnUnvouchedNetworkStillFires(t *testing.T) {
 	}
 }
 
-// 1,584 of the fleet's alerts were first-seen destinations. The suppression key
-// was the destination address, and a destination is first-seen exactly once, so
-// the cooldown could never match and nothing bounded the rate.
-func TestOneNewCounterpartyIsOneAlertNotOnePerEdgeAddress(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	// Twelve different addresses inside one owner's network.
-	for i := 0; i < 12; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-05", Timestamp: now.Add(time.Duration(i) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "159.65.0." + itoa(i+1), DstPort: 443, BytesOut: 200,
-			ProcessPath: "/usr/bin/firefox",
-		})
-	}
-	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
-	if len(got) > 1 {
-		t.Errorf("twelve edges of one network raised %d alerts; the counterparty is one relationship", len(got))
-	}
-	if len(got) == 1 && !strings.Contains(got[0].Title, "DigitalOcean") {
-		t.Errorf("the alert must name the counterparty it is about, got %q", got[0].Title)
-	}
-}
-
-// With the guessing removed, an address the table cannot attribute has no
-// owner. The alert has to say that rather than print an empty pair of brackets.
-func TestAnUnattributableDestinationSaysSoRatherThanNamingNothing(t *testing.T) {
-	engine, store := noiseEngine(t)
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-06", Timestamp: time.Now().UTC(),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "203.0.113.77", DstPort: 443, BytesOut: 200,
-		ProcessPath: "/usr/bin/firefox",
-	})
-	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
-	if len(got) != 1 {
-		t.Fatalf("expected one alert for a genuinely new destination, got %d", len(got))
-	}
-	if strings.Contains(got[0].Details, "()") || strings.Contains(got[0].Description, "()") {
-		t.Errorf("empty attribution was printed as if it were a value: %q / %q", got[0].Description, got[0].Details)
-	}
-	if !strings.Contains(got[0].Details, "not resolved") {
-		t.Errorf("an unattributable address must be described as such: %q", got[0].Details)
-	}
-}
-
-// Production, ten minutes after the geo fabrication was fixed: seven MEDIUM
-// "First connection to an unattributed network" alerts from one workstation,
-// all inside four minutes. An address with no owner cannot repeat as a cooldown
-// key any more than the address itself could, so every unnamed destination a
-// browser reached became its own alert. They belong to one finding per host.
-func TestUnnamedDestinationsAreOneRollingFindingPerHost(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	// Twenty addresses in documentation ranges, which the attribution table
-	// deliberately does not name, spread over four minutes.
-	for i := 0; i < 20; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-07", Timestamp: now.Add(time.Duration(i*12) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "198.51.100." + itoa(i+1), DstPort: 443, BytesOut: 200,
-			ProcessPath: "/usr/bin/firefox",
-		})
-	}
-	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
-	if len(got) != 1 {
-		t.Fatalf("twenty unnamed destinations raised %d alerts; the whole point of the rollup is that they are one", len(got))
-	}
-	if got[0].Severity != "LOW" {
-		t.Errorf("severity was %q; an address nothing can attribute is the weakest evidence this detector has", got[0].Severity)
-	}
-	// The alert has to carry what it swallowed, or the rollup is just silence.
-	if !strings.Contains(got[0].Details, "folded") {
-		t.Errorf("the alert does not say that later destinations were folded into it: %q", got[0].Details)
-	}
-}
-
-// The rollup must not swallow the next window: after the cooldown, a further
-// unnamed destination is reported again, and it counts the ones it folded.
-func TestTheUnnamedRollupReopensAfterItsCooldown(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-08", Timestamp: now,
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "198.51.100.10", DstPort: 443, BytesOut: 200,
-		ProcessPath: "/usr/bin/firefox",
-	})
-	for i := 0; i < 5; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-08", Timestamp: now.Add(time.Duration(i+1) * time.Minute),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: "198.51.100.2" + itoa(i), DstPort: 443, BytesOut: 200,
-			ProcessPath: "/usr/bin/firefox",
-		})
-	}
-	if got := anomaliesOfType(t, store, "NOVEL_DESTINATION"); len(got) != 1 {
-		t.Fatalf("inside one cooldown window the endpoint raised %d alerts; expected 1", len(got))
-	}
-
-	// Expire the cooldown the way time would, then reach somewhere new again.
-	engine.mu.Lock()
-	for k := range engine.alertCooldown {
-		engine.alertCooldown[k] = time.Now().Add(-2 * time.Hour)
-	}
-	engine.mu.Unlock()
-
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-08", Timestamp: now.Add(90 * time.Minute),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "198.51.100.90", DstPort: 443, BytesOut: 200,
-		ProcessPath: "/usr/bin/firefox",
-	})
-	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
-	if len(got) != 2 {
-		t.Fatalf("after the cooldown expired the endpoint raised %d alerts; expected a second", len(got))
-	}
-	var second storage.AnomalyAlert
-	for _, a := range got {
-		if a.Timestamp.After(second.Timestamp) {
-			second = a
-		}
-	}
-	if !strings.Contains(second.Title, "6 first connections") {
-		t.Errorf("the second alert must count what it folded, got %q", second.Title)
-	}
-}
-
-// A destination the table can name is still its own finding: folding those
-// together would hide the one thing this detector is for.
-func TestANamedCounterpartyIsStillItsOwnFinding(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-09", Timestamp: now,
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "159.65.0.5", DstPort: 443, BytesOut: 200,
-		ProcessPath: "/usr/bin/firefox",
-	})
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-09", Timestamp: now.Add(time.Second),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "198.51.100.5", DstPort: 443, BytesOut: 200,
-		ProcessPath: "/usr/bin/firefox",
-	})
-	got := anomaliesOfType(t, store, "NOVEL_DESTINATION")
-	if len(got) != 2 {
-		t.Fatalf("a named counterparty and an unnamed address raised %d alerts; expected one each", len(got))
-	}
-	var named, unnamed bool
-	for _, a := range got {
-		if strings.Contains(a.Title, "DigitalOcean") && a.Severity == "MEDIUM" {
-			named = true
-		}
-		if strings.Contains(a.Title, "unattributed") && a.Severity == "LOW" {
-			unnamed = true
-		}
-	}
-	if !named || !unnamed {
-		t.Errorf("expected one MEDIUM naming the owner and one LOW for the unnamed address, got %+v", got)
-	}
-}
-
-func itoa(n int) string {
-	if n < 10 {
-		return string(rune('0' + n))
-	}
-	return string(rune('0'+n/10)) + string(rune('0'+n%10))
-}
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // A quiet organisation on its own is a very wide statement: it silences every
 // process on every port to a network that fronts a large part of the web. That
@@ -541,14 +245,13 @@ func TestInterpretersAreMatchedOnTheirNameNotTheTailOfThePath(t *testing.T) {
 func TestAFindingCarriesWhatRanAndAsWhom(t *testing.T) {
 	engine, store := noiseEngine(t)
 	now := time.Now().UTC()
-	beaconEvents(engine, "linux-22", "104.16.0.2", "/usr/bin/python3.13", now.Add(-2*time.Hour))
 
-	// One more flow of the same conversation, carrying the process context the
-	// agent reports.
+	// A floor finding (SMB leaving the network), carrying the process context
+	// the agent reports.
 	engine.Evaluate(storage.Event{
 		TenantID: "default", EndpointID: "linux-22", Timestamp: now,
 		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "104.16.0.2", DstPort: 443, BytesOut: 12 * 1024 * 1024,
+		DstIP: "104.16.0.2", DstPort: 445, BytesOut: 12 * 1024 * 1024,
 		ProcessPath:  "/usr/bin/python3.13",
 		ProcessID:    4242,
 		ParentPID:    991,
@@ -558,7 +261,7 @@ func TestAFindingCarriesWhatRanAndAsWhom(t *testing.T) {
 		ExecutableSHA256: "9f2b1c0d4e5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e",
 	})
 
-	found := append(anomaliesOfType(t, store, "C2_BEACONING"), anomaliesOfType(t, store, "BANDWIDTH_SPIKE")...)
+	found := anomaliesOfType(t, store, "SENSITIVE_PORT_EGRESS")
 	if len(found) == 0 {
 		t.Fatal("expected a finding for this conversation")
 	}
@@ -618,63 +321,6 @@ func TestNonObjectEvidenceIsLeftAlone(t *testing.T) {
 	}
 }
 
-// Network transfer sizes are heavy-tailed: a browser sends a few kilobytes a
-// hundred times and eight megabytes once. A mean and a standard deviation are
-// not robust to that, which is how a 255 KB upload came to score 51 sigma.
-
-func TestOneLargeOrdinaryUploadDoesNotDeafenTheBaseline(t *testing.T) {
-	var stats bandwidthStats
-	for i := 0; i < 40; i++ {
-		stats.observe(float64(5000 + i*17))
-	}
-	// One genuinely large but ordinary upload.
-	stats.observe(8 * 1024 * 1024)
-	// A second transfer of the same size is now unremarkable for this process
-	// under a mean-based score, because the first one moved the mean and blew
-	// up the standard deviation. Under median/MAD it still stands out.
-	_, _, z, _ := stats.observe(8 * 1024 * 1024)
-	if z <= 3.5 {
-		t.Fatalf("a second 8 MB upload scored %.2f; one large sample deafened the baseline", z)
-	}
-}
-
-func TestPerfectlyRegularTrafficDoesNotDivideByZero(t *testing.T) {
-	var stats bandwidthStats
-	for i := 0; i < 30; i++ {
-		stats.observe(4096)
-	}
-	median, mad, z, samples := stats.observe(4096)
-	if math.IsNaN(z) || math.IsInf(z, 0) {
-		t.Fatalf("a constant series produced z=%v (median %v, mad %v)", z, median, mad)
-	}
-	if z > 3.5 {
-		t.Fatalf("a transfer identical to every previous one scored %.2f over %d samples", z, samples)
-	}
-
-	// The same series, then a transfer a hundred times larger, must still be a
-	// finding rather than an infinity.
-	_, _, big, _ := stats.observe(4096 * 100)
-	if math.IsInf(big, 0) || math.IsNaN(big) {
-		t.Fatalf("an outlier against constant traffic produced %v", big)
-	}
-	if big <= 3.5 {
-		t.Fatalf("a hundredfold transfer against constant traffic scored only %.2f", big)
-	}
-}
-
-func TestTheBaselineIsBoundedAndRecent(t *testing.T) {
-	var stats bandwidthStats
-	for i := 0; i < 500; i++ {
-		stats.observe(1000)
-	}
-	if len(stats.samples) != bandwidthRingSize {
-		t.Fatalf("the baseline retained %d samples, want %d", len(stats.samples), bandwidthRingSize)
-	}
-	if stats.count != 500 {
-		t.Fatalf("the observed count is %d, want 500", stats.count)
-	}
-}
-
 // Staging data in the file-sharing service the estate uses every day is the
 // technique, so being vouched for is not an answer here.
 func TestBulkUploadToStorageIsReportedEvenForAVouchedPair(t *testing.T) {
@@ -709,77 +355,6 @@ func TestOrdinaryDocumentSizedTrafficToStorageIsNotAFinding(t *testing.T) {
 	})
 	if got := anomaliesOfType(t, store, "CLOUD_STORAGE_EGRESS"); len(got) != 0 {
 		t.Fatalf("a 2 MB upload raised %d storage findings", len(got))
-	}
-}
-
-// "An interpreter talked to the internet" describes every developer machine and
-// most servers. Correcting the interpreter match turned one ordinary Python
-// worker into seventy-one HIGH findings in a morning, one per CDN address for
-// the same conversation.
-func TestAnInterpreterReachingOneCounterpartyIsOneFinding(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-
-	// The same owner behind a dozen edge addresses, which is how a CDN answers.
-	for i := 0; i < 12; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-40", Timestamp: now.Add(time.Duration(i) * time.Second),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			DstIP: fmt.Sprintf("23.32.3.%d", 10+i), DstPort: 443, BytesOut: 800,
-			ProcessPath: "/usr/bin/python3.13",
-			CommandLine: "python -m app.worker",
-		})
-	}
-
-	got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS")
-	if len(got) != 1 {
-		t.Fatalf("twelve edge addresses of one counterparty raised %d findings", len(got))
-	}
-	if got[0].Severity != "MEDIUM" {
-		t.Fatalf("a named edge network is a MEDIUM finding, got %q", got[0].Severity)
-	}
-}
-
-func TestAnInterpreterReachingRentedComputeIsTheLouderFinding(t *testing.T) {
-	engine, store := noiseEngine(t)
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-41", Timestamp: time.Now().UTC(),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "159.65.0.9", DstPort: 8443, BytesOut: 800,
-		ProcessPath: "/usr/bin/python3.13",
-	})
-
-	got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS")
-	if len(got) != 1 {
-		t.Fatalf("expected one finding, got %d", len(got))
-	}
-	if got[0].Severity != "HIGH" {
-		t.Fatalf("an interpreter reaching rented compute on an odd port is HIGH, got %q", got[0].Severity)
-	}
-}
-
-// The operator's own answer still applies here: a rule they have written for a
-// program and a network is not reported.
-func TestARuleForAnInterpreterAndNetworkIsNotReported(t *testing.T) {
-	engine, store := noiseEngine(t)
-
-	tuning := storage.DefaultDetectionTuning()
-	tuning.ExpectedRules = append(tuning.ExpectedRules, storage.ExpectedRule{ID: "py-akamai", Reason: "fixture",
-		Programs: []storage.ExpectedProgram{{Path: "/usr/bin/python3.13"}}, Networks: []string{"as20940"}})
-	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
-		t.Fatalf("saving tuning: %v", err)
-	}
-	engine.InvalidateTuning()
-
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-42", Timestamp: time.Now().UTC(),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "23.32.3.11", DstPort: 443, BytesOut: 800,
-		ProcessPath: "/usr/bin/python3.13",
-	})
-
-	if got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS"); len(got) != 0 {
-		t.Fatalf("a covered pair raised %d findings: %q", len(got), got[0].Title)
 	}
 }
 
@@ -865,31 +440,6 @@ func TestABrowserBeaconingToAnUnnamedNetworkIsStillReported(t *testing.T) {
 
 	if got := anomaliesOfType(t, store, "C2_BEACONING"); len(got) == 0 {
 		t.Fatal("a browser beaconing to an unattributable network raised nothing")
-	}
-}
-
-// Amazon is a quiet network by its AS number, and rented compute inside that
-// AS is not: "amazon" as a fragment of a name used to silence first-seen for
-// every EC2 machine. Google's own range stays quiet.
-func TestFirstSeenToRentedComputeInsideAQuietASIsReported(t *testing.T) {
-	engine, store := noiseEngine(t)
-	now := time.Now().UTC()
-	// 54.0.0.0/8 is Amazon in the built-in table, rented until a feed says otherwise.
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-70", Timestamp: now,
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "54.1.2.3", DstPort: 443, BytesOut: 200, ProcessPath: "/usr/bin/curl",
-	})
-	if got := anomaliesOfType(t, store, "NOVEL_DESTINATION"); len(got) != 1 {
-		t.Fatalf("first contact with rented compute in a quiet AS raised %d findings, want 1", len(got))
-	}
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-70", Timestamp: now.Add(time.Second),
-		Action: "PERMIT", Direction: "OUTBOUND",
-		DstIP: "8.8.8.8", DstPort: 443, BytesOut: 200, ProcessPath: "/usr/bin/curl",
-	})
-	if got := anomaliesOfType(t, store, "NOVEL_DESTINATION"); len(got) != 1 {
-		t.Fatalf("Google's own range is no longer quiet: %d findings", len(got))
 	}
 }
 
@@ -1031,32 +581,5 @@ func TestAProgramRuleDoesNotSilenceAPathMismatch(t *testing.T) {
 	}
 	if n := run("path_mismatch"); n == 0 {
 		t.Fatal("a program shown at the covered path but running another file was covered")
-	}
-}
-
-// A workload rule for an installed program names it by path too, and an
-// any-network rule for a path reaches every destination, rented compute
-// included. So a program bind-mounted over the listed path, which the agent
-// reports as path_mismatch, is not known by it: its first connection to a
-// hosting network is still a first-seen finding, while the real program's is
-// not.
-func TestAKnownPathWorkloadDoesNotVouchForAPathMismatch(t *testing.T) {
-	run := func(status string) int {
-		engine, store := noiseEngine(t)
-		addExpectedRule(t, engine, store, workloadRule("/usr/local/bin/synctool", storage.AnyNetwork, false))
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-sync", Timestamp: time.Now().UTC(),
-			Action: "PERMIT", Direction: "OUTBOUND",
-			// 159.65.0.5 is DigitalOcean: rented compute, never seen before.
-			DstIP: "159.65.0.5", DstPort: 443, BytesOut: 200,
-			ProcessPath: "/usr/local/bin/synctool", UserIdentity: "alice", AttributionStatus: status,
-		})
-		return len(anomaliesOfType(t, store, "NOVEL_DESTINATION"))
-	}
-	if n := run("authoritative"); n != 0 {
-		t.Fatalf("the known tool's first connection raised %d first-seen finding(s)", n)
-	}
-	if n := run("path_mismatch"); n != 1 {
-		t.Fatalf("a program shown at the known tool's path but running another file raised %d first-seen finding(s), want 1", n)
 	}
 }

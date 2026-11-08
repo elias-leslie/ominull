@@ -10,7 +10,7 @@ import (
 // The detection floor.
 //
 // These are the lists and numbers the floor detectors run on: the
-// sensitive-port list, the bandwidth burst and outlier bounds, the port-sweep
+// sensitive-port list, the port-sweep
 // and lateral-sweep thresholds, and how long a host may go quiet. They stay
 // in code because raising any of them suppresses alerts, and each has changed
 // at most once. The tuning row (storage.DetectionTuning) may tighten past
@@ -28,23 +28,10 @@ func FloorPort(p int) bool { return storage.IsFloorPort(p) }
 
 // Bandwidth.
 const (
-	// bandwidthOutlierZ and bandwidthOutlierBytes make a baselined transfer an
-	// outlier: a modified z-score past 3.5 and more than a megabyte.
-	bandwidthOutlierZ     = 3.5
-	bandwidthOutlierBytes = 1 << 20
-	// bandwidthCriticalZ makes an outlier CRITICAL rather than HIGH.
-	bandwidthCriticalZ = 8
-	// bandwidthBurstBytes is a single transfer large enough to raise without
-	// a baseline. It is raised even with bandwidth_enabled off.
-	bandwidthBurstBytes = 10 << 20
-	// floorBandwidthMinSamples is the most transfers a process may need before
-	// its baseline counts (the tuning's bandwidth_min_samples).
-	floorBandwidthMinSamples = 20
 	// floorBandwidthCooldown is the longest one process's bandwidth finding
 	// stays one finding (bandwidth_cooldown_minutes).
 	floorBandwidthCooldown = 5
-	// floorWarmupHours is the longest a new endpoint's behavioural findings,
-	// the bandwidth burst among them, may be held (the tuning's warmup_hours).
+	// floorWarmupHours is the longest a new endpoint's behavioural findings may be held (the tuning's warmup_hours).
 	floorWarmupHours = 24
 )
 
@@ -67,11 +54,6 @@ const (
 	// may reach before the sweep pages anyway (an expected rule's max_hosts).
 	floorAdminFanoutMax = storage.AdminFanoutMaxDefault
 )
-
-// floorRuleEvidence marks a finding raised by a floor rule inside an
-// operator-tuned detector (the bandwidth burst), so the record says it was
-// the floor that raised it.
-const floorRuleEvidence = `{"floor_rule":"bandwidth_burst"}`
 
 // sweepCooldown is how long a port or lateral sweep from one process stays one
 // finding.
@@ -96,7 +78,6 @@ func ClampToFloor(t storage.DetectionTuning) (storage.DetectionTuning, []string)
 		t.SilenceOn = true
 	}
 	ceiling("silence_after_minutes", &t.SilenceAfterMinutes, floorSilenceMinutes)
-	ceiling("bandwidth_min_samples", &t.BandwidthMinSamples, floorBandwidthMinSamples)
 	ceiling("bandwidth_cooldown_minutes", &t.BandwidthCooldown, floorBandwidthCooldown)
 	ceiling("warmup_hours", &t.WarmupHours, floorWarmupHours)
 	// An admin fan-out rule may admit at most floorAdminFanoutMax hosts.

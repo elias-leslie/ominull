@@ -167,7 +167,7 @@ func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
 		{"vendor network added", withRule("vendor-antigravity", func(r *storage.ExpectedRule) { r.Networks = append(r.Networks, "as396982") }), []string{"expected_rules"}},
 		{"vendor exclusion removed", withRule("vendor-antigravity", func(r *storage.ExpectedRule) { r.ExceptDomains = r.ExceptDomains[1:] }), []string{"expected_rules"}},
 		{"vendor exclusion added", withRule("vendor-antigravity", func(r *storage.ExpectedRule) { r.ExceptDomains = append(r.ExceptDomains, "www.googleapis.com") }), nil},
-		{"mixed", func(t *storage.DetectionTuning) { t.BeaconScore = 0.6; t.FirstSeenOn = false }, []string{"first_seen_enabled"}},
+		{"mixed", func(t *storage.DetectionTuning) { t.BeaconScore = 0.6; t.BandwidthOn = false }, []string{"bandwidth_enabled"}},
 		{"agent runtime removed", func(t *storage.DetectionTuning) { t.AgentRuntimes = t.AgentRuntimes[1:] }, []string{"agent_runtimes"}},
 		{"agent-heavy by observation", func(t *storage.DetectionTuning) { t.AgentHeavyObserved = !t.AgentHeavyObserved }, nil},
 		{"wider window", func(t *storage.DetectionTuning) { t.OffHoursStart = 21 }, nil},
@@ -318,7 +318,7 @@ func TestConcurrentSavesAreNotLost(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
-	bodies := []string{`{"beacon_score_threshold":0.7}`, `{"warmup_hours":6}`, `{"beacon_cooldown_minutes":10}`, `{"first_seen_cooldown_minutes":10}`, `{"bandwidth_cooldown_minutes":2}`, `{"silence_after_minutes":10}`}
+	bodies := []string{`{"beacon_score_threshold":0.7}`, `{"warmup_hours":6}`, `{"beacon_cooldown_minutes":10}`, `{"bandwidth_cooldown_minutes":2}`, `{"silence_after_minutes":10}`}
 	var wg sync.WaitGroup
 	for _, b := range bodies {
 		wg.Add(1)
@@ -331,7 +331,7 @@ func TestConcurrentSavesAreNotLost(t *testing.T) {
 	}
 	wg.Wait()
 	got := store.GetDetectionTuning()
-	if got.BeaconScore != 0.7 || got.WarmupHours != 6 || got.BeaconCooldownMin != 10 || got.FirstSeenCooldown != 10 || got.BandwidthCooldown != 2 || got.SilenceAfterMinutes != 10 {
+	if got.BeaconScore != 0.7 || got.WarmupHours != 6 || got.BeaconCooldownMin != 10 || got.BandwidthCooldown != 2 || got.SilenceAfterMinutes != 10 {
 		t.Fatalf("a concurrent save was lost: %+v", got)
 	}
 }
@@ -505,8 +505,8 @@ func TestAMixedSaveIsSignedOnlyForItsLoosening(t *testing.T) {
 	shipped := tuningFields(storage.DefaultDetectionTuning())
 	body := map[string]any{}
 	for _, k := range []string{"agent_baseline_days", "agent_upload_floor_mb", "bandwidth_cooldown_minutes",
-		"bandwidth_min_samples", "beacon_cooldown_minutes", "beacon_min_samples", "beacon_min_span_minutes",
-		"first_seen_cooldown_minutes", "warmup_hours"} {
+		"beacon_cooldown_minutes", "beacon_min_samples", "beacon_min_span_minutes",
+		"warmup_hours"} {
 		body[k] = shipped[k].(float64) - 1
 	}
 	rules := append(storage.DefaultDetectionTuning().ExpectedRules, storage.ExpectedRule{ID: "extra-curl", Reason: "r",
@@ -914,15 +914,15 @@ func TestTheAuthorizationRecordsWhatALooseningChangeWouldBlind(t *testing.T) {
 	defer store.Close()
 	body := `{"id":"uploads","name":"uploads","prefixes":["203.0.113.0/24"],"reason":"backup target"}`
 	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/expected", body, ""), http.StatusOK)
-	if !strings.HasPrefix(a.Summary, "BLINDS 2 FLOOR CASES: bandwidth burst, rare beacon; ") {
+	if !strings.HasPrefix(a.Summary, "BLINDS 1 FLOOR CASE: rare beacon; ") {
 		t.Fatalf("rule authorization = %q", a.Summary)
 	}
 
 	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"container_cidrs":["192.168.250.0/24"]}`, ""), http.StatusOK)
-	// The burst the saved rule already blinds is not this change's; the
+	// The beacon the saved rule already blinds is not this change's; the
 	// lateral sweeps and the lab escape are.
 	if !strings.HasPrefix(a.Summary, "BLINDS ") || !strings.Contains(a.Summary, "lateral sweep, lab escape") ||
-		strings.Contains(a.Summary, "bandwidth burst") || !strings.HasSuffix(a.Summary, "container_cidrs +192.168.250.0/24") {
+		strings.Contains(a.Summary, "rare beacon") || !strings.HasSuffix(a.Summary, "container_cidrs +192.168.250.0/24") {
 		t.Fatalf("tuning authorization = %q", a.Summary)
 	}
 	if len(store.GetDetectionTuning().ContainerCIDRs) != 1 {

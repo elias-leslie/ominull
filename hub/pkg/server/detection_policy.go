@@ -512,14 +512,11 @@ var tuningDirections = map[string]tuningDirection{
 	"beacon_score_threshold":      higherLoosens,
 	"beacon_cooldown_minutes":     higherLoosens,
 
-	"first_seen_enabled":          offLoosens,
-	"first_seen_cooldown_minutes": higherLoosens,
-	"bandwidth_enabled":           offLoosens,
-	"bandwidth_cooldown_minutes":  higherLoosens,
-	"bandwidth_min_samples":       higherLoosens,
-	"silence_enabled":             offLoosens,
-	"silence_after_minutes":       higherLoosens,
-	"warmup_hours":                higherLoosens,
+	"bandwidth_enabled":          offLoosens,
+	"bandwidth_cooldown_minutes": higherLoosens,
+	"silence_enabled":            offLoosens,
+	"silence_after_minutes":      higherLoosens,
+	"warmup_hours":               higherLoosens,
 
 	"container_cidrs": addLoosens,
 	"expected_rules":  rulesField,
@@ -553,6 +550,7 @@ var tuningDirections = map[string]tuningDirection{
 	"new_dest_upload_mb":      higherLoosens,
 	"new_dest_window_min":     lowerLoosens,
 	"max_plausible_rate_mbps": lowerLoosens,
+	"ephemeral_port_from":     anyLoosens, // a port range decides which flows count as served
 }
 
 // tuningLoosens names each field whose change loosens detection; empty means

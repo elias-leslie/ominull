@@ -101,37 +101,6 @@ func saveKnown(t *testing.T, engine *Engine, store *storage.Store, mutate func(*
 	engine.InvalidateTuning()
 }
 
-// A known worker is quiet; another script run by the same interpreter, and
-// the same interpreter running inline code, are still reported.
-func TestAKnownWorkloadIsQuietWithoutVouchingForItsInterpreter(t *testing.T) {
-	engine, store := noiseEngine(t)
-	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
-		tu.ExpectedRules = append(tu.ExpectedRules, workloadRule("python3.13 /srv/releases/*/.venv/bin/python -m app.worker", storage.AnyNetwork, false))
-	})
-	now := time.Now().UTC()
-	sendTo := func(endpoint, ip, cmd string) {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: endpoint, Timestamp: now,
-			Action: "PERMIT", Direction: "OUTBOUND", DstIP: ip, DstPort: 443, BytesOut: 800,
-			ProcessPath: "/usr/bin/python3.13", CommandLine: cmd,
-		})
-	}
-	send := func(endpoint, cmd string) { sendTo(endpoint, "159.65.0.9", cmd) }
-	sendTo("linux-50", "23.32.3.20", "/srv/releases/abc123/.venv/bin/python -m app.worker")
-	if got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS"); len(got) != 0 {
-		t.Fatalf("the known worker raised %d findings: %q", len(got), got[0].Title)
-	}
-	// Its command line is all that names it, so on rented compute it is judged.
-	send("linux-54", "/srv/releases/abc123/.venv/bin/python -m app.worker")
-	send("linux-51", "/srv/releases/abc123/.venv/bin/python /tmp/upload.py")
-	send("linux-52", "/srv/releases/abc123/.venv/bin/python -c import os")
-	// "*" stays inside one path segment, so a look-alike path is not the worker.
-	send("linux-53", "/srv/releases/x/y/.venv/bin/python -m app.worker")
-	if got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS"); len(got) != 4 {
-		t.Fatalf("rented compute, an unknown script, inline code and a look-alike path should each be reported, got %d", len(got))
-	}
-}
-
 // A known workload talking to its named owner is quiet; the same workload on
 // rented compute is not, because anyone can rent a machine in that range.
 func TestANamedOwnerNeverCoversRentedCompute(t *testing.T) {
@@ -237,61 +206,6 @@ func TestWorkloadRulesNeedAReasonAndNeverCoverInlineCode(t *testing.T) {
 	}
 }
 
-func offHoursEngine(t *testing.T) (*Engine, *storage.Store, time.Time) {
-	engine, store := noiseEngine(t)
-	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
-		tu.OffHoursZone, tu.OffHoursStart, tu.OffHoursEnd = "UTC", 22, 5
-	})
-	day := time.Now().UTC().Truncate(24 * time.Hour)
-	return engine, store, day.Add(3 * time.Hour)
-}
-
-// One conversation through a CDN reaches a new edge address every few minutes;
-// each used to be a separate HIGH off-hours finding.
-func TestOffHoursActivityIsOneFindingPerCounterparty(t *testing.T) {
-	engine, store, night := offHoursEngine(t)
-	for i := 0; i < 6; i++ {
-		engine.Evaluate(storage.Event{
-			TenantID: "default", EndpointID: "linux-60", Timestamp: night.Add(time.Duration(i) * time.Minute),
-			Action: "PERMIT", Direction: "OUTBOUND", DstIP: fmt.Sprintf("23.32.3.%d", 20+i), DstPort: 443, BytesOut: 800,
-			ProcessPath: "/usr/bin/curl", CommandLine: "curl https://example.com",
-		})
-	}
-	if got := anomaliesOfType(t, store, "OFF_HOURS_ACTIVITY"); len(got) != 1 {
-		t.Fatalf("six edge addresses of one owner raised %d off-hours findings", len(got))
-	}
-}
-
-func TestAKnownServiceIsNotOffHours(t *testing.T) {
-	engine, store, night := offHoursEngine(t)
-	saveKnown(t, engine, store, func(tu *storage.DetectionTuning) {
-		a, b := workloadRule("node /usr/local/bin/corepack", storage.AnyNetwork, false), workloadRule("node /opt/node/lib/npm-cli.js", "as13335", false)
-		a.ID, b.ID = "corepack", "npm"
-		tu.ExpectedRules = append(tu.ExpectedRules, a, b)
-	})
-	// A tool known only for one owner is not a service: a build at night is news.
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-62", Timestamp: night,
-		Action: "PERMIT", Direction: "OUTBOUND", DstIP: "23.32.3.41", DstPort: 443, BytesOut: 800,
-		ProcessPath: "/opt/node/bin/node", CommandLine: "node /opt/node/lib/npm-cli.js ci",
-	})
-	if got := anomaliesOfType(t, store, "OFF_HOURS_ACTIVITY"); len(got) != 1 {
-		t.Fatalf("an owner-scoped tool at night should be off-hours, got %d", len(got))
-	}
-	engine.Evaluate(storage.Event{
-		TenantID: "default", EndpointID: "linux-61", Timestamp: night,
-		Action: "PERMIT", Direction: "OUTBOUND", DstIP: "23.32.3.40", DstPort: 443, BytesOut: 800,
-		ProcessPath: "/opt/node/bin/node", CommandLine: "node /usr/local/bin/corepack pnpm install",
-	})
-	if got := anomaliesOfType(t, store, "OFF_HOURS_ACTIVITY"); len(got) != 1 {
-		t.Fatalf("a known service raised off-hours findings: %d in all", len(got))
-	}
-	// Its counterparty is still judged: an unnamed address is not covered for an interpreter.
-	if got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS"); len(got) == 0 {
-		t.Fatal("a known service reaching an unnamed address should be reported")
-	}
-}
-
 func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 	at := time.Date(2026, 10, 7, 3, 0, 0, 0, time.UTC)
 	asn := map[string]string{"Cloudflare, Inc.": "AS13335", "GitHub, Inc.": "AS36459"}
@@ -304,7 +218,7 @@ func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 		{ID: "c", AnomalyType: "OFF_HOURS_ACTIVITY", EndpointID: "e", ProcessPath: "/usr/bin/curl", Evidence: ev("curl x", "GitHub, Inc."), Timestamp: at},
 		{ID: "d", AnomalyType: "OFF_HOURS_ACTIVITY", EndpointID: "e", ProcessPath: "/usr/bin/curl", Evidence: ev("curl y", "GitHub, Inc."), Timestamp: at.Add(5 * time.Minute)},
 		{ID: "e", AnomalyType: "ENDPOINT_SILENT", EndpointID: "s", Timestamp: at},
-		// The same program reaching the same owner inside the cooldown is not novel.
+		// Replay applies the rules only: no cooldown folding any more.
 		{ID: "f", AnomalyType: "NOVEL_PROCESS_EGRESS", EndpointID: "e", ProcessPath: "/usr/bin/curl", Evidence: ev("curl z", "GitHub, Inc."), Timestamp: at.Add(10 * time.Minute)},
 		{ID: "g", AnomalyType: "NOVEL_PROCESS_EGRESS", EndpointID: "e", ProcessPath: "/usr/bin/curl", Evidence: ev("curl z", "GitHub, Inc."), Timestamp: at.Add(2 * time.Hour)},
 	}
@@ -316,14 +230,14 @@ func TestReplayJudgesRecordedFindingsAgainstATuning(t *testing.T) {
 	for _, d := range res.Decisions {
 		kept[d.ID] = d.Kept
 	}
-	want := map[string]bool{"a": false, "b": true, "c": true, "d": false, "e": true, "f": false, "g": true}
+	want := map[string]bool{"a": false, "b": true, "c": true, "d": true, "e": true, "f": true, "g": true}
 	for id, k := range want {
 		if kept[id] != k {
 			t.Errorf("finding %s kept=%v, want %v", id, kept[id], k)
 		}
 	}
-	if res.Before != 7 || res.After != 4 {
-		t.Fatalf("before/after = %d/%d, want 7/4", res.Before, res.After)
+	if res.Before != 7 || res.After != 6 {
+		t.Fatalf("before/after = %d/%d, want 7/6", res.Before, res.After)
 	}
 }
 

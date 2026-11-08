@@ -361,6 +361,77 @@ func TestPortScanSkipsLoopbackAndReplies(t *testing.T) {
 	}
 }
 
+// The pveproxy shape: a daemon (perl) listening on 8006 answers many clients.
+// The agent reports every accepted connection as the listener's port talking
+// to the client's own port, once per client socket, so the host seemed to reach
+// many ports and many hosts. A listener's replies are served, never a scan or a
+// fan-out, whatever the clients' ports are (Linux ephemeral, Windows ephemeral).
+func TestAListenerAnsweringManyClientsIsServedNotScanning(t *testing.T) {
+	engine, store := noiseEngine(t)
+	now := time.Now().UTC()
+	for i := 0; i < 40; i++ {
+		port := uint16(33000 + i*700) // across the Linux and the Windows ephemeral ranges
+		engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "pve", Timestamp: now.Add(time.Duration(i) * 100 * time.Millisecond),
+			Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6, SrcIP: "10.0.0.5", SrcPort: 8006,
+			DstIP: "10.0.0." + itoa(20+i), DstPort: port, BytesOut: 4000, ProcessPath: "/usr/bin/perl", UserIdentity: "www-data"})
+		// One client opening many connections to the same listener.
+		engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "pve", Timestamp: now.Add(time.Duration(i) * 100 * time.Millisecond),
+			Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6, SrcIP: "10.0.0.5", SrcPort: 8006,
+			DstIP: "10.0.0.99", DstPort: uint16(40000 + i), BytesOut: 4000, ProcessPath: "/usr/bin/perl", UserIdentity: "www-data"})
+	}
+	for _, kind := range []string{"PORT_SCAN_RECON", "LATERAL_PORT_SWEEP", "LAB_ESCAPE"} {
+		if got := anomaliesOfType(t, store, kind); len(got) != 0 {
+			t.Fatalf("a listener answering clients raised %d %s findings: %q", len(got), kind, got[0].Title)
+		}
+	}
+	// The same process reaching out from its own ephemeral ports is still a fan-out.
+	for i := 0; i < 40; i++ {
+		engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "pve", Timestamp: now.Add(time.Minute + time.Duration(i)*100*time.Millisecond),
+			Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6, SrcIP: "10.0.0.5", SrcPort: uint16(50000 + i),
+			DstIP: "10.0.0." + itoa(100+i), DstPort: 8006, BytesOut: 400, ProcessPath: "/usr/bin/perl", UserIdentity: "www-data"})
+	}
+	if got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP"); len(got) != 1 {
+		t.Fatalf("the same process fanning out from ephemeral ports raised %d sweeps, want 1", len(got))
+	}
+}
+
+// The ephemeral boundary is policy data: a network whose clients start lower
+// than the default counts those replies as served too.
+func TestTheEphemeralRangeIsTuningData(t *testing.T) {
+	ev := storage.Event{Direction: "OUTBOUND", SrcPort: 8006, DstPort: 20000}
+	cfg := storage.DefaultDetectionTuning()
+	if servedFlow(ev, cfg) {
+		t.Fatal("a reply to port 20000 is served under the default 32768 boundary")
+	}
+	cfg.EphemeralPortFrom = 10000
+	if !servedFlow(ev, cfg) {
+		t.Fatal("a reply to port 20000 is not served with ephemeral_port_from 10000")
+	}
+	if servedFlow(storage.Event{Direction: "OUTBOUND", SrcPort: 50000, DstPort: 8006}, cfg) || servedFlow(storage.Event{Direction: "OUTBOUND", DstPort: 50000}, cfg) {
+		t.Fatal("a client's own connection, or a flow with no local port, is served")
+	}
+}
+
+// The retired novelty, off-hours and rate findings write nothing, while
+// destination history is still kept for the new-place upload rule.
+func TestRetiredNoiseFindingsAreNotWritten(t *testing.T) {
+	engine, store := noiseEngine(t)
+	night := time.Now().UTC().Truncate(24 * time.Hour).Add(3 * time.Hour)
+	for i := 0; i < 30; i++ {
+		engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "linux-01", Timestamp: night.Add(time.Duration(i) * time.Second),
+			Action: "PERMIT", Direction: "OUTBOUND", DstIP: "198.51.100.9", DstPort: 443, BytesOut: 1000 + int64(i), ProcessPath: "/usr/bin/suspicious"})
+	}
+	engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "linux-01", Timestamp: night.Add(time.Minute),
+		Action: "PERMIT", Direction: "OUTBOUND", DstIP: "198.51.100.9", DstPort: 443, BytesOut: 500 << 20, ProcessPath: "/usr/bin/suspicious"})
+	engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "linux-01", Timestamp: night, Action: "PERMIT", Direction: "OUTBOUND",
+		DstIP: "159.65.0.9", DstPort: 443, BytesOut: 200, ProcessPath: "/usr/bin/python3.13", CommandLine: "python3.13 x.py"})
+	for _, kind := range []string{"OFF_HOURS_ACTIVITY", "NOVEL_PROCESS_EGRESS", "NOVEL_DESTINATION", "BANDWIDTH_SPIKE"} {
+		if got := anomaliesOfType(t, store, kind); len(got) != 0 {
+			t.Fatalf("%d %s findings were written", len(got), kind)
+		}
+	}
+}
+
 // HTTPS to a public resolver that carried nothing out looked nothing up.
 func TestResolverBypassNeedsBytesOnHTTPS(t *testing.T) {
 	ev := storage.Event{Direction: "OUTBOUND", DstIP: "1.1.1.1", DstPort: 443}

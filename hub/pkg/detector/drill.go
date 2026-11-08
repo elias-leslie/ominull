@@ -153,9 +153,6 @@ func DrillWith(store *storage.Store, now time.Time, tuning *storage.DetectionTun
 	}
 	cases = append(cases, run(DrillCase{Rule: "lateral sweep", Want: "LATERAL_PORT_SWEEP"}, live, fanout))
 
-	cases = append(cases, run(DrillCase{Rule: "bandwidth burst", Want: "BANDWIDTH_SPIKE", WantClass: storage.ClassRecord}, live,
-		[]storage.Event{flow(drillProgram+"uploader", "203.0.113.69", 443, bandwidthBurstBytes+1<<20, 0)}))
-
 	// A connection test that carried data out is not a connection test: the
 	// resolver bypass is raised and the feed must not explain it away.
 	probe := flow("/usr/bin/bash", "8.8.8.8", 53, 512, 0)

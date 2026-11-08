@@ -165,9 +165,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("beacon span", before.BeaconMinSpanMin, after.BeaconMinSpanMin)
 	add("beacon interval band", before.BeaconMinInterval*100000+before.BeaconMaxInterval, after.BeaconMinInterval*100000+after.BeaconMaxInterval)
 	add("beacon cooldown", before.BeaconCooldownMin, after.BeaconCooldownMin)
-	add("first-seen enabled", before.FirstSeenOn, after.FirstSeenOn)
 	add("bandwidth enabled", before.BandwidthOn, after.BandwidthOn)
-	add("bandwidth baseline size", before.BandwidthMinSamples, after.BandwidthMinSamples)
 	add("learning period", before.WarmupHours, after.WarmupHours)
 	listDelta := func(name string, a, b []string) {
 		had := map[string]bool{}

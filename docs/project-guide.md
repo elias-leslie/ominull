@@ -342,16 +342,13 @@ nothing and the next save drops it. Rules that lapse within
 `policy_expiry_warn_days` (hub setting, default 30, 1 to 89), or lapsed in the
 last week, make the health findings' `ominull.detection.expiring` medium (a
 daily agent item) with how to renew: re-POST the rule with the same id and a
-later `expires_at`. Novelty and off-hours findings fold to one per program and
-counterparty per first-seen cooldown. The tuning save is a patch over what is
+later `expires_at`. The tuning save is a patch over what is
 saved; sending `expected_rules` replaces the whole list, and the retired lists
 (`quiet_processes`, `quiet_orgs`, `quiet_clients`, `quiet_pairs`,
 `known_workloads`, `agent_runtime_vendors`, `admin_fanout_*`) are refused with a
 400 pointing here. At upgrade the hub carried every saved entry of those lists
 into rules with the reach it had and nothing wider. Check a change with the
-replay route before saving it: `cut` is the best case, and `worst_cut` allows for
-findings that a silenced one kept folded live and that were therefore never
-recorded (`may_surface`).
+replay route before saving it (`cut` is the share of recorded findings it silences).
 
 Marking a finding expected (the console's Expected button, or
 `/api/v1/detection/expected/mark`) writes the narrowest rule that covers it: the
@@ -361,13 +358,12 @@ only, and an expiry only when `days` is given. It is refused for the floor, a pr
 agent could not attribute, an unnamed address, rented compute and Cloud Storage.
 
 Detection floor (`hub/pkg/detector/floor.go`). The sensitive ports
-(23/135/445/3389), the bandwidth outlier and 10 MB burst bounds, the port-sweep
+(23/135/445/3389), the port-sweep
 and lateral-sweep thresholds and the longest silence (15 min) are code. Where
-the tuning holds a weaker `silence_after_minutes`, `bandwidth_min_samples`,
+the tuning holds a weaker `silence_after_minutes`,
 `bandwidth_cooldown_minutes`, `warmup_hours` or a rule's `max_hosts`, the floor value runs instead and the
 feed's detection-policy note says so (`floor_clamped`); a stricter value runs
-as saved. Silence cannot be switched off, and the 10 MB burst is raised with
-`bandwidth_enabled` off. A workload rule's
+as saved. Silence cannot be switched off. A workload rule's
 `expires_at` is at most 90 days out when added, changed or renewed. The
 threat-list match, sensitive-port egress, port sweep, lateral sweep and
 resolver bypass run before the expected rules and ignore them: no rule
@@ -417,8 +413,13 @@ Detection tiers (`hub/pkg/storage/anomaly_tier.go`, `hub/pkg/detector/tier.go`).
 Paging comes only from deterministic detectors: canary and decoy hits, silence
 and return against presence, sweeps, threat intelligence, beaconing, volume,
 sensitive ports and the agent egress rules. The behavioural detectors
-(`NOVEL_DESTINATION`, `NOVEL_PROCESS_EGRESS`, `OFF_HOURS_ACTIVITY`) write hunt
-leads: stored in full with `held_reason` `hunt` and `tier` in the evidence, out
+(`NOVEL_DESTINATION`, `NOVEL_PROCESS_EGRESS`, `OFF_HOURS_ACTIVITY`,
+`BANDWIDTH_SPIKE`, and the first-visit record of `AGENT_NEW_DESTINATION`) no
+longer write anything: the hub keeps each program's and destination's first-seen
+history (new-place upload needs it) but raises no finding for novelty, the hour
+or a rate outlier. Rows they wrote earlier stay readable, and the kinds stay in
+the expected-rule vocabulary so saved rules that name them still load. Earlier
+hunt leads were: stored in full with `held_reason` `hunt` and `tier` in the evidence, out
 of every open count, the default alert list and the Aico push summary, shown
 under HUNT LEADS (`GET /api/v1/anomalies?held=hunt`, `hunt_total`) and bounded
 by the anomaly retention. On agent-heavy endpoints (tuning
@@ -433,8 +434,7 @@ only on demand. Findings
 recorded before the tiers were moved once at startup (setting
 `anomaly_hunt_tier_backfill_v1`). The replay route reports `paging`: before
 (every kept finding not held by learning) and after (kept findings of paging
-detectors), by type and by host. The detectors' code stays until labelled drills
-compare both tiers. The health findings carry the leads as
+detectors), by type and by host. The health findings carry the leads as
 `ominull.anomalies.hunt` (always informational).
 
 Agent egress (`agent_runtimes`, `agent_*` in the tuning) keeps a baseline per

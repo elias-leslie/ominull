@@ -254,10 +254,10 @@ func (e *Engine) checkAgentEgress(ev storage.Event, geo threatintel.GeoRecord, e
 
 // checkAgentDestination judges a runtime reaching dest. Agents read the web
 // for a living - documentation, issue trackers, a project's site during a
-// bug hunt - so somewhere new is reported (MEDIUM, the agent-egress digest)
-// and never pages on its own, whoever hosts it: most of the web sits on
-// rented compute, and an address the hub could not name is usually a site
-// whose lookup it did not see. What pages (HIGH) is the exfiltration shape:
+// bug hunt - so somewhere new is remembered and never reported on its own,
+// whoever hosts it: most of the web sits on rented compute, and an address
+// the hub could not name is usually a site whose lookup it did not see. What
+// is reported, and pages (HIGH), is the exfiltration shape:
 // the runtime sending new_dest_upload_mb or more to the new destination
 // within new_dest_window_min of first reaching it. A connection's first
 // report carries no bytes on Linux (the agent's first counter reading is its
@@ -279,29 +279,22 @@ func (e *Engine) checkAgentDestination(ev storage.Event, geo threatintel.GeoReco
 	line, window := firstContactUpload(cfg)
 	total := seen.BytesBefore + sent
 	large := total >= line && seen.BytesBefore < line && now.Sub(seen.FirstSeen) <= window
-	if seen.Known && !large {
+	if !large {
+		// A first visit is only remembered (ObserveAgentDestination above);
+		// nothing is written for it. Only the first-contact upload is a finding.
 		return
 	}
-	alert := storage.AnomalyAlert{
+	e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
 		ID: uuid.New().String(), TenantID: ev.TenantID, EndpointID: ev.EndpointID, Hostname: endpoint.Hostname,
-		AnomalyType: "AGENT_NEW_DESTINATION", Technique: "T1567", Severity: "MEDIUM",
-		Title:       fmt.Sprintf("%s reached a destination it never has: %s", runtime, dest),
-		Description: fmt.Sprintf("Agent runtime %s connected to %s:%d (%s), outside everything it has reached on this endpoint since %s.", runtime, ev.DstIP, ev.DstPort, describeOwner(geo), seen.Since.UTC().Format("2006-01-02")),
-		Details:     fmt.Sprintf("Runtime: %s | Destination: %s | Process: %s | Sent: %s | %s", runtime, dest, ev.ProcessPath, humanBytes(sent), describeOwner(geo)),
+		AnomalyType: "AGENT_NEW_DESTINATION", Technique: "T1567", Severity: "HIGH",
+		Title: fmt.Sprintf("%s sent %s to a destination it never has: %s", runtime, humanBytes(total), dest),
+		Description: fmt.Sprintf("Agent runtime %s sent %s to %s:%d (%s) within %s of first reaching it; nothing it has reached on this endpoint since %s went there before.",
+			runtime, humanBytes(total), ev.DstIP, ev.DstPort, describeOwner(geo), minutesPhrase(now.Sub(seen.FirstSeen)), seen.Since.UTC().Format("2006-01-02")),
+		Details: fmt.Sprintf("Runtime: %s | Destination: %s | Process: %s | Sent since first contact: %s | First contact: %s | %s",
+			runtime, dest, ev.ProcessPath, humanBytes(total), seen.FirstSeen.UTC().Format(time.RFC3339), describeOwner(geo)),
+		Evidence:    uploadEvidence(dest, total, seen.FirstSeen),
 		ProcessPath: ev.ProcessPath, DstIP: ev.DstIP, DstPort: ev.DstPort, Timestamp: now,
-	}
-	if large {
-		alert.Severity = "HIGH"
-		alert.Title = fmt.Sprintf("%s sent %s to a destination it never has: %s", runtime, humanBytes(total), dest)
-		alert.Description = fmt.Sprintf("Agent runtime %s sent %s to %s:%d (%s) within %s of first reaching it; nothing it has reached on this endpoint since %s went there before.",
-			runtime, humanBytes(total), ev.DstIP, ev.DstPort, describeOwner(geo), minutesPhrase(now.Sub(seen.FirstSeen)), seen.Since.UTC().Format("2006-01-02"))
-		alert.Details = fmt.Sprintf("Runtime: %s | Destination: %s | Process: %s | Sent since first contact: %s | First contact: %s | %s",
-			runtime, dest, ev.ProcessPath, humanBytes(total), seen.FirstSeen.UTC().Format(time.RFC3339), describeOwner(geo))
-		alert.Evidence = uploadEvidence(dest, total, seen.FirstSeen)
-	} else {
-		alert.Evidence = uploadEvidence(dest, -1, seen.FirstSeen)
-	}
-	e.recordAnomaly(ev, geo, endpoint, alert)
+	})
 }
 
 // minutesPhrase reads a duration within the first-contact window: "a minute",
@@ -322,13 +315,9 @@ func firstNonEmpty(v ...string) string {
 	return ""
 }
 
-// uploadEvidence is the first-contact upload a new-destination finding
-// carries; sent < 0 means nothing was uploaded past the line.
+// uploadEvidence is the first-contact upload a new-destination finding carries.
 func uploadEvidence(dest string, sent int64, first time.Time) string {
-	fields := map[string]any{"destination": dest, "first_contact": first.UTC().Format(time.RFC3339)}
-	if sent >= 0 {
-		fields["first_upload_bytes"] = sent
-	}
+	fields := map[string]any{"destination": dest, "first_contact": first.UTC().Format(time.RFC3339), "first_upload_bytes": sent}
 	raw, _ := json.Marshal(fields)
 	return string(raw)
 }

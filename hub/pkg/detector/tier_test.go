@@ -8,10 +8,10 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// The behavioural detectors write hunt leads, never alerts; on an agent-heavy
-// endpoint the lead is also muted to LOW with the detector's severity kept.
-// Deterministic detectors keep paging.
-func TestBehaviouralFindingsAreHuntLeadsAndMutedOnAgentHeavyHosts(t *testing.T) {
+// A hunt-tier finding (the new-device finding of the retired subnet sweep is
+// the one type left) is held as a lead; on an agent-heavy endpoint it is also
+// muted to LOW with the detector's severity kept. Paging types are untouched.
+func TestHuntLeadsAreHeldAndMutedOnAgentHeavyHosts(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		heavy     bool
@@ -23,34 +23,15 @@ func TestBehaviouralFindingsAreHuntLeadsAndMutedOnAgentHeavyHosts(t *testing.T) 
 		{"agent runtime observed", false, "LOW", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			engine, store := noiseEngine(t)
+			cfg := storage.DefaultDetectionTuning()
 			if tc.heavy {
-				cfg := store.GetDetectionTuning()
 				cfg.AgentHeavyEndpoints = []string{"linux-41"}
-				if _, err := store.SaveDetectionTuning(cfg, "test"); err != nil {
-					t.Fatal(err)
-				}
 			}
-			now := time.Now().UTC()
-			if tc.name == "agent runtime observed" {
-				if _, err := store.ObserveAgentDestination("default", "linux-41", "claude-code", "api.example", 10, now); err != nil {
-					t.Fatal(err)
-				}
-			}
-			engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "linux-41", Timestamp: now,
-				Action: "PERMIT", Direction: "OUTBOUND", DstIP: "159.65.0.9", DstPort: 8443, BytesOut: 800,
-				ProcessPath: "/usr/bin/python3.13"})
-			engine.Evaluate(storage.Event{TenantID: "default", EndpointID: "linux-41", Timestamp: now,
-				Action: "PERMIT", Direction: "OUTBOUND", DstIP: "159.65.0.10", DstPort: 3389, BytesOut: 800,
-				ProcessPath: "/usr/bin/xfreerdp"})
-
-			got := anomaliesOfType(t, store, "NOVEL_PROCESS_EGRESS")
-			if len(got) != 1 {
-				t.Fatalf("expected one interpreter finding, got %d", len(got))
-			}
-			a := got[0]
+			observed := func() bool { return tc.name == "agent runtime observed" }
+			a := storage.AnomalyAlert{AnomalyType: "NOVEL_DESTINATION", EndpointID: "linux-41", Severity: "HIGH", Evidence: `{"command_line":"x"}`}
+			applyTier(&a, storage.Endpoint{ID: "linux-41"}, cfg, observed)
 			if a.HeldReason != storage.HeldHunt || storage.TierOf(a) != storage.TierHunt || a.Severity != tc.wantSev {
-				t.Fatalf("interpreter finding held %q severity %q, want hunt %s", a.HeldReason, a.Severity, tc.wantSev)
+				t.Fatalf("hunt finding held %q severity %q, want hunt %s", a.HeldReason, a.Severity, tc.wantSev)
 			}
 			var ev map[string]any
 			if err := json.Unmarshal([]byte(a.Evidence), &ev); err != nil {
@@ -60,15 +41,10 @@ func TestBehaviouralFindingsAreHuntLeadsAndMutedOnAgentHeavyHosts(t *testing.T) 
 				(tc.wantMuted && ev["detector_severity"] != "HIGH") {
 				t.Fatalf("evidence = %v", ev)
 			}
-			if ev["command_line"] == nil && ev["protocol_name"] == nil {
-				t.Fatalf("flow context lost: %v", ev)
-			}
-			sens := anomaliesOfType(t, store, "SENSITIVE_PORT_EGRESS")
-			if len(sens) != 1 || sens[0].HeldReason != "" || sens[0].Severity != "CRITICAL" {
-				t.Fatalf("a deterministic finding must keep paging: %+v", sens)
-			}
-			if n, _ := store.CountAnomalyAlerts("", true); n != 1 {
-				t.Fatalf("open count = %d, want only the paging finding", n)
+			sweep := storage.AnomalyAlert{AnomalyType: "SENSITIVE_PORT_EGRESS", Severity: "CRITICAL"}
+			applyTier(&sweep, storage.Endpoint{ID: "linux-41"}, cfg, observed)
+			if sweep.HeldReason != "" || sweep.Severity != "CRITICAL" {
+				t.Fatalf("a deterministic finding must keep paging: %+v", sweep)
 			}
 		})
 	}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,95 +19,19 @@ import (
 
 type IsolateFunc func(endpointID string, reason string) error
 
-// bandwidthRingSize bounds what a process's baseline is built from. Sixty-four
-// transfers is enough to describe an ordinary working volume and recent enough
-// that a machine whose job changed last week is judged on what it does now.
-const bandwidthRingSize = 64
-
-type bandwidthStats struct {
-	samples []float64 // most recent first bandwidthRingSize transfers, unordered
-	next    int
-	count   int64
-}
-
-// observe scores a transfer against the baseline built from the transfers
-// before it, and only then folds it into that baseline.
-//
-// The order matters and used to be the other way round. Scoring a value against
-// a distribution that already contains it suppresses exactly the outliers this
-// detector exists to find: the new point pulls the centre toward itself and
-// inflates the spread it is then divided by.
-//
-// The statistic is the modified z-score, 0.6745·(x−median)/MAD, not the mean
-// and standard deviation this used to compute. Network transfer sizes are
-// heavy-tailed - a browser sends a few kilobytes a hundred times and eight
-// megabytes once - and a mean with a standard deviation is not robust to that:
-// one large ordinary upload lifts both, so the next ordinary upload scores
-// modestly while the first scored fifty. The median and the median absolute
-// deviation are unmoved by a handful of extreme values, which is the whole
-// reason the robust statistics literature reaches for them on data shaped like
-// this.
-//
-// The returned centre, spread and count describe the baseline as it stood
-// before this value, which is what the alert then quotes.
-func (b *bandwidthStats) observe(val float64) (median float64, mad float64, z float64, baseline int64) {
-	baseline = b.count
-	median, mad = b.summary()
-
-	switch {
-	case baseline < 2:
-		// Nothing to compare against yet.
-	default:
-		// A process whose transfers are nearly all the same size has a MAD at
-		// or near zero, and dividing by it turned a 3 MB request against a
-		// 10 B/s median into a z-score of ten million. The spread is floored
-		// at a twentieth of the median, and at a kilobyte, so the score says
-		// how far out the transfer is on a scale a person can read.
-		z = 0.6745 * (val - median) / math.Max(mad, math.Max(median/20, 1024))
-	}
-
-	if len(b.samples) < bandwidthRingSize {
-		b.samples = append(b.samples, val)
-	} else {
-		b.samples[b.next] = val
-		b.next = (b.next + 1) % bandwidthRingSize
-	}
-	b.count++
-
-	return median, mad, z, baseline
-}
-
-// summary returns the median and the median absolute deviation of the retained
-// samples. medianOf copies before sorting, so the ring keeps its insertion
-// order and the oldest entry stays the one overwritten next.
-func (b *bandwidthStats) summary() (median float64, mad float64) {
-	if len(b.samples) == 0 {
-		return 0, 0
-	}
-	median = medianOf(b.samples)
-
-	deviations := make([]float64, len(b.samples))
-	for i, v := range b.samples {
-		deviations[i] = math.Abs(v - median)
-	}
-	return median, medianOf(deviations)
-}
-
 type Engine struct {
 	store          *storage.Store
 	onAutoIsolate  IsolateFunc
 	eventsChan     <-chan storage.Event
 	mu             sync.Mutex
 	portHistory    map[string][]portAccess            // endpointID -> accesses
-	bwTracker      *windowCache[*bandwidthStats]      // bounded endpoint/process histories
 	beaconTracker  *windowCache[*beaconWindow]        // bounded endpoint/peer/process histories
 	lateralTargets map[string]map[string]*sweepTarget // endpointID:process -> targetIP -> last seen and ports
 	inventory      map[string]map[string]bool         // tenant -> enrolled endpoint addresses (admin_fanout.go)
 	inventoryAt    map[string]time.Time
-	alertCooldown  map[string]time.Time        // alertKey -> last triggered time
-	unattributed   map[string]*unattributedRun // endpointID -> destinations we could not name
-	silence        *silenceWatch               // endpoints already reported as gone quiet
-	classes        classCache                  // endpoints the classifier reads (class.go)
+	alertCooldown  map[string]time.Time // alertKey -> last triggered time
+	silence        *silenceWatch        // endpoints already reported as gone quiet
+	classes        classCache           // endpoints the classifier reads (class.go)
 	tuning         storage.DetectionTuning
 	tuningAt       time.Time
 	cancel         context.CancelFunc
@@ -192,13 +115,11 @@ func New(store *storage.Store, eventsChan <-chan storage.Event, onAutoIsolate Is
 		eventsChan:     eventsChan,
 		onAutoIsolate:  onAutoIsolate,
 		portHistory:    make(map[string][]portAccess),
-		bwTracker:      newWindowCache[*bandwidthStats](8192),
 		beaconTracker:  newWindowCache[*beaconWindow](8192),
 		lateralTargets: make(map[string]map[string]*sweepTarget),
 		inventory:      make(map[string]map[string]bool),
 		inventoryAt:    make(map[string]time.Time),
 		alertCooldown:  make(map[string]time.Time),
-		unattributed:   make(map[string]*unattributedRun),
 		silence:        newSilenceWatch(),
 	}
 }
@@ -524,191 +445,17 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 	// The behavioural detectors below are the ones an operator tunes.
 	warming, warmLeft := warmingUp(endpoint, cfg, now)
 
-	// 2. Diurnal Time-of-Day Hourly Behavioral Profiling & Off-Hours Detection
-	//
-	// The window used to be hours 2 to 5 UTC with no zone anywhere near it,
-	// which on this side of the Atlantic is late evening - so ordinary evening
-	// use of a workstation was reported as off-hours activity, over and over.
-	// It is now a window in a named zone, and it defaults to the operator's own.
-	hr := now.In(cfg.Location()).Hour()
-	roleIsWorkstation := endpoint.RoleTag == "workstation" || endpoint.RoleTag == ""
-
 	// Every place an operator can say "this is normal here" is one question to
 	// one matcher: the tuning's expected rules (storage.ExpectCtx). A program is
 	// named by its installed path, so a process whose agent found that its
 	// reported path is not the file it runs matches no rule that names a
 	// program; a workload (an interpreter and what it runs) is vouched only
-	// when its path matched too (vouchedWorkload). The workload itself still
-	// names the process in alert keys and details.
-	workload := WorkloadOf(ev.ProcessPath, ev.CommandLine)
+	// when its path matched too (vouchedWorkload).
 	vouched := vouchedWorkload(ev.ProcessPath, ev.CommandLine, ev.AttributionStatus)
 	expect := expectedFor(cfg, expectCtx(ev, geo, endpoint, role, quietPath, vouched))
 
 	// Agent runtimes are judged against their own baselines.
 	e.checkAgentEgress(ev, geo, endpoint, cfg, procName, isInteractiveShell, warming, expect, now)
-
-	// Off-hours activity triggers ONLY for interactive shells / script
-	// interpreters, NEVER for standard OS system daemons.
-	//
-	// A known service runs around the clock, so the hour is not news for it.
-	// The key is the counterparty, not the address, for the reason the
-	// first-seen detector below gives: one conversation through a CDN reaches
-	// a new edge address every few minutes, and each one used to be a new HIGH.
-	// Cut on agent and lab hosts: agents work around the clock and lab guests
-	// run when an experiment does, so the hour says nothing there.
-	offHoursMeaningful := role != storage.RoleAgent && role != storage.RoleLab
-	if offHoursMeaningful && roleIsWorkstation && isOffHours && isInteractiveShell && !expect(storage.KindOffHours) && !warming &&
-		ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) {
-		alertKey := fmt.Sprintf("offhours:%s:%s:%s", ev.EndpointID, strings.ToLower(workload), counterpartyKey(geo))
-		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
-			alert := storage.Alert{
-				ID:          uuid.New().String(),
-				TenantID:    ev.TenantID,
-				EndpointID:  ev.EndpointID,
-				Timestamp:   now,
-				Title:       fmt.Sprintf("Off-Hours Workstation Activity Detected (%02d:00 %s)", hr, cfg.Location()),
-				Description: fmt.Sprintf("Interactive shell %s initiated external connection to %s:%d (%s) during off-hours baseline on %s.", procName, ev.DstIP, ev.DstPort, geo.CountryName, ev.EndpointID),
-				Severity:    "HIGH",
-				Mitigated:   false,
-			}
-			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
-				ID:          alert.ID,
-				TenantID:    ev.TenantID,
-				EndpointID:  ev.EndpointID,
-				Hostname:    endpoint.Hostname,
-				AnomalyType: "OFF_HOURS_ACTIVITY",
-				Technique:   "T1029",
-				Severity:    "HIGH",
-				Title:       alert.Title,
-				Description: alert.Description,
-				Details:     fmt.Sprintf("Time: %02d:%02d %s | Off-hours window: %s | Process: %s | GeoIP: %s (%s)", hr, now.In(cfg.Location()).Minute(), cfg.Location(), cfg.OffHoursLabel(), ev.ProcessPath, geo.Country, geo.Org),
-				ProcessPath: ev.ProcessPath,
-				DstIP:       ev.DstIP,
-				DstPort:     ev.DstPort,
-				Timestamp:   now,
-			})
-			e.alertf("[!] ANOMALY ALERT [HIGH]: %s on %s -> %s:%d", alert.Title, ev.EndpointID, ev.DstIP, ev.DstPort)
-		}
-	}
-
-	// 3. Statistical Outlier: Bandwidth Exfiltration Spikes
-	//
-	// Three gates were missing here that every other detector below has, and
-	// each one produced alerts on the live fleet:
-	//
-	//   - the quiet-process list was never consulted, so svchost.exe - the
-	//     first name in the shipped list - reported exfiltration spikes;
-	//   - the destination was never checked, so the fleet's own agent
-	//     heartbeating to the hub on the LAN, and a container talking to its
-	//     own database on a bridge network, were both "exfiltration";
-	//   - the baseline was four samples, which is not a baseline, and every
-	//     finding was CRITICAL whatever the evidence behind it.
-	//
-	// Bytes leaving for a host inside the estate are a different question from
-	// bytes leaving the estate, and this detector is about the second one.
-	bwValue := float64(ev.BytesOut)
-	measuredRate := ev.Observation.Source != ""
-	rateEligible := true
-	if measuredRate {
-		rateEligible = ev.Observation.FirstAt != nil && ev.Observation.LastAt != nil && ev.Observation.Lost == 0 && !ev.Observation.Incomplete &&
-			(ev.Observation.ByteBasis == "udp_payload" || ev.Observation.ByteBasis == "tcp_socket_counter")
-		if rateEligible {
-			// Compare bytes per second, never differently sized batches.
-			// A one-second floor avoids extrapolating a microsecond packet
-			// burst into a sustained transfer rate the collector did not see.
-			seconds := math.Max(1, ev.Observation.LastAt.Sub(*ev.Observation.FirstAt).Seconds())
-			bwValue /= seconds
-		}
-	}
-	// A rate past any real link is a counter fault (a Windows counter that
-	// wrapped at 2^32 or went backwards), not a transfer. Ingest already made
-	// such samples unmeasured and noted them; one reaching here another way
-	// is still kept out of the baseline.
-	if maxRate := float64(cfg.MaxPlausibleRateMbps) * 125000; measuredRate && rateEligible && bwValue > maxRate {
-		rateEligible = false
-	}
-	// Both bandwidth kinds expected is the old "quiet process" and "own
-	// maker" answer: the flow is not even sampled. One of them expected still
-	// samples it, and only the finding it does not cover can be raised.
-	spikeExpected, burstExpected := expect(storage.KindBandwidthSpike), expect(storage.KindBandwidthBurst)
-	if rateEligible && ev.Direction == "OUTBOUND" && ev.BytesOut > 0 && !isPrivateIP(ev.DstIP) && !(spikeExpected && burstExpected) {
-		bwKey := fmt.Sprintf("%q:%q:%d:%q", ev.EndpointID, cleanPath, ev.Protocol, ev.Observation.ByteBasis)
-		e.mu.Lock()
-		stats := e.bwTracker.get(bwKey, func() *bandwidthStats { return &bandwidthStats{} })
-		median, mad, zScore, samples := stats.observe(bwValue)
-		e.mu.Unlock()
-
-		baselined := samples >= int64(cfg.BandwidthMinSamples)
-		// The floor was 50KB, which a browser clears on a single page load, and
-		// the destination was not consulted at all: production's first CRITICAL
-		// after the scoring fix was chrome sending 255KB to Google, 51 standard
-		// deviations out because a browser's transfer sizes are heavy-tailed
-		// and nothing about that is exfiltration. An operator who has vouched
-		// for a network has already answered this question, and a megabyte is
-		// the smallest transfer worth waking someone for.
-		outlier := cfg.BandwidthOn && baselined && zScore > bandwidthOutlierZ && bwValue > bandwidthOutlierBytes && !spikeExpected
-		// A burst large enough to matter on its own account, reported even
-		// without a baseline - but as the weaker finding it is, because with no
-		// baseline there is nothing to say it is unusual for this process. It
-		// is part of the floor, so bandwidth_enabled does not switch it off.
-		// Unlike the sweeps, it still yields to an expected rule that
-		// names it: svchost.exe reported exfiltration spikes before the rules
-		// gated this detector (Windows Update and Delivery Optimization
-		// upload to the internet in tens of megabytes), and a backup job is
-		// what a rule for a program and its storage service is for.
-		burst := bwValue > bandwidthBurstBytes && !burstExpected
-		if outlier || burst {
-			alertKey := fmt.Sprintf("bwspike:%s:%s", ev.EndpointID, procName)
-			// The severity follows the evidence rather than the detector's
-			// name. A transfer four standard deviations out is worth a look; one
-			// far past that, against a real baseline, is the finding this
-			// detector was written for.
-			bwSeverity := "HIGH"
-			if outlier && zScore > bandwidthCriticalZ {
-				bwSeverity = "CRITICAL"
-			}
-			if !warming && !e.shouldSuppressAlert(alertKey, time.Duration(cfg.BandwidthCooldown)*time.Minute) {
-				alert := storage.Alert{
-					ID:          uuid.New().String(),
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Timestamp:   now,
-					Title:       bandwidthTitle(baselined, zScore, ev.BytesOut),
-					Description: bandwidthDescription(baselined, procName, ev.BytesOut, ev.DstIP, ev.DstPort, median, mad, zScore, samples),
-					Severity:    bwSeverity,
-					Mitigated:   false,
-				}
-				sampleUnit := "bytes per record"
-				if measuredRate {
-					sampleUnit = "bytes per second"
-					alert.Title = fmt.Sprintf("Outbound rate spike (%s/s)", humanBytes(int64(bwValue)))
-					alert.Description = fmt.Sprintf("Process %s sent %s to %s:%d over the recorded interval, averaging %s/s with a one-second minimum denominator. Baseline: %.0f bytes/s median, %.0f median absolute deviation, %d samples, modified Z %.2f.", procName, humanBytes(ev.BytesOut), ev.DstIP, ev.DstPort, humanBytes(int64(bwValue)), median, mad, samples, zScore)
-				}
-				evidence := ""
-				if burst {
-					evidence = floorRuleEvidence
-				}
-				e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
-					ID:          alert.ID,
-					TenantID:    ev.TenantID,
-					EndpointID:  ev.EndpointID,
-					Hostname:    endpoint.Hostname,
-					Evidence:    evidence,
-					AnomalyType: "BANDWIDTH_SPIKE",
-					Technique:   "T1030",
-					Severity:    bwSeverity,
-					Title:       alert.Title,
-					Description: alert.Description,
-					Details:     fmt.Sprintf("Measured total: %d bytes | Sample: %.0f %s | Samples: %d | Baseline median: %.0f %s | Median absolute deviation: %.0f | Modified Z: %.2f | %s", ev.BytesOut, bwValue, sampleUnit, samples, median, sampleUnit, mad, zScore, describeOwner(geo)),
-					ProcessPath: ev.ProcessPath,
-					DstIP:       ev.DstIP,
-					DstPort:     ev.DstPort,
-					Timestamp:   now,
-				})
-				e.alertf("[!] ANOMALY ALERT [%s]: %s on %s -> %d bytes (Z=%.2f over %d samples)", bwSeverity, alert.Title, ev.EndpointID, ev.BytesOut, zScore, samples)
-			}
-		}
-	}
 
 	// 3b. Bulk egress to a cloud storage service (MITRE DET0570)
 	//
@@ -874,132 +621,6 @@ func (e *Engine) evaluate(ev storage.Event, snapshot *BatchSnapshot) {
 				ev.EndpointID, ev.DstIP, (time.Duration(cfg.WarmupHours)*time.Hour - warmLeft).Round(time.Minute), cfg.WarmupHours, bev.Summary())
 		}
 	}
-
-	// 5. Statistical Outlier: Rare First-Seen External Destination (Ignoring major CDNs/Clouds)
-	firstSeen := false
-	if snapshot != nil {
-		firstSeen = snapshot.FirstSeen[ev.DstIP]
-	} else {
-		firstSeen = e.store.IsFirstSeenDestination(ev.TenantID, ev.DstIP)
-	}
-	if cfg.FirstSeenOn && !warming && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!expect(storage.KindNovelDestination) && firstSeen {
-		// Keyed on the network owner, not the address. A destination is
-		// first-seen exactly once, so a per-address key could never repeat and
-		// the cooldown never suppressed anything - which is how this detector
-		// came to be 62%% of every alert on the fleet. What an analyst wants to
-		// know is that the estate has started talking to somebody new, and one
-		// counterparty bringing forty edge addresses is one of those, not
-		// forty. An address whose owner is unknown falls back to the address,
-		// because then the address is all there is.
-		// An address with no owner has no key that can repeat either, so the
-		// per-address fallback brought the same defect back in a smaller form:
-		// an ordinary workstation browsing the web reaches a dozen unnamed
-		// addresses an hour and raised one alert for each. Those are folded
-		// into a single rolling finding per endpoint, which is the question an
-		// analyst actually has - "is this host reaching places we cannot
-		// name?" - and it carries the count of everything folded into it.
-		attributed := geo.Resolved() && strings.TrimSpace(geo.Org) != ""
-		severity := "MEDIUM"
-		alertKey := fmt.Sprintf("firstseen:%s:%s", ev.TenantID, strings.ToLower(strings.TrimSpace(geo.Org)))
-		if !attributed {
-			severity = "LOW"
-			alertKey = fmt.Sprintf("firstseen:%s:unattributed:%s", ev.TenantID, ev.EndpointID)
-			e.noteUnattributed(ev.EndpointID, ev.DstIP, now)
-		}
-		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
-			title := firstSeenTitle(geo)
-			description := fmt.Sprintf("Endpoint %s established a first connection to %s:%d (%s).", ev.EndpointID, ev.DstIP, ev.DstPort, describeOwner(geo))
-			details := fmt.Sprintf("Process: %s | %s", ev.ProcessPath, describeOwner(geo))
-			if !attributed {
-				run := e.takeUnattributed(ev.EndpointID)
-				title = unattributedTitle(run)
-				description = unattributedDescription(ev.EndpointID, ev.DstIP, ev.DstPort, run)
-				details = fmt.Sprintf("Process: %s | %s | %s", ev.ProcessPath, describeOwner(geo), unattributedDetails(run, cfg.FirstSeenCooldown))
-			}
-			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
-				ID:          uuid.New().String(),
-				TenantID:    ev.TenantID,
-				EndpointID:  ev.EndpointID,
-				Hostname:    endpoint.Hostname,
-				AnomalyType: "NOVEL_DESTINATION",
-				Technique:   "T1071",
-				Severity:    severity,
-				Title:       title,
-				Description: description,
-				Details:     details,
-				ProcessPath: ev.ProcessPath,
-				DstIP:       ev.DstIP,
-				DstPort:     ev.DstPort,
-				Timestamp:   now,
-			})
-			e.alertf("[*] ANOMALY ALERT [%s]: First-seen destination %s (%s) contacted by %s", severity, ev.DstIP, describeOwner(geo), ev.EndpointID)
-		}
-	}
-
-	// 8. Interpreter or shell reaching the internet
-	//
-	// This fired on every external connection any interpreter made, at HIGH,
-	// keyed per destination address with a fifteen-second cooldown and no quiet
-	// list of any kind. That was survivable only while the interpreter match was
-	// broken: correcting it so python3.13 is recognised turned one ordinary
-	// application worker on one workstation into seventy-one HIGH findings in a
-	// morning, each naming a different CDN address for the same conversation.
-	//
-	// "An interpreter talked to the internet" is not a finding on its own - it
-	// describes every developer machine and most servers. What is worth saying
-	// is that an interpreter has started talking to a counterparty nobody has
-	// vouched for, so the finding is keyed on the owner, holds for the tuned
-	// first-seen period, and takes its severity from what is actually known
-	// about the destination.
-	if isInteractiveShell && ev.Direction == "OUTBOUND" && !isPrivateIP(ev.DstIP) &&
-		!expect(storage.KindNovelProcess) && !warming {
-		alertKey := fmt.Sprintf("shell:%s:%s:%s", ev.EndpointID, strings.ToLower(procName), counterpartyKey(geo))
-		if !e.shouldSuppressAlert(alertKey, time.Duration(cfg.FirstSeenCooldown)*time.Minute) {
-			// Rented compute and unnamed networks are where an interpreter
-			// reaching out is worth waking someone for. A named vendor or edge
-			// network is worth recording and looking at in the morning.
-			severity := "MEDIUM"
-			switch {
-			case !geo.Resolved() || geo.Tenancy == storage.TenancyHosting:
-				severity = "HIGH"
-			case ev.DstPort != 443 && ev.DstPort != 80:
-				severity = "HIGH"
-			}
-
-			title := fmt.Sprintf("Script interpreter %s reaching %s", procName, describeCounterparty(geo, ev))
-			description := fmt.Sprintf("%s connected out to %s:%d (%s). Nothing has vouched for this program talking to this counterparty; if it is expected here, mark it so and this conversation stops being reported.",
-				procName, ev.DstIP, ev.DstPort, describeCounterparty(geo, ev))
-
-			alert := storage.Alert{
-				ID:          uuid.New().String(),
-				TenantID:    ev.TenantID,
-				EndpointID:  ev.EndpointID,
-				Timestamp:   now,
-				Title:       title,
-				Description: description,
-				Severity:    severity,
-				Mitigated:   false,
-			}
-			e.recordAnomaly(ev, geo, endpoint, storage.AnomalyAlert{
-				ID:          alert.ID,
-				TenantID:    ev.TenantID,
-				EndpointID:  ev.EndpointID,
-				Hostname:    endpoint.Hostname,
-				AnomalyType: "NOVEL_PROCESS_EGRESS",
-				Technique:   "T1059",
-				Severity:    severity,
-				Title:       title,
-				Description: description,
-				Details:     fmt.Sprintf("Interpreter: %s | Target: %s:%d | %s | Workload: %s | Command: %s", ev.ProcessPath, ev.DstIP, ev.DstPort, describeOwner(geo), workload, firstLine(ev.CommandLine)),
-				ProcessPath: ev.ProcessPath,
-				DstIP:       ev.DstIP,
-				DstPort:     ev.DstPort,
-				Timestamp:   now,
-			})
-			e.alertf("[!] ANOMALY ALERT [%s]: %s on endpoint %s (%s:%d)", severity, title, alert.EndpointID, ev.DstIP, ev.DstPort)
-		}
-	}
 }
 
 // checkSensitivePort raises the sensitive-port floor: SMB, RDP, telnet or RPC
@@ -1074,15 +695,6 @@ func isInterpreterOrShell(procName string) bool {
 		}
 	}
 	return false
-}
-
-// counterpartyKey is the network owner a cooldown is keyed on, or
-// "unattributed" when nothing has named it.
-func counterpartyKey(geo threatintel.GeoRecord) string {
-	if owner := strings.ToLower(strings.TrimSpace(geo.Org)); owner != "" {
-		return owner
-	}
-	return "unattributed"
 }
 
 // isVersionSuffix accepts what follows an interpreter's name in a versioned
@@ -1264,114 +876,6 @@ func describeOwner(geo threatintel.GeoRecord) string {
 	return fmt.Sprintf("%s (%s)", geo.Org, country)
 }
 
-// firstSeenTitle names the counterparty when there is one to name. "First-Seen
-// Destination IP Contacted (CA)" was a country the resolver had invented; a
-// title has to carry something the reader can act on or admit it does not.
-// unattributedRun is the set of first-seen destinations on one endpoint that
-// the offline attribution table could not name, held between alerts so the one
-// alert that does go out can say how many there were rather than sending one
-// alert per address.
-type unattributedRun struct {
-	count int
-	first string
-	since time.Time
-	last  time.Time
-}
-
-func (e *Engine) noteUnattributed(endpointID, dstIP string, at time.Time) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	run := e.unattributed[endpointID]
-	if run == nil {
-		run = &unattributedRun{first: dstIP, since: at}
-		e.unattributed[endpointID] = run
-	}
-	run.count++
-	run.last = at
-}
-
-// takeUnattributed reads the run and clears it, so the next alert counts only
-// what happened after this one.
-func (e *Engine) takeUnattributed(endpointID string) unattributedRun {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	run := e.unattributed[endpointID]
-	if run == nil {
-		return unattributedRun{count: 1}
-	}
-	out := *run
-	delete(e.unattributed, endpointID)
-	return out
-}
-
-func unattributedTitle(run unattributedRun) string {
-	if run.count > 1 {
-		return fmt.Sprintf("%d first connections to unattributed networks", run.count)
-	}
-	return "First connection to an unattributed network"
-}
-
-func unattributedDescription(endpointID, dstIP string, dstPort uint16, run unattributedRun) string {
-	if run.count > 1 {
-		window := run.last.Sub(run.since).Round(time.Minute)
-		if window < time.Minute {
-			window = time.Minute
-		}
-		return fmt.Sprintf("Endpoint %s reached %d addresses for the first time in %s, none of which the offline attribution table can name. The most recent was %s:%d; the first was %s.",
-			endpointID, run.count, window, dstIP, dstPort, run.first)
-	}
-	return fmt.Sprintf("Endpoint %s established a first connection to %s:%d, an address the offline attribution table cannot name.", endpointID, dstIP, dstPort)
-}
-
-func unattributedDetails(run unattributedRun, cooldownMinutes int) string {
-	if run.count > 1 {
-		return fmt.Sprintf("%d unnamed destinations folded into this finding; further ones are folded for the next %d minutes", run.count, cooldownMinutes)
-	}
-	return fmt.Sprintf("further unnamed destinations on this endpoint are folded into this finding for the next %d minutes", cooldownMinutes)
-}
-
-func firstSeenTitle(geo threatintel.GeoRecord) string {
-	if geo.Resolved() {
-		return fmt.Sprintf("First connection to %s", geo.Org)
-	}
-	return "First connection to an unattributed network"
-}
-
-// bandwidthTitle distinguishes a transfer measured against a real baseline from
-// one large enough to report on its own. Both used to be reported with a
-// z-score, including the burst case where the score was computed against
-// whatever handful of samples happened to exist.
-func bandwidthTitle(baselined bool, zScore float64, bytesOut int64) string {
-	if baselined {
-		return "Outbound volume " + deviations(zScore) + " above this process's usual volume"
-	}
-	return fmt.Sprintf("Large outbound transfer (%d bytes, no baseline yet)", bytesOut)
-}
-
-// deviations renders the modified z-score at a precision that means something.
-// A process whose every previous transfer was the same size has almost no
-// spread, so a genuine outlier against it scores enormously; printing that to
-// one decimal place reads as a broken number rather than as a large one.
-func deviations(z float64) string {
-	switch {
-	case z >= 1000:
-		return "more than 1,000 deviations"
-	case z >= 100:
-		return fmt.Sprintf("%.0f deviations", z)
-	default:
-		return fmt.Sprintf("%.1f deviations", z)
-	}
-}
-
-func bandwidthDescription(baselined bool, procName string, bytesOut int64, dstIP string, dstPort uint16, median, mad, zScore float64, samples int64) string {
-	if baselined {
-		return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Its usual transfer over the %d before this one is %.0f bytes (median absolute deviation %.0f), which puts this one %s out.",
-			procName, bytesOut, dstIP, dstPort, samples, median, mad, deviations(zScore))
-	}
-	return fmt.Sprintf("Process %s transmitted %d bytes to %s:%d. Only %d transfers have been observed for it, which is too few to say whether that is unusual for this process.",
-		procName, bytesOut, dstIP, dstPort, samples)
-}
-
 // InvalidateCollectorWindows handles health-only heartbeats too: an empty
 // event batch does not make a known observation gap disappear.
 func (e *Engine) InvalidateCollectorWindows(endpointID string) {
@@ -1380,12 +884,26 @@ func (e *Engine) InvalidateCollectorWindows(endpointID string) {
 	defer e.mu.Unlock()
 	match := func(key string) bool { return strings.HasPrefix(key, prefix) }
 	e.beaconTracker.removeMatching(match)
-	e.bwTracker.removeMatching(match)
 }
 func (e *Engine) ObservationCoverage() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return map[string]any{"window_capacity": 8192, "bandwidth_windows": len(e.bwTracker.entries), "beacon_windows": len(e.beaconTracker.entries), "bandwidth_evictions": e.bwTracker.evictions, "beacon_evictions": e.beaconTracker.evictions}
+	return map[string]any{"window_capacity": 8192, "beacon_windows": len(e.beaconTracker.entries), "beacon_evictions": e.beaconTracker.evictions}
+}
+
+// servedFlow says the local end of this flow is a listening socket answering a
+// client. The agent reports every TCP socket it reads as OUTBOUND with its own
+// local port as the source port, so an accepted connection arrives as the
+// server's service port talking to the client's ephemeral port, once per
+// client socket: to the sweep rules that is one host reaching many ports and
+// hosts, which is what a busy listener (a web console, a proxy) looks like
+// from the inside. A source port below the network's ephemeral range talking
+// to one inside it is the listener's side (tuning ephemeral_port_from); an
+// agent that marks a flow INBOUND needs no inference, since only OUTBOUND
+// flows are judged.
+func servedFlow(ev storage.Event, cfg storage.DetectionTuning) bool {
+	from := uint16(cfg.EphemeralPortFrom)
+	return ev.SrcPort > 0 && ev.SrcPort < from && ev.DstPort >= from
 }
 
 // checkSweeps runs the port-sweep and lateral-sweep floor rules. They run
@@ -1401,10 +919,10 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 		procKey = "unknown"
 	}
 	// A scan of the host's own loopback is a program talking to itself, and a
-	// reply flow (a well-known source port answering a high one) is the
-	// other side's connection seen from here: neither is this host scanning.
-	replyFlow := ev.SrcPort > 0 && ev.SrcPort < 32768 && ev.DstPort >= 32768
-	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !netaddr.IsLoopback(ev.DstIP) && !replyFlow &&
+	// served flow (a listener answering a client) is the other side's
+	// connection seen from here: neither is this host scanning.
+	served := servedFlow(ev, cfg)
+	if ev.Direction == "OUTBOUND" && ev.DstPort > 0 && !netaddr.IsLoopback(ev.DstIP) && !served &&
 		!isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
 		sweepKey := fmt.Sprintf("%s:%s", ev.EndpointID, procKey)
 		e.mu.Lock()
@@ -1465,7 +983,7 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 	// 7. Topological Graph Outlier: Internal Lateral Movement / Subnet Fan-Out (Evaluated per-process)
 	destination, _ := netaddr.Parse(ev.DstIP)
 	unicastHost := destination.IsGlobalUnicast() || destination.IsLinkLocalUnicast()
-	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !netaddr.IsLoopback(ev.DstIP) &&
+	if isPrivateIP(ev.DstIP) && unicastHost && ev.Direction == "OUTBOUND" && !served && !netaddr.IsLoopback(ev.DstIP) &&
 		!cfg.IsContainerAddress(ev.DstIP) && !isKnownInfrastructureProcess(quietPath, ev.UserIdentity) {
 
 		e.mu.Lock()

@@ -2,7 +2,6 @@ package detector
 
 import (
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -17,9 +16,8 @@ import (
 // guesswork: an expected rule is written, the alert count drops, and nobody knows
 // whether the finding that mattered dropped with it. Replay answers that from
 // the findings already in the database. It applies the parts of the tuning
-// that a stored finding carries enough to judge - the expected rules, and the
-// off-hours cooldown keyed on the counterparty - and leaves every other finding
-// as it was, so the result is a conservative estimate: the detectors themselves
+// that a stored finding carries enough to judge - the expected rules - and
+// leaves every other finding as it was, so the result is a conservative estimate: the detectors themselves
 // can only silence more, never less.
 type ReplayDecision struct {
 	ID     string `json:"id"`
@@ -37,14 +35,8 @@ type ReplaySignature struct {
 }
 
 type ReplayResult struct {
-	Before int `json:"before"`
-	After  int `json:"after"`
-	// MaySurface bounds what the replay cannot see. A recorded finding the
-	// draft silences no longer starts its detector's cooldown, so a finding
-	// that cooldown folded live - never recorded - could be raised instead:
-	// at most one per silenced cooldown window. After is the floor and
-	// After+MaySurface the ceiling.
-	MaySurface int               `json:"may_surface"`
+	Before     int               `json:"before"`
+	After      int               `json:"after"`
 	ByType     map[string][2]int `json:"by_type"` // type -> [before, after]
 	Signatures []ReplaySignature `json:"signatures"`
 	Decisions  []ReplayDecision  `json:"-"`
@@ -109,10 +101,6 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 	incidents := map[string]*openIncident{}
 	sorted := append([]storage.AnomalyAlert(nil), alerts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Timestamp.Before(sorted[j].Timestamp) })
-	cooldown := time.Duration(t.FirstSeenCooldown) * time.Minute
-	lastOffHours := map[string]time.Time{}
-	lastNovel := map[string]time.Time{}
-	lastSilenced := map[string]time.Time{}
 	res := ReplayResult{ByType: map[string][2]int{}, Paging: ReplayPaging{ByType: map[string][2]int{}, ByHost: map[string][2]int{},
 		ByClass: map[string]int{}, Pages: []ReplayPage{}}}
 	sigs := map[string]*ReplaySignature{}
@@ -123,52 +111,6 @@ func ReplayClassified(alerts []storage.AnomalyAlert, t storage.DetectionTuning, 
 		d := ReplayDecision{ID: a.ID, Kept: true}
 		rule, expected := expectedRuleFor(t, a, cx.RoleOf(endpointOf(endpoints, a.EndpointID)))
 		switch a.AnomalyType {
-		case "OFF_HOURS_ACTIVITY":
-			if expected {
-				d = ReplayDecision{ID: a.ID, Reason: "expected: " + rule.Reason}
-				break
-			}
-			owner := ev.Owner
-			if owner == "" {
-				owner = "unattributed"
-			}
-			key := a.EndpointID + "|" + strings.ToLower(workload) + "|" + owner
-			if last, ok := lastOffHours[key]; ok && a.Timestamp.Sub(last) < cooldown {
-				d = ReplayDecision{ID: a.ID, Reason: fmt.Sprintf("folded: one off-hours finding per program and counterparty per %d min", t.FirstSeenCooldown)}
-				break
-			}
-			lastOffHours[key] = a.Timestamp
-		case "NOVEL_PROCESS_EGRESS", "NOVEL_DESTINATION":
-			// The detectors' own cooldown keys (detector.go): an interpreter
-			// per owner, first-seen per owner across the tenant, or per
-			// endpoint when the owner is unnamed. A recorded finding inside a
-			// longer cooldown than the one that raised it would not be raised.
-			owner := strings.ToLower(strings.TrimSpace(ev.Owner))
-			key := "firstseen|" + a.TenantID + "|" + owner
-			if a.AnomalyType == "NOVEL_PROCESS_EGRESS" {
-				key = "shell|" + a.EndpointID + "|" + processBase(a.ProcessPath) + "|" + firstNonEmpty(owner, "unattributed")
-			} else if owner == "" {
-				key = "firstseen|" + a.TenantID + "|unattributed|" + a.EndpointID
-			}
-			if expected {
-				d = ReplayDecision{ID: a.ID, Reason: "expected: " + rule.Reason}
-				armed := false
-				for _, m := range []map[string]time.Time{lastNovel, lastSilenced} {
-					if last, ok := m[key]; ok && a.Timestamp.Sub(last) < cooldown {
-						armed = true
-					}
-				}
-				if !armed {
-					res.MaySurface++
-					lastSilenced[key] = a.Timestamp
-				}
-				break
-			}
-			if last, ok := lastNovel[key]; ok && a.Timestamp.Sub(last) < cooldown {
-				d = ReplayDecision{ID: a.ID, Reason: fmt.Sprintf("folded: the same program and counterparty within the %d min first-seen cooldown", t.FirstSeenCooldown)}
-				break
-			}
-			lastNovel[key] = a.Timestamp
 		default:
 			if expected {
 				d = ReplayDecision{ID: a.ID, Reason: "expected: " + rule.Reason}
@@ -278,11 +220,6 @@ func replayEvidence(raw string) replayFields {
 		_ = json.Unmarshal([]byte(raw), &f)
 	}
 	return replayFields{CommandLine: f.CommandLine, Attribution: strings.TrimSpace(f.Attribution), ASN: strings.TrimSpace(f.ASN), Owner: strings.ToLower(strings.TrimSpace(f.Owner)), Tenancy: strings.TrimSpace(f.Tenancy)}
-}
-
-// processBase is the program's name without its path, lower-cased.
-func processBase(path string) string {
-	return strings.ToLower(strings.TrimSpace(baseName(path)))
 }
 
 // endpointOf finds an endpoint by id; an unknown one is a zero endpoint (the

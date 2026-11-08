@@ -16,9 +16,7 @@ import (
 // Their code stays: the plan retires them from paging only, and deletes them
 // only after labelled drills compare both tiers.
 var huntTypes = map[string]bool{
-	"OFF_HOURS_ACTIVITY":   true,
-	"NOVEL_PROCESS_EGRESS": true,
-	"NOVEL_DESTINATION":    true,
+	"NOVEL_DESTINATION": true,
 }
 
 // TierFor names the tier a detector's findings belong to.

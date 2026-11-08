@@ -3,10 +3,11 @@ package detector
 import "testing"
 
 func TestWindowCapacityEvictsLeastRecentlyUsedHistory(t *testing.T) {
-	c := newWindowCache[*bandwidthStats](2)
-	create := func() *bandwidthStats { return &bandwidthStats{} }
+	type history struct{ n int }
+	c := newWindowCache[*history](2)
+	create := func() *history { return &history{} }
 	original := c.get("a", create)
-	original.observe(42)
+	original.n = 42
 	c.get("b", create)
 	c.get("a", create)
 	c.get("c", create)
@@ -20,7 +21,7 @@ func TestWindowCapacityEvictsLeastRecentlyUsedHistory(t *testing.T) {
 		t.Fatal("active baseline replaced")
 	}
 	replacement := c.get("b", create)
-	if replacement.count != 0 {
+	if replacement.n != 0 {
 		t.Fatal("eviction invented replacement samples")
 	}
 	c.removeMatching(func(key string) bool { return key == "b" })

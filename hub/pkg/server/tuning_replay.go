@@ -103,16 +103,13 @@ func (s *Server) handleTuningReplay(w http.ResponseWriter, r *http.Request) {
 	if len(sigs) > replayTopSignature {
 		sigs = sigs[:replayTopSignature]
 	}
-	// cut is the best case and worst_cut the worst: see ReplayResult.MaySurface.
-	cut, worst := 0.0, 0.0
+	cut := 0.0
 	if res.Before > 0 {
 		cut = float64(res.Before-res.After) / float64(res.Before)
-		worst = max(0, float64(res.Before-res.After-res.MaySurface)/float64(res.Before))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"from": from, "to": to,
 		"before": res.Before, "after": res.After, "cut": cut,
-		"may_surface": res.MaySurface, "worst_cut": worst,
 		"by_type":    res.ByType,
 		"paging":     res.Paging,
 		"signatures": sigs,

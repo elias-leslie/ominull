@@ -129,7 +129,7 @@ func TestAPartialSaveKeepsEverythingItLeavesOut(t *testing.T) {
 		t.Fatalf("partial save: %d %v", code, body)
 	}
 	tun := body["tuning"].(map[string]interface{})
-	for _, k := range []string{"beacon_enabled", "first_seen_enabled", "bandwidth_enabled", "silence_enabled", "off_hours_enabled", "agent_egress_enabled"} {
+	for _, k := range []string{"beacon_enabled", "bandwidth_enabled", "silence_enabled", "off_hours_enabled", "agent_egress_enabled"} {
 		if tun[k] != true {
 			t.Errorf("%s = %v after a save that did not name it", k, tun[k])
 		}
