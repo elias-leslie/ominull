@@ -18,6 +18,7 @@
 
 #ifdef OMINULL_HUB_INPUT
 /* One switch per family, flipped as each one passes its differential test. */
+#define HI_TERM_FRAME
 #endif
 
 enum {

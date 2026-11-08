@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hub_input.h"
 
 #define TERMINAL_JSON_MAX_DEPTH 8
 
@@ -334,8 +335,12 @@ typedef struct {
     long rows;
     long cols;
 } TermInFrame;
+_Static_assert(sizeof(TermInFrame) == (sizeof(long) == 8 ? 48 : 40), "TermInFrame differs from agent/hubinput/src/abi.rs");
 
 static inline bool TermFrame_Parse(const char* json, size_t len, TermInFrame* f) {
+#ifdef HI_TERM_FRAME
+    return hi_term_frame_parse(json, len, f);
+#else
     memset(f, 0, sizeof(*f));
     TermJson j;
     if (!TermJson_Begin(&j, json, len)) return false;
@@ -362,11 +367,15 @@ static inline bool TermFrame_Parse(const char* json, size_t len, TermInFrame* f)
         }
     }
     return f->type[0] != '\0';
+#endif
 }
 
 /* Offer payload: copies the three fields exactly; a field that does not fit fails. */
 static inline bool TermPayload_Parse(const char* json, char* session_id, size_t sid_max, char* program, size_t prog_max,
                                      char* token, size_t tok_max) {
+#ifdef HI_TERM_FRAME
+    return hi_term_payload_parse(json, session_id, sid_max, program, prog_max, token, tok_max);
+#else
     if (!json) return false;
     if (!session_id || !program || !token || sid_max == 0 || prog_max == 0 || tok_max == 0) return false;
     session_id[0] = program[0] = token[0] = '\0';
@@ -406,6 +415,7 @@ static inline bool TermPayload_Parse(const char* json, char* session_id, size_t 
         }
     }
     return true;
+#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -447,6 +457,9 @@ static inline int TermB64_Val(char c) {
 /* Decodes base64, skipping whitespace and JSON escape backslashes ("\/").
  * Stops at padding or the first invalid character. */
 static inline size_t TermB64_Decode(const char* in, size_t in_len, unsigned char* out, size_t out_max) {
+#ifdef HI_TERM_FRAME
+    return hi_term_b64_decode(in, in_len, out, out_max);
+#else
     size_t j = 0;
     uint32_t acc = 0;
     int bits = 0;
@@ -465,6 +478,7 @@ static inline size_t TermB64_Decode(const char* in, size_t in_len, unsigned char
         }
     }
     return j;
+#endif
 }
 
 #endif /* OMINULL_TERMINAL_FRAME_H */
