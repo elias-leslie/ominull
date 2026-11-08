@@ -538,6 +538,27 @@
   assert(target,'No machine in the fixture');
   frame.remove();
  });
+ await check('A link that waited for the list paints when the list arrives, for a machine with no agent too', async () => {
+  const bare=a.state.assets.find(x=>!x.endpoint);
+  assert(bare,'No machine without an agent in the fixture');
+  a.closeRoute();
+  a.state.routeKey=bare.key;
+  assert(!document.querySelector('.route'),'The route was already painted');
+  a.render();
+  assert(document.querySelector('.route'),'The link stayed blank after the list arrived');
+  a.closeRoute();
+ });
+ await check('An empty machine list says why and only offers what this login can do', async () => {
+  const loaded=a.state.assetsLoaded;
+  try {
+   a.state.assetsLoaded=true;
+   assert(a.emptyFleet(true).textContent.includes('Install an agent'),'Admin lost the way to add a machine');
+   const tenant=a.emptyFleet(false).textContent;
+   assert(tenant.includes('your client')&&!tenant.includes('Install an agent'),'Scoped login told to do what it cannot: '+tenant);
+   a.state.assetsLoaded=false;
+   assert(a.emptyFleet(true).textContent.includes('could not be read'),'A failed read looks like an empty fleet');
+  } finally { a.state.assetsLoaded=loaded; }
+ });
  a.state.section='assets';a.render();
  return results;
 })()

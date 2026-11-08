@@ -3439,7 +3439,7 @@
       var none = state.loading ? h("div", { cls: "empty", text: "Loading fleet…" })
         : filtering ? h("div", { cls: "empty" }, h("p", { text: "No machine matches these filters." }),
           h("button", { cls: "btn", type: "button", text: "Clear filters", on: { click: function () { state.filters = {}; state.query = ""; var q = document.getElementById("filter-input"); if (q) q.value = ""; syncURL(true); render(); } } }))
-        : h("div", { cls: "empty" }, h("p", { text: "No machines yet." }), h("p", { cls: "dim-2", text: "Install an agent on one, or sweep a subnet to find what is on it." }));
+        : emptyFleet(IS_ADMIN);
       tbody.appendChild(h("tr", {}, h("td", { colspan: String(cols) }, none)));
     }
 
@@ -11091,11 +11091,20 @@
     });
   }
 
+  /* A failed read is not an empty fleet, and a login scoped to one client can
+     neither install an agent nor sweep a subnet from here. */
+  function emptyFleet(isAdmin) {
+    if (!state.assetsLoaded) return h("div", { cls: "empty", text: "The machine list could not be read." });
+    if (!isAdmin) return h("div", { cls: "empty" }, h("p", { text: "No machines in your client yet." }), h("p", { cls: "dim-2", text: "An admin adds them by installing an agent or sweeping a subnet." }));
+    return h("div", { cls: "empty" }, h("p", { text: "No machines yet." }), h("p", { cls: "dim-2", text: "Install an agent on one, or sweep a subnet to find what is on it." }));
+  }
+
   function render() {
     renderTopbar();
     renderStrip();
     renderBody();
-    if (routeEl) renderRoute();
+    /* A link that waited for the asset list has a key and no view yet. */
+    if (routeEl || state.routeKey) renderRoute();
     if (drawerEl) renderDrawer();
   }
 
