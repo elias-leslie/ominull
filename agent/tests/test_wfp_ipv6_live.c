@@ -98,6 +98,14 @@ int main(int argc, char **argv) {
     CHECK(ConnectPeer(argv[2], 9001) && !ConnectPeer(argv[2], 9002));
     puts("IPv6 peer block beats allow-list; hub survives; rejected scope "
          "preserves prior state");
+    /* The dead-man timer: a restart finds the isolation, and lifting it leaves the
+     * peer block and the hub in place. */
+    CHECK(Wfp_IsolationInForce() == 1);
+    CHECK(Wfp_LiftIsolation() == 0);
+    CHECK(Wfp_IsolationInForce() == 0);
+    CHECK(ConnectPeer(argv[1], 9002) && !ConnectPeer(argv[2], 9002) &&
+          ConnectPeer(argv[2], 9001));
+    puts("Lifting the default deny keeps the peer block");
     CHECK(Wfp_ApplyState(&hub, 0, blocked, 1, NULL, 0, NULL, 0, 0) == 0);
     CHECK(ConnectPeer(argv[1], 9002) && !ConnectPeer(argv[2], 9002) &&
           ConnectPeer(argv[2], 9001));

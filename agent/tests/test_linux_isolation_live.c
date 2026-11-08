@@ -163,6 +163,15 @@ int main(int argc, char **argv) {
         puts("Twenty rebuilds after a swap that died opened nothing");
         const char *chains[] = {"iptables", "-w", "5", "-S", OMINULL_NEXT_OUT, NULL};
         CHECK(RunTool(chains) != 0);
+        /* The dead-man timer: only the default deny goes, the quarantine stays. */
+        char peer[1][64];
+        strcpy(peer[0], argv[3]);
+        CHECK(EnforcementBuild("iptables", true, &hub, allowed, 1, peer, 1, empty, 0,
+                               NULL, 0));
+        CHECK(!ConnectPeer(argv[1], 9004));
+        CHECK(LiftDefaultDeny("iptables") && LiftDefaultDeny("ip6tables"));
+        CHECK(ConnectPeer(argv[1], 9004) && !ConnectPeer(argv[3], 9004));
+        puts("Lifting the default deny keeps the peer block");
         Cleanup();
         CHECK(ConnectPeer(argv[3], 9004));
     }

@@ -522,7 +522,8 @@ static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
     return ERROR_SUCCESS;
 }
 
-// Wfp_DeleteOwnFilters removes every filter sitting in this agent's sublayer.
+// Wfp_DeleteFilters removes every filter sitting in this agent's sublayer, or only
+// the default deny.
 //
 // A sublayer cannot be deleted while filters still reference it - WFP answers
 // FWP_E_IN_USE - so "delete the sublayer to flush everything atomically" only
@@ -532,7 +533,15 @@ static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
 // recorded the release as applied and stopped retrying. The endpoint went on
 // heartbeating through its own hub pinhole, the console showed it released, and
 // it stayed cut off from everything else.
-static DWORD Wfp_DeleteOwnFilters(void) {
+// AddFilterEverywhere suffixes each name with the family and direction.
+static int IsOwnBlockAll(const FWPM_FILTER0* filter) {
+    static const wchar_t prefix[] = OMINULL_BLOCK_ALL_NAME L" (";
+    return memcmp(&filter->subLayerKey, &OMINULL_SUBLAYER_USER_GUID, sizeof(GUID)) == 0 &&
+           filter->displayData.name &&
+           wcsncmp(filter->displayData.name, prefix, wcslen(prefix)) == 0;
+}
+
+static DWORD Wfp_DeleteFilters(int blockAllOnly) {
     HANDLE hEnum = NULL;
 
     // A NULL template enumerates every filter, which is what is wanted here.
@@ -554,7 +563,8 @@ static DWORD Wfp_DeleteOwnFilters(void) {
             break;
         }
         for (UINT32 i = 0; i < got; i++) {
-            if (memcmp(&entries[i]->subLayerKey, &OMINULL_SUBLAYER_USER_GUID, sizeof(GUID)) == 0) {
+            if (memcmp(&entries[i]->subLayerKey, &OMINULL_SUBLAYER_USER_GUID, sizeof(GUID)) == 0 &&
+                (!blockAllOnly || IsOwnBlockAll(entries[i]))) {
                 if (doomedCount < (UINT32)(sizeof(doomed) / sizeof(doomed[0]))) {
                     doomed[doomedCount++] = entries[i]->filterId;
                 } else {
@@ -582,30 +592,33 @@ static DWORD Wfp_DeleteOwnFilters(void) {
     return firstFailure;
 }
 
-// Wfp_IsolationInForce says whether the default deny of an isolation is in the
-// kernel, whoever put it there. Not knowing counts as no.
+// Wfp_IsolationInForce: 1 the default deny of an isolation is in the kernel,
+// whoever put it there; 0 it is not; -1 we could not find out.
 int Wfp_IsolationInForce(void) {
     HANDLE hEnum = NULL;
-    if (FwpmFilterCreateEnumHandle0(g_hEngine, NULL, &hEnum) != ERROR_SUCCESS) return 0;
+    if (FwpmFilterCreateEnumHandle0(g_hEngine, NULL, &hEnum) != ERROR_SUCCESS) return -1;
     int found = 0;
     for (;;) {
         FWPM_FILTER0** entries = NULL;
         UINT32 got = 0;
         DWORD status = FwpmFilterEnum0(g_hEngine, hEnum, 64, &entries, &got);
+        if (status != ERROR_SUCCESS) found = -1;
         if (status != ERROR_SUCCESS || got == 0) {
             if (entries) FwpmFreeMemory0((void**)&entries);
             break;
         }
-        for (UINT32 i = 0; i < got && !found; i++) {
-            found = memcmp(&entries[i]->subLayerKey, &OMINULL_SUBLAYER_USER_GUID, sizeof(GUID)) == 0 &&
-                    entries[i]->displayData.name &&
-                    wcscmp(entries[i]->displayData.name, OMINULL_BLOCK_ALL_NAME) == 0;
-        }
+        for (UINT32 i = 0; i < got && !found; i++) found = IsOwnBlockAll(entries[i]);
         FwpmFreeMemory0((void**)&entries);
         if (found || got < 64) break;
     }
     FwpmFilterDestroyEnumHandle0(g_hEngine, hEnum);
     return found;
+}
+
+// Wfp_LiftIsolation removes only the default deny. Everything else stays: peer
+// blocks keep blocking, and with nothing below them the permits change nothing.
+DWORD Wfp_LiftIsolation(void) {
+    return Wfp_DeleteFilters(1);
 }
 
 DWORD Wfp_UnisolateHost(void) {
@@ -677,7 +690,7 @@ DWORD Wfp_ApplyState(const OMINULL_HUB_TARGETS *hub, int isolate,
     }
     DWORD status = FwpmTransactionBegin0(g_hEngine, 0);
     if (status != ERROR_SUCCESS) return status;
-    status = Wfp_DeleteOwnFilters();
+    status = Wfp_DeleteFilters(0);
     if (status == ERROR_SUCCESS) status = Wfp_AddHubPermits(hub);
     if (status == ERROR_SUCCESS && (isolate || blockedCount)) status = Wfp_AddIPv6LinkControl();
     if (status == ERROR_SUCCESS && isolate)

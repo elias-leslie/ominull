@@ -119,15 +119,51 @@ static void LockAndLeftovers(const char *path, OMINULL_HUB_TARGETS *hub) {
     assert(!EnforcementTeardown("iptables"));
     assert(!strstr(ReadCommands(path), "-F OMINULL_ISO_IN\n"));
 
-    /* A restart finds the default deny still in force, in either family. */
+    /* A restart finds the default deny still in force, in either family or chain. */
     ResetCommands(path);
     appliedIsolated = false;
+    g_RulesAdopted = false;
     AdoptRulesInForce();
-    assert(!appliedIsolated);
+    assert(!appliedIsolated && g_RulesAdopted);
+    g_RulesAdopted = false;
     setenv("OMINULL_FIXTURE_PRESENT", "ip6tables -w 5 -C OMINULL_ISO_OUT -j DROP$", 1);
     AdoptRulesInForce();
-    assert(appliedIsolated);
+    assert(appliedIsolated && g_RulesAdopted);
     appliedIsolated = false;
+    g_RulesAdopted = false;
+    setenv("OMINULL_FIXTURE_PRESENT", " -C OMINULL_ISO_OUT_N -j DROP$", 1);
+    AdoptRulesInForce();
+    assert(appliedIsolated);
+    /* A held lock is no answer: it asks again. */
+    ResetCommands(path);
+    appliedIsolated = false;
+    g_RulesAdopted = false;
+    setenv("OMINULL_FIXTURE_FAIL", " -C OMINULL_ISO_OUT -j DROP$", 1);
+    setenv("OMINULL_FIXTURE_FAIL_CODE", "4", 1);
+    AdoptRulesInForce();
+    assert(!g_RulesAdopted);
+    ResetCommands(path);
+    AdoptRulesInForce();
+    assert(g_RulesAdopted);
+
+    /* The dead-man timer takes out the default deny and nothing else, restart or
+     * no restart, and keeps at it until the rule is really gone. */
+    ResetCommands(path);
+    appliedIsolated = true;
+    setenv("OMINULL_FIXTURE_FAIL", "iptables -w 5 -C OMINULL_ISO_OUT -j DROP$", 1);
+    setenv("OMINULL_FIXTURE_FAIL_CODE", "4", 1);
+    for (int i = 0; i < 200; i++) HubContact(false);
+    assert(appliedIsolated && strstr(g_ApplyNote, "not applied"));
+    ResetCommands(path);
+    HubContact(false);
+    assert(!appliedIsolated && !g_ApplyNote[0]);
+    const char *data = ReadCommands(path);
+    assert(strstr(data, "iptables -w 5 -D OMINULL_ISO_OUT -j DROP\n"));
+    assert(strstr(data, "ip6tables -w 5 -D OMINULL_ISO_IN -j DROP\n") ||
+           access("/proc/net/if_inet6", F_OK) != 0);
+    assert(!strstr(data, " -F ") && !strstr(data, " -X ") && !strstr(data, " -D OUTPUT"));
+    HubContact(true);
+    g_ApplyRefused = false;
 }
 /* Loopback and DHCP hold the swap back; other permits only report. */
 static void Permits(const char *path, OMINULL_HUB_TARGETS *hub) {

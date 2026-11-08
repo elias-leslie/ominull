@@ -1684,9 +1684,16 @@ static bool DropChain(const char* tool, const char* hook, const char* chain) {
     return FwSaysAbsent(RunFw(list));
 }
 
+/* NoIPv6Here: a host with IPv6 turned off has no IPv6 rules to keep, and its
+ * ip6tables can answer anything at all, a lock-style exit 4 included. */
+static bool NoIPv6Here(const char* tool) {
+    return strcmp(tool, "ip6tables") == 0 && access("/proc/net/if_inet6", F_OK) != 0;
+}
+
 /* EnforcementTeardown removes the chains from one table, including what a
  * rebuild that died part-way left behind. It reports whether they are gone. */
 static bool EnforcementTeardown(const char* tool) {
+    if (NoIPv6Here(tool)) return true;
     bool gone = DropChain(tool, "INPUT", OMINULL_CHAIN_IN);
     gone = DropChain(tool, "OUTPUT", OMINULL_CHAIN_OUT) && gone;
     gone = DropChain(tool, "INPUT", OMINULL_NEXT_IN) && gone;
@@ -1707,6 +1714,24 @@ static bool RecoverSwap(const char* tool, const char* hook, const char* chain, c
     (void)RunFw(flush);
     (void)RunFw(drop);
     return RunFw(rename) == 0;
+}
+
+/* LiftDefaultDeny removes only the rule that makes a host isolated. It is the
+ * unconditional DROP: peer and threat DROPs always name an address, so they stay,
+ * and everything left below them is a RETURN that changes nothing. It needs no
+ * knowledge of what the rules hold, so the dead-man timer can use it after a
+ * restart too. */
+static bool LiftDefaultDeny(const char* tool) {
+    if (NoIPv6Here(tool)) return true;
+    const char* chains[] = { OMINULL_CHAIN_IN, OMINULL_CHAIN_OUT, OMINULL_NEXT_IN, OMINULL_NEXT_OUT };
+    bool lifted = true;
+    for (int i = 0; i < 4; i++) {
+        const char* remove[] = { tool, "-D", chains[i], "-j", "DROP", NULL };
+        const char* check[]  = { tool, "-C", chains[i], "-j", "DROP", NULL };
+        for (int n = 0; n < 8 && RunFw(remove) == 0; n++) { }
+        if (!FwSaysAbsent(RunFw(check))) lifted = false;
+    }
+    return lifted;
 }
 
 /* Set by EnforcementBuild when a destination the policy permits did not make it
@@ -1746,6 +1771,7 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
                              char threats[][64], int threatCount,
                              const BASELINE_RULE* baseline, int baselineCount) {
     bool v6 = strcmp(tool, "ip6tables") == 0;
+    if (NoIPv6Here(tool)) return true;
 
     /* A rebuild never touches the rules in force until the new set is whole:
      * rules are written to a second chain, and that chain is hooked in before
@@ -1924,18 +1950,27 @@ static bool g_ApplyRefused = false;
 static const char* g_ApplyNote = "";    /* what last_applied reports */
 static OMINULL_HUB_TARGETS appliedHubTargets;
 
-/* AdoptRulesInForce runs once at startup. Chains outlive the agent, so a host
- * restarted while isolated is still isolated, and if the hub never answers again
- * the dead-man timer has to know that. The list of peers it held is gone with
- * the old process; the hub puts them back when it answers. */
+/* AdoptRulesInForce: chains outlive the agent, so a host restarted while isolated
+ * is still isolated, and if the hub never answers again the dead-man timer has to
+ * know that. Asked until there is a definite answer: a held lock isn't one. */
+static bool g_RulesAdopted = false;
 static void AdoptRulesInForce(void) {
+    if (g_RulesAdopted) return;
     const char* tools[] = { "iptables", "ip6tables" };
+    const char* chains[] = { OMINULL_CHAIN_OUT, OMINULL_NEXT_OUT };
+    bool settled = true;
     for (int i = 0; i < 2; i++) {
+        if (NoIPv6Here(tools[i])) continue;
         (void)RecoverSwap(tools[i], "INPUT", OMINULL_CHAIN_IN, OMINULL_NEXT_IN);
         (void)RecoverSwap(tools[i], "OUTPUT", OMINULL_CHAIN_OUT, OMINULL_NEXT_OUT);
-        const char* deny[] = { tools[i], "-C", OMINULL_CHAIN_OUT, "-j", "DROP", NULL };
-        if (RunFw(deny) == 0) appliedIsolated = true;
+        for (int c = 0; c < 2; c++) {
+            const char* deny[] = { tools[i], "-C", chains[c], "-j", "DROP", NULL };
+            int rc = RunFw(deny);
+            if (rc == 0) appliedIsolated = true;
+            else if (!FwSaysAbsent(rc)) settled = false;
+        }
     }
+    g_RulesAdopted = settled;
 }
 
 /* SameAddress compares two address literals as addresses (family and bytes),
@@ -2085,7 +2120,7 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
 
     OMINULL_HUB_TARGETS hubTargets = {0};
     bool haveHub = OminullResolveHub(config->hub_url, &hubTargets);
-    if (!haveHub && appliedHubTargets.count > 0) {
+    if (!haveHub && appliedHubTargets.count > 0 && (appliedIsolated || appliedPeerCount || appliedThreatCount)) {
         /* The lookup may be failing because of the isolation itself. The hole in
          * force is good enough to change the rules, including to lift them. */
         hubTargets = appliedHubTargets;
@@ -2107,7 +2142,7 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
         return;
     }
 
-    if (g_ApplyRefused) {
+    if (g_ApplyRefused || g_PermitsRetry) {
         /* Said already; the outcome is reported below when it changes. */
     } else if (wantIsolated) {
         printf("[!] Threat Nullification: isolating this host. Permitted: hub %s, loopback, "
@@ -2120,7 +2155,7 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     } else if (peerCount != appliedPeerCount) {
         printf("[*] Mesh quarantine updated: %d peer(s).\n", peerCount);
     }
-    if (threatCount > 0 && !g_ApplyRefused) {
+    if (threatCount > 0 && !g_ApplyRefused && !g_PermitsRetry) {
         printf("[*] In-line edge threat intelligence: active drop rules for %d indicator(s).\n", threatCount);
     }
     fflush(stdout);
@@ -2179,9 +2214,8 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
  * answered and accepted; a run of failures while this host is isolated releases
  * the isolation.
  *
- * The release rebuilds rather than tears down: the mesh quarantine this host was
- * also holding is not this timer's to lift. Only the default-deny that made the
- * host unreachable goes. */
+ * The mesh quarantine this host was also holding is not this timer's to lift.
+ * Only the default-deny that made the host unreachable goes. */
 static void HubContact(bool accepted) {
     static int missed = 0;
 
@@ -2195,6 +2229,7 @@ static void HubContact(bool accepted) {
         missed = 0;
         return;
     }
+    AdoptRulesInForce();
     if (!appliedIsolated) {
         missed = 0;                          /* nothing to roll back */
         return;
@@ -2204,25 +2239,13 @@ static void HubContact(bool accepted) {
     if (!g_ApplyRefused) {
         printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. "
                "Releasing this host's isolation: an isolation the hub cannot lift is not a "
-               "containment, it is a lost endpoint. %d quarantined peer(s) stay blocked.\n",
-               missed, appliedPeerCount);
+               "containment, it is a lost endpoint. Quarantined peers stay blocked.\n",
+               missed);
         fflush(stdout);
     }
 
-    bool built;
-    if (appliedPeerCount == 0 && appliedThreatCount == 0) {
-        built = EnforcementTeardown("iptables");
-        built = EnforcementTeardown("ip6tables") && built;
-    } else {
-        built = EnforcementBuild("iptables", false, &appliedHubTargets, appliedAllow, 0,
-                                 appliedPeers, appliedPeerCount,
-                                 appliedThreats, appliedThreatCount,
-                                 appliedBaseline, appliedBaselineCount);
-        built = EnforcementBuild("ip6tables", false, &appliedHubTargets, appliedAllow, 0,
-                                 appliedPeers, appliedPeerCount,
-                                 appliedThreats, appliedThreatCount,
-                                 appliedBaseline, appliedBaselineCount) && built;
-    }
+    bool built = LiftDefaultDeny("iptables");
+    built = LiftDefaultDeny("ip6tables") && built;
     if (!built) {
         /* Still isolated, or isolated in one family: the count stays past the
          * limit, and what is applied is no longer known once the hub is back. */
@@ -3632,8 +3655,16 @@ int main(int argc, char* argv[]) {
 
     if (doConfigure) return ConfigureFromStdin() ? 0 : 1;
     if (doCleanup) {
-        EnforcementTeardown("iptables");
-        EnforcementTeardown("ip6tables");
+        /* This is the local way out, so it says when it did not work. */
+        bool gone = false;
+        for (int i = 0; i < 3 && !gone; i++) {
+            gone = EnforcementTeardown("iptables");
+            gone = EnforcementTeardown("ip6tables") && gone;
+        }
+        if (!gone) {
+            fprintf(stderr, "[-] The Ominull firewall rules are still there; something may be holding the firewall lock. Run --cleanup again.\n");
+            return 1;
+        }
         Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
         if (g_Trust.state.exists) Trust_LocalRelease(&g_Trust);
         return 0;

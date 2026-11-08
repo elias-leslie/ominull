@@ -110,6 +110,7 @@ typedef struct _OMINULL_EVENT {
  * tool. */
 DWORD Wfp_Init(int dynamicSession);
 int Wfp_IsolationInForce(void);
+DWORD Wfp_LiftIsolation(void);
 void Wfp_Close(void);
 
 /* The baseline isolation policy, as the hub resolves it for this endpoint: what

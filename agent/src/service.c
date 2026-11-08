@@ -664,10 +664,6 @@ static bool EnforcementEngineReady(void) {
     if (engineTried) return engineReady;
     engineTried = true;
     engineReady = (Wfp_Init(0) == ERROR_SUCCESS);
-    /* The filters outlive this service, so a host restarted while isolated is
-     * still isolated, and if the hub never answers again the dead-man timer has
-     * to know that. The hub restores whatever else it was holding when it answers. */
-    if (engineReady && Wfp_IsolationInForce()) appliedIsolated = true;
     if (!engineReady) {
         printf("[-] The user-mode filtering engine would not open, so isolation cannot be "
                "enforced on this host. Administrator rights are required.\n");
@@ -815,6 +811,18 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
  * The Windows endpoint is the one where this matters most. When an isolation
  * here cannot be released, the only channel left is the agent's own outbound
  * pinhole to the hub - and if the floor is what broke, that is gone too. */
+/* AdoptIsolationInForce: the filters outlive this service, so a host restarted
+ * while isolated is still isolated, and if the hub never answers again the
+ * dead-man timer has to know that. Asked until there is a definite answer. */
+static void AdoptIsolationInForce(void) {
+    static bool settled = false;
+    if (settled || !EnforcementEngineReady()) return;
+    int inForce = Wfp_IsolationInForce();
+    if (inForce < 0) return;
+    settled = true;
+    if (inForce) appliedIsolated = true;
+}
+
 static void HubContact(bool accepted) {
     static int missed = 0;
 
@@ -827,7 +835,7 @@ static void HubContact(bool accepted) {
         missed = 0;
         return;
     }
-    (void)EnforcementEngineReady();          /* finds an isolation that outlived a restart */
+    AdoptIsolationInForce();
     if (!appliedIsolated) {
         missed = 0;
         return;
@@ -838,17 +846,12 @@ static void HubContact(bool accepted) {
     static bool releaseFailed = false;
     if (!releaseFailed) printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. Releasing "
            "this host's isolation: an isolation the hub cannot lift is not a containment, it is a "
-           "lost endpoint. %d quarantined peer(s) stay blocked.\n", missed, appliedPeerCount);
+           "lost endpoint. Quarantined peers stay blocked.\n", missed);
     fflush(stdout);
 
-    bool released = false;
-    if (engineReady) {
-        const char* blocked[MAX_BLOCKED_PEERS];
-        for (int i = 0; i < appliedPeerCount; i++) blocked[i] = appliedPeers[i];
-        released = (Wfp_ApplyState(&appliedHubTargets, 0, blocked, appliedPeerCount, NULL, 0,
-                                   appliedBaseline, appliedBaselineCount,
-                                   0) == ERROR_SUCCESS);
-    }
+    /* Only the default deny goes. Quarantined peers stay blocked, including ones
+     * this process never heard about because it restarted while isolated. */
+    bool released = engineReady && Wfp_LiftIsolation() == ERROR_SUCCESS;
 
     if (released) {
         appliedIsolated = false;
