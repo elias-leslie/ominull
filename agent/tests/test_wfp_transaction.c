@@ -108,5 +108,10 @@ int main(void) {
     assert(live_count == 10 && !transaction);
     puts("WFP replacement commits both directions and preserves old state on "
          "failure");
+    /* A range is an allow entry like an address: the agent used to drop these. */
+    assert(Wfp_CanAllow("198.51.100.7") && Wfp_CanAllow("198.51.100.0/25"));
+    assert(Wfp_CanAllow("2001:db8::7") && Wfp_CanAllow("2001:db8::/48"));
+    assert(!Wfp_CanAllow("fe80::1%11") && !Wfp_CanAllow("fe80::/64"));
+    assert(!Wfp_CanAllow("example.com") && !Wfp_CanAllow("198.51.100.0/99"));
     return 0;
 }

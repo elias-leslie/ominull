@@ -650,6 +650,16 @@ static char g_ApplyNote[160] = {0};
  * just isolated the host is still watching. */
 #define OMINULL_DEADMAN_BEATS 120   /* unsupervised; an owner's isolation: Agent_TrustDeadmanBeats */
 
+/* The hub counts a signed allow entry as enforced, so one the engine can't hold
+ * has to be reported. Clears the note otherwise. */
+static void NoteDroppedAllow(int dropped) {
+    g_ApplyNote[0] = '\0';
+    if (dropped > 0) {
+        snprintf(g_ApplyNote, sizeof(g_ApplyNote),
+                 "policy partly applied: %d allowed destination(s) the filtering engine cannot hold", dropped);
+    }
+}
+
 /* EnforcementEngineReady probes the filtering engine once and caches the answer.
  *
  * It is called from two places that want it for different reasons: the enforcer,
@@ -704,14 +714,15 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
 
     char allow[MAX_BLOCKED_PEERS][PEER_ADDR_LEN];
     int allowCount = Agent_TrustAllow(allow, MAX_BLOCKED_PEERS);
-    /* Only addresses the filtering engine can hold (no link-local, no scope). */
+    /* Only what the filtering engine can hold (no link-local, no scope). */
     int kept = 0;
     for (int i = 0; i < peerCount; i++)
         if (IsIPLiteralAny(peers[i])) memmove(peers[kept++], peers[i], PEER_ADDR_LEN);
     peerCount = kept;
     kept = 0;
     for (int i = 0; i < allowCount; i++)
-        if (IsIPLiteralAny(allow[i])) memmove(allow[kept++], allow[i], PEER_ADDR_LEN);
+        if (Wfp_CanAllow(allow[i])) memmove(allow[kept++], allow[i], PEER_ADDR_LEN);
+    int droppedAllow = allowCount - kept;
     allowCount = kept;
 
     /* An isolation's exceptions are the ones bound into it (the authority signed
@@ -743,7 +754,7 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
     for (int i = 0; !changed && i < allowCount; i++) {
         if (strcmp(allow[i], appliedAllow[i]) != 0) changed = true;
     }
-    if (!changed) { g_ApplyNote[0] = '\0'; return; }
+    if (!changed) { NoteDroppedAllow(droppedAllow); return; }
 
     OMINULL_HUB_TARGETS hubTargets = {0};
     if ((wantIsolated || peerCount) && !ResolveHubTargets(config, &hubTargets)) {
@@ -787,7 +798,7 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
             printf("[+] Threat neutralized: host isolation lifted. %d peer block(s) in force.\n", peerCount);
         }
 
-    g_ApplyNote[0] = '\0';
+    NoteDroppedAllow(droppedAllow);
     appliedHubTargets = hubTargets;
 	appliedIsolated = wantIsolated;
     memcpy(appliedPeers, peers, sizeof(peers));

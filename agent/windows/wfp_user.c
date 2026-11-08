@@ -303,6 +303,13 @@ static int AllowCondition(const char* entry, FWPM_FILTER_CONDITION0* cond, OMINU
     return 0;
 }
 
+/* Wfp_CanAllow says whether an allow entry, an address or a range, fits a filter. */
+int Wfp_CanAllow(const char* entry) {
+    FWPM_FILTER_CONDITION0 cond;
+    OMINULL_ALLOW_STORE store;
+    return AllowCondition(entry, &cond, &store) != 0;
+}
+
 /* UdpRemotePort builds the two conditions that name one UDP service.
  *
  * The port is the remote one in both directions on purpose: outbound it is the
