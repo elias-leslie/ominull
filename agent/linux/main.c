@@ -2220,6 +2220,37 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
  *
  * The mesh quarantine this host was also holding is not this timer's to lift.
  * Only the default-deny that made the host unreachable goes. */
+/* FollowHubAddress: a hub that moved can't say so to an isolated host, whose hole still
+ * points at the old address, so the host would wait for the dead-man timer to release
+ * it. While the hub isn't answering, its name is looked up again and the hole follows
+ * the answer: the hub's TCP port only, and the same lookup every apply already trusts.
+ * Needs rules this run built: after a restart the lists aren't known. */
+static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
+    if (!known || !appliedIsolated || appliedHubTargets.count == 0) return;
+    OMINULL_HUB_TARGETS current = {0};
+    if (!OminullResolveHub(config->hub_url, &current) || OminullHubTargetsSame(&current, &appliedHubTargets)) return;
+    bool built = EnforcementBuild("iptables", true, &current, appliedAllow, appliedAllowCount, appliedPeers,
+                                  appliedPeerCount, appliedThreats, appliedThreatCount,
+                                  appliedBaseline, appliedBaselineCount);
+    built = EnforcementBuild("ip6tables", true, &current, appliedAllow, appliedAllowCount, appliedPeers,
+                             appliedPeerCount, appliedThreats, appliedThreatCount,
+                             appliedBaseline, appliedBaselineCount) && built;
+    /* One family may hold the new rules: the hub's next answer rebuilds whatever
+     * happens here, and the next beat tries again if it doesn't come. */
+    if (!built) {
+        g_ForgetApplied = true;
+        printf("[-] The hub's address changed to %s but the firewall refused the new rules; "
+               "trying again next beat.\n", current.addresses[0]);
+        fflush(stdout);
+        return;
+    }
+    printf("[!] Isolated, and the hub isn't answering at its old address: it now resolves to %s, "
+           "so its hole moved there.\n", current.addresses[0]);
+    fflush(stdout);
+    appliedHubTargets = current;
+    if (g_PermitsRetry) g_ForgetApplied = true;
+}
+
 static void HubContact(bool accepted) {
     static int missed = 0;
 
@@ -3331,6 +3362,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         SyncEnforcement(config, respBuf);
         ProcessResponseOffers(config, respBuf);
     }
+    if (!accepted) FollowHubAddress(config);
     HubContact(accepted);
     UPLOAD_LOSS loss = {0};
     if (accepted) {
