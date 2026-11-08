@@ -16,7 +16,7 @@ func TestRepositoryPackagesParse(t *testing.T) {
 	want := map[string]bool{"windows-updates": true, "windows-cleanup": true, "windows-privacy": true,
 		"windows-debloat": true, "windows-performance": true, "windows-audit": true, "windows-maintenance-mode": true, "windows-software-removal": true,
 		"windows-reboot": true, "linux-maintenance-mode": true, "linux-reboot": true,
-		"linux-cleanup": true}
+		"linux-cleanup": true, "windows-security-baseline": true, "linux-security-baseline": true}
 	for _, f := range files {
 		h, _, err := readPackage(f)
 		if err != nil {
