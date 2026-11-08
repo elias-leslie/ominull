@@ -280,13 +280,15 @@ func TestScreenWatchers(t *testing.T) {
 	for i := 0; i < MaxWatchers; i++ {
 		watchers = append(watchers, h.dial("/watch", q))
 	}
+	// A dial returns before the hub has counted the socket; the cap can only
+	// refuse once all of them are counted.
+	waitFor(t, func() bool { return h.mgr.WatcherCount(sess.SessionID) == MaxWatchers })
 	u, _ := url.Parse(h.srv.URL)
 	u.Scheme, u.Path, u.RawQuery = "ws", "/watch", q.Encode()
 	if c, _, err := websocket.DefaultDialer.Dial(u.String(), nil); err == nil {
 		c.Close()
 		t.Fatal("watcher cap not enforced")
 	}
-	waitFor(t, func() bool { return h.mgr.WatcherCount(sess.SessionID) == MaxWatchers })
 
 	tile := []byte{1, 0, 1, 0, 9, 9}
 	if err := agent.WriteMessage(websocket.BinaryMessage, tile); err != nil {
