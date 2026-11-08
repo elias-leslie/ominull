@@ -313,44 +313,9 @@ static inline bool Screen_ParsePayloadWindows(const char* json, ScreenSessionPar
     if (!json || !out) return false;
     memset(out, 0, sizeof(*out));
     char operator_raw[256] = {0};
-    /* A repeated member is refused (as in ScreenCanonicalFromOffer), so the
-     * grant digest and this reader never take different values. */
-    bool seen_sid = false, seen_mode = false, seen_tok = false, seen_op = false;
-    TermJson j;
-    if (!TermJson_Begin(&j, json, strlen(json))) return false;
-    for (;;) {
-        const char *k = NULL, *v = NULL;
-        size_t kl = 0, vl = 0;
-        char vt = 0;
-        int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
-        if (r == 0) break;
-        if (r < 0) return false;
-        static const char* const known[] = {"session_id", "mode", "connect_token", "operator", "unattended", "ask_first"};
-        if (TermJson_Member(k, kl, known, 6) == -2) return false;
-        if (TermJson_KeyIs(k, kl, "session_id")) {
-            if (seen_sid) return false;
-            seen_sid = true;
-            if (vt != 's' || !TermJson_CopyString(v, vl, out->session_id, sizeof(out->session_id))) return false;
-        } else if (TermJson_KeyIs(k, kl, "mode")) {
-            if (seen_mode) return false;
-            seen_mode = true;
-            if (vt != 's' || !TermJson_CopyString(v, vl, out->mode, sizeof(out->mode))) return false;
-        } else if (TermJson_KeyIs(k, kl, "connect_token")) {
-            if (seen_tok) return false;
-            seen_tok = true;
-            if (vt != 's' || !TermJson_CopyString(v, vl, out->connect_token, sizeof(out->connect_token))) return false;
-        } else if (TermJson_KeyIs(k, kl, "operator")) {
-            if (seen_op) return false;
-            seen_op = true;
-            if (vt != 's' || !TermJson_CopyString(v, vl, operator_raw, sizeof(operator_raw))) return false;
-        } else if (TermJson_KeyIs(k, kl, "unattended")) {
-            if (out->unattended || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false; /* true or absent only */
-            out->unattended = true;
-        } else if (TermJson_KeyIs(k, kl, "ask_first")) {
-            if (out->ask_first || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false;
-            out->ask_first = true;
-        }
-    }
+    if (!Screen_ReadPayload(json, out->session_id, sizeof(out->session_id), out->mode, sizeof(out->mode), out->connect_token,
+                            sizeof(out->connect_token), operator_raw, sizeof(operator_raw), &out->unattended, &out->ask_first))
+        return false;
     if (out->session_id[0] == '\0' || out->connect_token[0] == '\0') return false;
     if (out->mode[0] == '\0') strncpy(out->mode, "control", sizeof(out->mode) - 1);
     /* Only the two defined modes; anything else is rejected rather than coerced. */

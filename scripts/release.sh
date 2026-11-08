@@ -177,6 +177,8 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     "${ROOT_DIR}/build/test_cert_renewal"
     echo "[*] Replaying the hub-input fuzz seeds and fixed crashes under ASan/UBSan."
     "${ROOT_DIR}/scripts/fuzz-agent.sh" --regress
+    echo "[*] Comparing the Rust hub-input library with the C readers, and running the agent tests on it."
+    "${ROOT_DIR}/scripts/test-agent-hub-input.sh"
 fi
 
 if [ "${DO_HUB}" -eq 1 ]; then

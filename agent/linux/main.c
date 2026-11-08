@@ -43,6 +43,7 @@
 #include "../include/hub_reply.h"
 #include "../include/response_dispatcher.h"
 #include "../include/agent_trust.h"
+#include "../include/hub_scrape.h"
 #include "../include/release_verify_posix.h"
 #include "../include/terminal_linux.h"
 #include "../include/forensics_linux.h"
@@ -1841,32 +1842,28 @@ static void EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
  * it or is not the hub, and both are worth a line in the log. The value itself
  * is never echoed - it is attacker-controlled text and this log is read by
  * people and by journald. */
+typedef struct {
+    const char* key;
+    char (*out)[64];
+    int cap;
+    int count;
+} AddressListCtx;
+
+static void TakeAddress(const char* ip, void* ctx) {
+    AddressListCtx* c = (AddressListCtx*)ctx;
+    if (!IsIPLiteral(ip)) {
+        printf("[!] Hub sent a %s entry that is not an IP address; ignoring it.\n", c->key);
+        fflush(stdout);
+        return;
+    }
+    if (c->count < c->cap) snprintf(c->out[c->count++], 64, "%s", ip);
+}
+
 static int ParseAddressList(const char* respJson, const char* key,
                             char out[][64], int cap) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":[", key);
-    const char* p = strstr(respJson, needle);
-    if (!p) return 0;
-    p += strlen(needle);
-
-    int count = 0;
-    while (*p && *p != ']') {
-        while (*p && (*p == ' ' || *p == ',' || *p == '"' || *p == '\n' || *p == '\r')) p++;
-        if (*p == ']' || !*p) break;
-        char ip[64] = {0};
-        int idx = 0;
-        while (*p && *p != '"' && *p != ']' && *p != ',' && idx < (int)sizeof(ip) - 1) {
-            ip[idx++] = *p++;
-        }
-        if (!ip[0]) continue;
-        if (!IsIPLiteral(ip)) {
-            printf("[!] Hub sent a %s entry that is not an IP address; ignoring it.\n", key);
-            fflush(stdout);
-            continue;
-        }
-        if (count < cap) snprintf(out[count++], 64, "%s", ip);
-    }
-    return count;
+    AddressListCtx c = {key, out, cap, 0};
+    Scrape_AddressList(respJson, key, TakeAddress, &c);
+    return c.count;
 }
 
 /* What this agent has actually put in the kernel. At file scope rather than
@@ -2328,17 +2325,7 @@ static int AppendObservations(const LINUX_AGENT_CONFIG* config, char* buf, size_
 // update descriptor has no nesting or escaping beyond this, so a full parser is not
 // warranted here.
 static bool ExtractJsonString(const char* json, const char* key, char* out, size_t outLen) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
-    const char* p = strstr(json, needle);
-    if (!p) return false;
-    p += strlen(needle);
-    size_t idx = 0;
-    while (*p && *p != '"' && idx < outLen - 1) {
-        out[idx++] = *p++;
-    }
-    out[idx] = '\0';
-    return idx > 0;
+    return Scrape_StringFlat(json, key, out, outLen);
 }
 
 // AdoptDeviceCredential moves an upgraded legacy endpoint to its unique

@@ -7,6 +7,7 @@
 #include <aclapi.h>
 #include "../include/agent.h"
 #include "../include/hub_reply.h"
+#include "../include/hub_scrape.h"
 #include "../include/cert_renewal.h"
 #include "../windows/udp_collector.h"
 #include "../windows/tcp_pending.h"
@@ -1162,23 +1163,11 @@ static bool WriteProtectedFile(const char* path, const char* data) {
     return true;
 }
 
-static bool ExtractDeviceCredential(const char* json, char* out, size_t outLen) {
-    const char* marker = strstr(json, "\"device_credential\":\"");
-    if (!marker || outLen == 0) return false;
-    marker += strlen("\"device_credential\":\"");
-    size_t n = 0;
-    while (marker[n] && marker[n] != '"' && n < outLen - 1) n++;
-    if (marker[n] != '"') return false;
-    memcpy(out, marker, n);
-    out[n] = '\0';
-    return n == 68 && strncmp(out, "omd_", 4) == 0;
-}
-
 bool Service_AdoptDeviceCredential(AGENT_CONFIG* config, const char* responseJson) {
     if (!config || !responseJson || strncmp(config->api_key, "omd_", 4) == 0) return false;
 
     char credential[128] = {0};
-    if (!ExtractDeviceCredential(responseJson, credential, sizeof(credential))) return false;
+    if (!Scrape_DeviceCredential(responseJson, credential, sizeof(credential))) return false;
 
     const char* target = config->key_path[0] ? config->key_path : OMINULL_DEFAULT_KEY_PATH;
     if (!WriteProtectedFile(target, credential)) {

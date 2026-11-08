@@ -4,7 +4,8 @@
 //! Deliberately stricter than the C it replaces, in ways no genuine signer or
 //! hub produces: an Ed25519 S at or above the group order is refused (Go refuses
 //! it too), hex is hex digits only (sscanf took a sign, a space or "0x"), and
-//! DER on Windows must be exact (openssl on Linux already required that).
+//! DER must be exact: Windows' reader was laxer, and the openssl command ignored
+//! anything past a key's largest signature (72 bytes) in the file.
 
 #![allow(deprecated)] // sha2 0.10's block type is generic-array 0.14
 

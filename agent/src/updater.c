@@ -17,6 +17,7 @@
 #include <bcrypt.h>
 #include <ctype.h>
 #include "../include/release_verify_win.h"
+#include "../include/hub_scrape.h"
 
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
@@ -50,20 +51,7 @@ static void PathIn(const char* dir, const char* leaf, char* out, size_t cap) {
  * responses this parses are small and flat; anything it cannot understand ends
  * up rejected by the checks downstream rather than guessed at. */
 static bool ExtractJsonString(const char* json, const char* key, char* out, size_t outLen) {
-    char pattern[64];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    const char* p = strstr(json, pattern);
-    if (!p) return false;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') return false;
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"' && i < outLen - 1) {
-        out[i++] = *p++;
-    }
-    out[i] = '\0';
-    return i > 0;
+    return Scrape_StringSpaced(json, key, out, outLen);
 }
 
 /* IsSafeUrlPath keeps anything exotic out of a value that becomes a request

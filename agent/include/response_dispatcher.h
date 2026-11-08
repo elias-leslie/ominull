@@ -643,6 +643,51 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
  * Grant Verification & Digest Verification
  * ------------------------------------------------------------------------- */
 
+/* Screen_ReadPayload reads the screen offer payload's members for the Windows
+ * worker; the caller applies the session rules. A repeated member is refused
+ * (as in ScreenCanonicalFromOffer), so the grant digest and this reader never
+ * take different values. */
+static inline bool Screen_ReadPayload(const char* json, char* sid, size_t sid_max, char* mode, size_t mode_max, char* tok, size_t tok_max,
+                                      char* op, size_t op_max, bool* unattended, bool* ask_first) {
+    bool seen_sid = false, seen_mode = false, seen_tok = false, seen_op = false;
+    TermJson j;
+    if (!TermJson_Begin(&j, json, strlen(json))) return false;
+    for (;;) {
+        const char *k = NULL, *v = NULL;
+        size_t kl = 0, vl = 0;
+        char vt = 0;
+        int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
+        if (r == 0) break;
+        if (r < 0) return false;
+        static const char* const known[] = {"session_id", "mode", "connect_token", "operator", "unattended", "ask_first"};
+        if (TermJson_Member(k, kl, known, 6) == -2) return false;
+        if (TermJson_KeyIs(k, kl, "session_id")) {
+            if (seen_sid) return false;
+            seen_sid = true;
+            if (vt != 's' || !TermJson_CopyString(v, vl, sid, sid_max)) return false;
+        } else if (TermJson_KeyIs(k, kl, "mode")) {
+            if (seen_mode) return false;
+            seen_mode = true;
+            if (vt != 's' || !TermJson_CopyString(v, vl, mode, mode_max)) return false;
+        } else if (TermJson_KeyIs(k, kl, "connect_token")) {
+            if (seen_tok) return false;
+            seen_tok = true;
+            if (vt != 's' || !TermJson_CopyString(v, vl, tok, tok_max)) return false;
+        } else if (TermJson_KeyIs(k, kl, "operator")) {
+            if (seen_op) return false;
+            seen_op = true;
+            if (vt != 's' || !TermJson_CopyString(v, vl, op, op_max)) return false;
+        } else if (TermJson_KeyIs(k, kl, "unattended")) {
+            if (*unattended || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false; /* true or absent only */
+            *unattended = true;
+        } else if (TermJson_KeyIs(k, kl, "ask_first")) {
+            if (*ask_first || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false;
+            *ask_first = true;
+        }
+    }
+    return true;
+}
+
 /* ScreenCanonicalFromOffer rebuilds the exact bytes the hub digested for a
  * screen_session grant (REMOTE_SCREEN.md §3/§6): {"mode":"control|view"} with
  * ,"unattended":true and/or ,"ask_first":true appended in that fixed order, no
