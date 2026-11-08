@@ -22,8 +22,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "hub_input.h"
+
 static const char* g_ReleaseVerifyPem = NULL;      /* PEM public key; set before use */
-static char g_ReleaseVerifyDir[200] = "/var/lib/ominull";
+__attribute__((unused)) static char g_ReleaseVerifyDir[200] = "/var/lib/ominull";
 
 static inline bool ReleaseVerify_Write(const char* path, const void* data, size_t len) {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
@@ -45,6 +47,9 @@ static inline bool ReleaseVerify_Write(const char* path, const void* data, size_
 /* ReleaseVerifyPosixKey checks the signature against the PEM public key pem. */
 static inline bool ReleaseVerifyPosixKey(const char* pem, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
     if (!pem || !msg || !der || !derlen) return false;
+#ifdef HI_CRYPTO
+    return hi_p256_verify_pem(pem, msg, len, der, derlen);
+#else
     char dir[260], fm[300], fs[300], fp[300];
     snprintf(dir, sizeof(dir), "%.190s/.release-verify-XXXXXX", g_ReleaseVerifyDir);
     if (!mkdtemp(dir)) return false;
@@ -80,6 +85,7 @@ static inline bool ReleaseVerifyPosixKey(const char* pem, const char* msg, size_
     unlink(fp);
     rmdir(dir);
     return ok;
+#endif
 }
 
 /* ReleaseVerifyPosix checks against the compiled-in release key only: the

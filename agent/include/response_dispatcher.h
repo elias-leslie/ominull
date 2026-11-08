@@ -69,6 +69,7 @@ typedef struct {
     uint64_t count;
     uint8_t  buffer[64];
 } ResponseSHA256Context;
+_Static_assert(sizeof(ResponseSHA256Context) == 104, "ResponseSHA256Context differs from agent/hubinput/src/abi.rs");
 
 static inline uint32_t Response_ROTR32(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32 - n));
@@ -119,14 +120,21 @@ static inline void Response_SHA256_Transform(ResponseSHA256Context* ctx, const u
 }
 
 static inline void Response_SHA256_Init(ResponseSHA256Context* ctx) {
+#ifdef HI_CRYPTO
+    hi_sha256_init(ctx);
+#else
     ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
     ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
     ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;
     ctx->state[6] = 0x1f83d9ab; ctx->state[7] = 0x5be0cd19;
     ctx->count = 0;
+#endif
 }
 
 static inline void Response_SHA256_Update(ResponseSHA256Context* ctx, const uint8_t* data, size_t len) {
+#ifdef HI_CRYPTO
+    hi_sha256_update(ctx, data, len);
+#else
     size_t buffer_idx = (size_t)(ctx->count & 0x3F);
     ctx->count += len;
 
@@ -148,9 +156,13 @@ static inline void Response_SHA256_Update(ResponseSHA256Context* ctx, const uint
     if (len > 0) {
         memcpy(ctx->buffer + buffer_idx, data, len);
     }
+#endif
 }
 
 static inline void Response_SHA256_Final(ResponseSHA256Context* ctx, uint8_t hash[32]) {
+#ifdef HI_CRYPTO
+    hi_sha256_final(ctx, hash);
+#else
     uint64_t total_bits = ctx->count * 8;
     size_t buffer_idx = (size_t)(ctx->count & 0x3F);
 
@@ -173,13 +185,18 @@ static inline void Response_SHA256_Final(ResponseSHA256Context* ctx, uint8_t has
         hash[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
         hash[i * 4 + 3] = (uint8_t)(ctx->state[i]);
     }
+#endif
 }
 
 static inline void Response_SHA256_Sum(const uint8_t* data, size_t len, uint8_t hash[32]) {
+#ifdef HI_CRYPTO
+    hi_sha256_sum(data, len, hash);
+#else
     ResponseSHA256Context ctx;
     Response_SHA256_Init(&ctx);
     Response_SHA256_Update(&ctx, data, len);
     Response_SHA256_Final(&ctx, hash);
+#endif
 }
 
 static inline void Response_BytesToHex(const uint8_t* bytes, size_t len, char* hexOut) {
@@ -192,6 +209,9 @@ static inline void Response_BytesToHex(const uint8_t* bytes, size_t len, char* h
 }
 
 static inline bool Response_HexToBytes(const char* hex, uint8_t* out, size_t outLen) {
+#ifdef HI_CRYPTO
+    return hi_hex_to_bytes(hex, out, outLen);
+#else
     if (!hex || strlen(hex) < outLen * 2) return false;
     for (size_t i = 0; i < outLen; i++) {
         unsigned int val;
@@ -199,6 +219,7 @@ static inline bool Response_HexToBytes(const char* hex, uint8_t* out, size_t out
         out[i] = (uint8_t)val;
     }
     return true;
+#endif
 }
 
 /* ---------------------------------------------------------------------------

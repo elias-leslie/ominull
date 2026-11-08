@@ -25,6 +25,7 @@
 #define HI_SCRIPT
 #define HI_TRUST
 #define HI_SCRAPE
+#define HI_CRYPTO
 #endif
 
 enum {

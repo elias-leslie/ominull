@@ -17,6 +17,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hub_input.h"
 
 #define ED_FOR(i,n) for (int i = 0; i < (int)(n); ++i)
 #define ED_SV static void
@@ -360,6 +361,9 @@ static inline bool Ed25519_Verify(
     size_t message_len,
     const ed_u8 public_key[32]
 ) {
+#ifdef HI_CRYPTO
+    return signature && (message || message_len == 0) && public_key && hi_ed25519_verify(signature, message, message_len, public_key);
+#else
     if (!signature || (!message && message_len > 0) || !public_key) return false;
 
     ed_u8 t[32], h[64];
@@ -393,6 +397,7 @@ static inline bool Ed25519_Verify(
     free(sm);
 
     return (verified == 0);
+#endif
 }
 
 /*

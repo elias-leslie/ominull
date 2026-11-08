@@ -15,8 +15,12 @@
 #include <string.h>
 
 #include "der_sig.h"
+#include "hub_input.h"
 
 static inline bool ReleaseVerifyWinHash(const uint8_t xy[64], const uint8_t hash[32], const uint8_t* der, size_t derlen) {
+#ifdef HI_CRYPTO
+    return xy && hash && der && hi_p256_verify_hash(xy, hash, der, derlen);
+#else
     unsigned char raw[64];
     if (!xy || !hash || !der || !DerToRawSignature(der, derlen, raw)) return false;
     unsigned char blob[sizeof(BCRYPT_ECCKEY_BLOB) + 64];
@@ -33,6 +37,7 @@ static inline bool ReleaseVerifyWinHash(const uint8_t xy[64], const uint8_t hash
     if (hKey) BCryptDestroyKey(hKey);
     BCryptCloseAlgorithmProvider(hAlg, 0);
     return ok;
+#endif
 }
 
 static inline bool ReleaseVerifyWinSha256(const void* data, size_t len, uint8_t out[32]) {

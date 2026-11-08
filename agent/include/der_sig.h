@@ -21,7 +21,7 @@
  * bytes when they have leading zeros; both cases are normalised here. This is
  * plain structure parsing, not cryptography: anything malformed is rejected and
  * the real verification is still done by CNG. */
-static bool DerToRawSignature(const unsigned char* der, size_t derLen, unsigned char out[64]) {
+static inline bool DerToRawSignature(const unsigned char* der, size_t derLen, unsigned char out[64]) {
     size_t i = 0;
     if (derLen < 8 || der[i++] != 0x30) return false;
 
