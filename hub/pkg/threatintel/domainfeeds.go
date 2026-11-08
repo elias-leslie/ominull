@@ -28,7 +28,7 @@ import (
 type DomainFeedStatus struct {
 	Name      string    `json:"name"`
 	Domains   int       `json:"domains"`
-	FetchedAt time.Time `json:"fetched_at,omitempty"`
+	FetchedAt *time.Time `json:"fetched_at,omitempty"` // the last good fetch; absent before one
 	// Error is the last failure; the names from the last good fetch stay in
 	// force meanwhile (Domains counts them).
 	Error string `json:"error,omitempty"`
@@ -201,7 +201,8 @@ func (m *Manager) RefreshDomainFeeds(ctx context.Context, feeds []storage.Domain
 			set.status.Error = err.Error()
 			log.Printf("[-] domain feed %s: %v (kept %d names from the last good fetch)", feed.Name, err, len(set.names))
 		} else {
-			set.names, set.status.FetchedAt = names, time.Now().UTC()
+			fetched := time.Now().UTC()
+			set.names, set.status.FetchedAt = names, &fetched
 			log.Printf("[+] domain feed %s: %d names", feed.Name, len(names))
 		}
 		set.status.Domains = len(set.names)
