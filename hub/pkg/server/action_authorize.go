@@ -581,7 +581,7 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		}
 		targets = nil
 		for _, ep := range eps {
-			if ep.Status != "retired" {
+			if ep.Status != "retired" && !linuxAgent(ep) {
 				targets = append(targets, ep.ID)
 			}
 		}
@@ -595,15 +595,17 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 			return nil, false
 		}
 	}
+	for _, id := range append(append([]string{}, targets...), req.Canary...) {
+		if ep, err := s.store.GetEndpoint(id); err == nil && ep != nil && linuxAgent(*ep) {
+			writeJSONError(w, http.StatusBadRequest, id+": "+linuxUpdateNote)
+			return nil, false
+		}
+	}
 	scope := s.endpointLabels(sortedTargets(targets))
 	if req.All {
 		scope = "the whole fleet (" + scope + ")"
 	}
 	summary := "Install agent " + version + " on " + scope
-	if len(sortedTargets(targets)) > 1 && len(sortedTargets(req.Canary)) == 0 && s.releaseSignedByRoutine(version) {
-		writeJSONError(w, http.StatusConflict, "agent "+version+" was signed with a routine key, so it rolls out canaries first: name the canaries")
-		return nil, false
-	}
 	if canary := sortedTargets(req.Canary); len(canary) > 0 {
 		if p := canaryProblem(canary, sortedTargets(targets)); p != "" {
 			writeJSONError(w, http.StatusBadRequest, p)

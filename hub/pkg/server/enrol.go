@@ -141,8 +141,7 @@ func (s *Server) handleEnrolmentScript(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL,
 		LocationID: req.LocationID, RoleTag: req.Role, EndpointID: req.EndpointID,
-		AgentVersion: s.agentVersion, EnrollmentCode: code, UseSystemCA: s.agentUsesSystemCA(),
-		RoutineFloor: s.routineFloor()}
+		AgentVersion: s.agentVersion, EnrollmentCode: code, UseSystemCA: s.agentUsesSystemCA()}
 
 	body := map[string]interface{}{
 		"platform":        plat.key,

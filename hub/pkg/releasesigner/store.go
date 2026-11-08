@@ -1,5 +1,5 @@
 // Package releasesigner is OmniNull's own release signer: the root half opens the
-// release (or routine) key from the on-disk key store with root's seal and signs
+// release key from the on-disk key store with root's seal and signs
 // one frozen session's files; the user half is the OMINULL_SIGNING_COMMAND.
 package releasesigner
 
@@ -44,12 +44,8 @@ type keyRec struct {
 }
 
 type storeFile struct {
-	Seals       map[string]struct{ Pub string } `json:"seals"`
-	Keys        []keyRec                        `json:"keys"`
-	RoutineKeys []keyRec                        `json:"routine_keys"`
-	RoutineList *struct {
-		Keys string `json:"keys"`
-	} `json:"routine_list"`
+	Seals map[string]struct{ Pub string } `json:"seals"`
+	Keys  []keyRec                        `json:"keys"`
 }
 
 func loadStore(dir string) (*storeFile, error) {
@@ -62,18 +58,6 @@ func loadStore(dir string) (*storeFile, error) {
 		return nil, fmt.Errorf("store.json: %w", err)
 	}
 	return &s, nil
-}
-
-func (s *storeFile) routineListed(id string) bool {
-	if s.RoutineList == nil {
-		return false
-	}
-	for _, e := range strings.Split(s.RoutineList.Keys, ",") {
-		if e != "" && strings.SplitN(e, ":", 2)[0] == id {
-			return true
-		}
-	}
-	return false
 }
 
 // findKey picks a release key by id prefix or label ("" means the only one).
@@ -91,13 +75,11 @@ func (s *storeFile) findKey(want string) (*keyRec, error) {
 	return hit[0], nil
 }
 
-// keyByID finds a release or routine key by its exact id.
+// keyByID finds a release key by its exact id.
 func (s *storeFile) keyByID(id string) *keyRec {
-	for _, g := range [][]keyRec{s.Keys, s.RoutineKeys} {
-		for i := range g {
-			if g[i].ID == id {
-				return &g[i]
-			}
+	for i := range s.Keys {
+		if s.Keys[i].ID == id {
+			return &s.Keys[i]
 		}
 	}
 	return nil

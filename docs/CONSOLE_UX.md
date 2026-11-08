@@ -330,9 +330,8 @@ Rendered from synthetic events (22 events on 14 lines):
 - **Remote terminal and screen** has a Switch off... button (confirm sheet,
   applies at once, ends open sessions). Switching it back on applies
   at once and the audit records it.
-- The Access page has a read-only **Release keys** card: the routine keys
-  (epoch and short fingerprints) and the retired agent releases with how many
-  machines still run them. Needs the hub's `retired_versions` in
+- The Access page has a read-only **Retired agent releases** card: each retired
+  release with how many machines still run it. Needs the hub's `retired_versions` in
   `GET /api/v1/agents/update-status`; older hubs show "None".
 - Uses `GET /api/v1/fleet/trust` and `/api/v1/remote-access/settings`; the
   demo console answers both.

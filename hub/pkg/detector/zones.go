@@ -152,14 +152,13 @@ func isSensorProcess(path string) bool {
 	return false
 }
 
-// sensorUpdateDir is where the Linux agent stages an update (agent
-// OMINULL_UPDATE_DIR, root-only): its apply.sh fetches the package and its
-// signature from the hub with curl, into this directory.
+// sensorUpdateDir is where the Linux package's root-only update folder lives:
+// scripts/lib/install-agent-deb.sh fetches the package from the hub with curl,
+// into this directory.
 const sensorUpdateDir = "/var/lib/ominull/updates/"
 
-// isSensorUpdater reports whether a connection is the agent updating itself:
-// root running the staged apply.sh with the system shell, or one of its two
-// curl downloads into the update directory from an https URL at the very
+// isSensorUpdater reports whether a connection is the agent's package download:
+// root running curl into the update directory from an https URL at the very
 // address and port connected to. quietPath is empty when the agent found the
 // reported path is not the file running, so a renamed copy never counts. An
 // unprivileged lab program cannot borrow it: curl connects before it opens
@@ -168,12 +167,8 @@ func isSensorUpdater(ev storage.Event, quietPath string) bool {
 	if quietPath == "" || ev.UserIdentity != "root" {
 		return false
 	}
-	path, base := executableOf(quietPath)
+	path, _ := executableOf(quietPath)
 	args := strings.Fields(ev.CommandLine)
-	if interpreterFamily(base) == "shell" {
-		return (strings.HasPrefix(path, "/usr/bin/") || strings.HasPrefix(path, "/bin/")) &&
-			len(args) == 2 && args[1] == sensorUpdateDir+"apply.sh"
-	}
 	if path != "/usr/bin/curl" && path != "/bin/curl" {
 		return false
 	}
@@ -184,7 +179,7 @@ func isSensorUpdater(ev storage.Event, quietPath string) bool {
 			break
 		}
 	}
-	if out != sensorUpdateDir+"agent.deb" && out != sensorUpdateDir+"agent.deb.sig" || len(args) < 2 {
+	if out != sensorUpdateDir+"agent.deb" || len(args) < 2 {
 		return false
 	}
 	u, err := url.Parse(args[len(args)-1])

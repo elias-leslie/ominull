@@ -430,7 +430,7 @@ func TestUpdatePackageFollowsReportedCapability(t *testing.T) {
 		wantPkg    string
 		wantOK     bool
 	}{
-		{"reported deb", "deb", "Linux 6.8.0-40-generic", "deb", true},
+		{"linux agents update over root access", "deb", "Linux 6.8.0-40-generic", "", false},
 		{"reported legacy exe", "exe", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "", false},
 		{"reported native msi", "msi", "Windows 11 Enterprise LTSC 2024 24H2 (x86_64)", "windows-native", true},
 		{"capability outranks a misleading OS string", "msi", "Linux 6.8.0-40-generic", "windows-native", true},
@@ -459,20 +459,20 @@ func TestUnsignedReleaseIsNeverOffered(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	seedEndpointWithCapability(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0", "deb")
+	seedEndpointWithCapability(t, store, "linux-web-01", "Windows 11", "1.0.0", "msi")
 	req := httptest.NewRequest("POST", "/api/v1/events", nil)
 
 	// 1. Nothing on disk at all.
-	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb"); ok {
+	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "windows-native"); ok {
 		t.Error("Expected no descriptor when the package is not on the hub")
 	}
 
 	// 2. The package alone is not enough.
-	name := "ominull-agent_1.1.0_amd64.deb"
+	name := "ominull-agent-windows-1.1.0.msi"
 	if err := os.WriteFile(filepath.Join(srv.binaryDir, name), []byte("package"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb"); ok {
+	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "windows-native"); ok {
 		t.Error("Expected no descriptor for a package with no digest or signature")
 	}
 
@@ -482,7 +482,7 @@ func TestUnsignedReleaseIsNeverOffered(t *testing.T) {
 		[]byte(strings.Repeat("a", 64)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb"); ok {
+	if _, ok := srv.agentUpdateDescriptor(req, "1.1.0", "windows-native"); ok {
 		t.Error("Expected no descriptor for a package with a digest but no signature")
 	}
 
@@ -510,7 +510,7 @@ func TestUnsignedReleaseIsNeverOffered(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srv.binaryDir, name+".sig"), []byte("sig"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	desc, ok := srv.agentUpdateDescriptor(req, "1.1.0", "deb")
+	desc, ok := srv.agentUpdateDescriptor(req, "1.1.0", "windows-native")
 	if !ok {
 		t.Fatal("Expected a descriptor once the package is signed")
 	}
@@ -519,7 +519,7 @@ func TestUnsignedReleaseIsNeverOffered(t *testing.T) {
 			t.Errorf("Descriptor is missing %q: %v", key, desc)
 		}
 	}
-	if !strings.HasSuffix(desc["signature"], ".deb.sig") {
+	if !strings.HasSuffix(desc["signature"], ".msi.sig") {
 		t.Errorf("Expected the signature URL to point at the .sig sidecar, got %q", desc["signature"])
 	}
 }
@@ -529,7 +529,7 @@ func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	seedEndpointWithCapability(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0", "deb")
+	seedEndpointWithCapability(t, store, "linux-web-01", "Windows 11", "1.0.0", "msi")
 
 	// 1. Unknown endpoints are rejected rather than handed a package URL.
 	req := httptest.NewRequest("GET", "/api/v1/agent/config?endpoint_id=ghost", nil)
@@ -549,7 +549,7 @@ func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 		t.Errorf("Expected 400 without endpoint_id, got %d", w.Code)
 	}
 
-	// 3. An explicitly queued endpoint is offered the .deb package.
+	// 3. An explicitly queued endpoint is offered the .msi package.
 	// Bundle availability alone no longer authorizes installation.
 	if err := store.RequestAgentUpdate("linux-web-01", "1.1.0"); err != nil {
 		t.Fatal(err)
@@ -569,7 +569,7 @@ func TestAgentConfigReportsUpdateAvailability(t *testing.T) {
 	if cfg["latest_version"] != "1.1.0" {
 		t.Errorf("Expected latest_version=1.1.0, got %v", cfg["latest_version"])
 	}
-	wantURL := "http://10.0.0.57:9999/download/ominull-agent_1.1.0_amd64.deb"
+	wantURL := "http://10.0.0.57:9999/download/ominull-agent-windows-1.1.0.msi"
 	if cfg["update_url"] != wantURL {
 		t.Errorf("Expected update_url %q, got %v", wantURL, cfg["update_url"])
 	}
@@ -595,8 +595,8 @@ func TestAgentsUpdateSchedulingAndStatus(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	seedSignedRelease(t, srv.binaryDir, "ominull-agent_1.1.0_amd64.deb")
-	seedEndpointWithCapability(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0", "deb")
+	seedSignedRelease(t, srv.binaryDir, "ominull-agent-windows-1.1.0.msi")
+	seedEndpointWithCapability(t, store, "linux-web-01", "Windows 11", "1.0.0", "msi")
 	seedEndpoint(t, store, "win-exec-01", "Windows 11 Enterprise (x86_64)", "1.0.0")
 	seedEndpoint(t, store, "linux-web-02", "Linux 6.8.0-40-generic", "1.1.0 (linux-socket-v1)")
 
@@ -677,7 +677,7 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 	srv, store := setupTestServer(t)
 	defer store.Close()
 
-	seedSignedRelease(t, srv.binaryDir, "ominull-agent_1.1.0_amd64.deb")
+	seedSignedRelease(t, srv.binaryDir, "ominull-agent-windows-1.1.0.msi")
 	seedEndpoint(t, store, "linux-web-01", "Linux 6.8.0-40-generic", "1.0.0")
 	if err := store.RequestAgentUpdate("linux-web-01", "1.1.0"); err != nil {
 		t.Fatalf("queueing update failed: %v", err)
@@ -692,7 +692,7 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 			"os":                "Linux 6.8.0-40-generic",
 			"ip":                "10.0.4.20",
 			"driver_version":    version,
-			"update_capability": "deb",
+			"update_capability": "msi",
 			"events":            []storage.Event{},
 		})
 		req := httptest.NewRequest("POST", "/api/v1/events", bytes.NewReader(batch))
@@ -713,7 +713,7 @@ func TestTelemetryCarriesAndRetiresAgentUpdate(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected agent_update in the telemetry response, got %v", resp)
 	}
-	if update["version"] != "1.1.0" || update["package"] != "deb" {
+	if update["version"] != "1.1.0" || update["package"] != "windows-native" {
 		t.Errorf("Unexpected agent_update payload: %v", update)
 	}
 	// The descriptor has to carry proof, not just a URL. An agent that is only
@@ -1353,5 +1353,98 @@ func TestSetupStateRemainsJSONData(t *testing.T) {
 	}
 	if bytes.Contains(doc[start:end], []byte("</script>")) {
 		t.Fatal("JSON escapes inline script")
+	}
+}
+
+// Linux agents take updates over root access (scripts/update-linux-agents.sh):
+// the hub neither queues nor offers them one, and says so when one is named.
+func TestTheAuthorizedRouteRefusesNamedLinuxAgents(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedSignedRelease(t, srv.binaryDir, "ominull-agent-windows-1.1.0.msi")
+	seedEndpointWithCapability(t, store, "linux-a", "Linux 6.8.0-40-generic", "1.0.0", "deb")
+	seedEndpointWithCapability(t, store, "win-a", "Windows 11", "1.0.0", "msi")
+	seedEndpointWithCapability(t, store, "win-b", "Windows 11", "1.0.0", "msi")
+
+	post := func(body string) int {
+		t.Helper()
+		r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
+		r.Header.Set("X-API-Key", "mock_admin_token")
+		return serveAuthorized(t, srv.Handler(), r).Code
+	}
+	for _, body := range []string{
+		`{"endpoint_ids":["linux-a"],"version":"1.1.0"}`,
+		`{"endpoint_ids":["win-a","linux-a"],"version":"1.1.0"}`,
+		`{"all":true,"canary":["linux-a"],"version":"1.1.0"}`,
+	} {
+		if code := post(body); code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want refused", body, code)
+		}
+	}
+	if code := post(`{"all":true,"canary":["win-a"],"version":"1.1.0"}`); code != http.StatusOK {
+		t.Errorf("a Windows canary with a Linux machine in the fleet: got %d", code)
+	}
+}
+
+func TestLinuxAgentsAreNotUpdatedThroughTheHub(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+
+	seedSignedRelease(t, srv.binaryDir, "ominull-agent_1.1.0_amd64.deb")
+	seedSignedRelease(t, srv.binaryDir, "ominull-agent-windows-1.1.0.msi")
+	seedEndpointWithCapability(t, store, "linux-a", "Linux 6.8.0-40-generic", "1.0.0", "deb")
+	seedEndpointWithCapability(t, store, "win-a", "Windows 11", "1.0.0", "msi")
+
+	push := func(body map[string]interface{}) map[string][]map[string]string {
+		t.Helper()
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest("POST", "/api/v1/agents/update", bytes.NewReader(raw))
+		req.Header.Set("X-API-Key", "mock_admin_token")
+		w := httptest.NewRecorder()
+		srv.authMiddleware(srv.handleAgentsUpdate)(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("update %v: %d %s", body, w.Code, w.Body.String())
+		}
+		var out map[string]json.RawMessage
+		json.NewDecoder(w.Body).Decode(&out)
+		res := map[string][]map[string]string{}
+		for _, k := range []string{"scheduled", "unsupported"} {
+			var list []map[string]string
+			json.Unmarshal(out[k], &list)
+			res[k] = list
+		}
+		return res
+	}
+
+	all := push(map[string]interface{}{"all": true, "version": "1.1.0"})
+	if len(all["scheduled"]) != 1 || all["scheduled"][0]["endpoint_id"] != "win-a" {
+		t.Errorf("all scheduled %v, want the Windows endpoint only", all["scheduled"])
+	}
+	if len(all["unsupported"]) != 0 {
+		t.Errorf("all listed %v as unsupported, want Linux left out quietly", all["unsupported"])
+	}
+
+	named := push(map[string]interface{}{"endpoint_ids": []string{"linux-a"}, "version": "1.1.0"})
+	if len(named["scheduled"]) != 0 || len(named["unsupported"]) != 1 ||
+		!strings.Contains(named["unsupported"][0]["reason"], "update-linux-agents.sh") {
+		t.Errorf("naming a Linux endpoint: %v", named)
+	}
+	if job, _ := store.GetAgentUpdateJob("linux-a"); job != nil {
+		t.Errorf("a job was queued for a Linux endpoint: %+v", job)
+	}
+
+	// A job left from before is not offered.
+	if err := store.RequestAgentUpdate("linux-a", "1.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/api/v1/events", nil)
+	resp, err := srv.telemetryControlResponse(req, "default", "linux-a", "1.0.0", "deb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, offered := resp["agent_update"]; offered {
+		t.Errorf("a Linux agent was offered an update: %v", resp["agent_update"])
 	}
 }

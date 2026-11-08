@@ -2,7 +2,7 @@
 //! address rules in agent_trust.h). Every refusal reason matches the C text,
 //! which reaches the hub in the agent's report.
 
-use crate::abi::{ResponseGrant, TrustAction, TrustManifest, TrustRoutineKey, TrustRule, TRUST_MAX_ALLOW, TRUST_MAX_CAPS, TRUST_MAX_PAYLOAD, TRUST_MAX_ROUTINE_KEYS, TRUST_MAX_RULES};
+use crate::abi::{ResponseGrant, TrustAction, TrustManifest, TrustRule, TRUST_MAX_ALLOW, TRUST_MAX_CAPS, TRUST_MAX_PAYLOAD, TRUST_MAX_RULES};
 use crate::b64::strict_decode;
 use crate::json::{cstr, hex_val};
 use crate::offers::extract_grant;
@@ -430,75 +430,6 @@ pub fn read_grant_object(v: &[u8], g: &mut ResponseGrant, payload: &mut [u8]) ->
     Some(n)
 }
 
-const ROUTINE_ENTRY_LEN: usize = 145;
-
-/// "<id>:<xy>,..." exactly as the signed statement carries it.
-pub fn parse_routine_list(s: &[u8], out: &mut [TrustRoutineKey], count: &mut c_int) -> bool {
-    *count = 0;
-    if s.is_empty() {
-        return true;
-    }
-    let lower_hex = |b: &[u8]| b.iter().all(|&c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
-    let mut p = 0usize;
-    let mut n = 0usize;
-    loop {
-        if n >= TRUST_MAX_ROUTINE_KEYS {
-            return false;
-        }
-        let Some(entry) = s.get(p..p + ROUTINE_ENTRY_LEN) else { return false };
-        let (id, rest) = entry.split_at(16);
-        let (colon, xy) = rest.split_at(1);
-        if !lower_hex(id) || colon != b":" || !lower_hex(xy) {
-            return false;
-        }
-        let sep = s.get(p + ROUTINE_ENTRY_LEN).copied().unwrap_or(0);
-        if sep != b',' && sep != 0 {
-            return false;
-        }
-        let (done, rest_out) = out.split_at_mut(n);
-        let Some(k) = rest_out.first_mut() else { return false };
-        k.id.fill(0);
-        let Some(d) = k.id.get_mut(..16) else { return false };
-        d.copy_from_slice(id);
-        if done.last().is_some_and(|prev| cstr(&prev.id) >= cstr(&k.id)) {
-            return false;
-        }
-        if !crate::crypto::hex_to_bytes(xy, &mut k.xy) {
-            return false;
-        }
-        n += 1;
-        *count = n as c_int;
-        if sep == 0 {
-            return true;
-        }
-        p += ROUTINE_ENTRY_LEN + 1;
-        if p >= s.len() {
-            return false;
-        }
-    }
-}
-
-/// Exactly a decimal integer >= 1: no sign, fraction, exponent or leading zero.
-pub fn positive_int(v: &[u8]) -> Option<i64> {
-    let start = ws(v, 0);
-    let mut end = v.len();
-    while end > start && matches!(v.get(end - 1), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-        end -= 1;
-    }
-    let d = v.get(start..end)?;
-    if d.is_empty() || d.first() == Some(&b'0') {
-        return None;
-    }
-    let mut x = 0i64;
-    for &c in d {
-        if !c.is_ascii_digit() || x > (i64::MAX - 9) / 10 {
-            return None;
-        }
-        x = x * 10 + i64::from(c - b'0');
-    }
-    Some(x)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,11 +453,4 @@ mod tests {
         assert!(!public_address(b"2001:db8::1"));
     }
 
-    #[test]
-    fn positive_int_is_exact() {
-        assert_eq!(positive_int(b" 7 "), Some(7));
-        assert_eq!(positive_int(b"07"), None);
-        assert_eq!(positive_int(b"-7"), None);
-        assert_eq!(positive_int(b"7e1"), None);
-    }
 }

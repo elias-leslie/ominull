@@ -39,32 +39,28 @@ and Windows Installer's service/package model.
 the three native package types, and checks ownership and writable modes.
 `scripts/sign-release.sh` signs every package and sidecar with the release key,
 bundles already-signed endpoint artifacts into the hub package, then verifies
-the final hub signature. Agents verify the digest and pinned release signature
-before self-update.
+the final hub signature. Windows agents verify the digest and pinned release
+signature before self-update; `scripts/update-linux-agents.sh` verifies the
+signature before it offers a Debian package to any machine.
 
 `scripts/test-package-lifecycle.sh` exercises clean install, upgrade,
 downgrade refusal, remove, reinstall, purge, service registration, and durable
 state preservation in an isolated package root. The actual production release
-workflow deploys the hub first, then retained Linux and Windows canaries, then
-the remaining agents after native provenance and heartbeat convergence.
+workflow deploys the hub first, installs the Debian package on the Linux machines
+one at a time, then rolls Windows canaries and the remaining Windows agents after
+native provenance and heartbeat convergence.
 
-### Session signing (routine release keys)
+### Signing
 
-Inside the owner's work session, `ominull-release-signer` can sign with a routine
-release key instead of the main release key (it signs either one without asking anyone): run the release with
-`OMINULL_SIGNING_ROUTINE=1`. The signing backend asks the signer for
-`pubkey routine` and refuses a key that is not on the hub's list signed by the
-pinned release key (`GET /api/v1/trust/routine-keys`). It verifies every
-signature against that routine key and writes the signed list to
-`dist/routine-keys.json`. Such a release
-rolls out canaries first (`OMINULL_ROUTINE_CANARIES`, default the lab VM), and
-the hub refuses a routine-signed rollout without canaries.
-Agents from 1.8.89 accept routine keys for agent packages only.
-
-Inside the owner's work session:
+`ominull-release-signer` (`hub/cmd/ominull-release-signer`; install with
+`scripts/install-release-signer.sh`) signs with the release key without asking
+anyone. It runs its root half through `sudo -n`, opens the key from the key store
+(`OMINULL_SIGNING_STORE`, default `/var/lib/nightshift/release-signing`; public
+half `OMINULL_SIGNING_PUBLIC`) and signs only what `begin` froze: each package
+once, then its release statement once.
 
 ```bash
-OMINULL_SIGNING_ROUTINE=1 OMINULL_SIGNING_BACKEND=command \
+OMINULL_SIGNING_BACKEND=command \
 OMINULL_SIGNING_COMMAND=~/.local/bin/ominull-release-signer \
 scripts/release.sh ...
 ```
@@ -75,23 +71,9 @@ When `OMINULL_HUB_URL` or `OMINULL_ADMIN_KEY` is unset, `release.sh` fills them 
 `/etc/ominull/admin.key` in the hub container, read as root over that file's
 `ssh_alias` and `lxc_id` into the environment only (never printed or written to
 disk). `scripts/lib/hub-admin-key.sh --check` does just that and asks the hub
-which release it serves. No grant or tap is involved.
+which release it serves.
 
-The signer (`hub/cmd/ominull-release-signer`; install with `scripts/install-release-signer.sh`) runs its root half
-through `sudo -n`, opens the key from the key store (`OMINULL_SIGNING_STORE`, default
-`/var/lib/nightshift/release-signing`; public half `OMINULL_SIGNING_PUBLIC`) and signs only what `begin` froze: each
-package once, then its release statement once. Making a routine key list is not part of it. Use the actual release
-arguments in place of `...`.
-
-New installs take a routine-signed package too. The bootstrap scripts
-(`/bootstrap.sh`, `/bootstrap.ps1` and the enrolment pages' scripts) install a
-package the embedded release key signed as before; otherwise they fetch
-`/download/routine-keys.json` (the hub's held list, the heartbeat's
-`{epoch, keys, sig}`, no credential) and the package's `.release.sig`, and
-install only when the list is strictly formed, signed by the embedded release
-key, not empty, at an epoch no lower than the one the hub held when it rendered
-the script, and one listed key signed both the package and its
-`OMINULL-RELEASE-V1` statement. No list, a bad signature or an older or empty
-list refuses. The release gate (`TestPublishedPackagesVerifyForFreshInstall`)
-runs both scripts' check on `dist/` with `dist/routine-keys.json` (the Windows
-one under PowerShell 7 when `OMINULL_PWSH` or `pwsh` is found).
+The bootstrap scripts (`/bootstrap.sh`, `/bootstrap.ps1` and the enrolment pages'
+scripts) install only a package the embedded release key signed. The release gate
+(`TestPublishedPackagesVerifyForFreshInstall`) runs both scripts' check on `dist/`
+(the Windows one under PowerShell 7 when `OMINULL_PWSH` or `pwsh` is found).

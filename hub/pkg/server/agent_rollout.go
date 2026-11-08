@@ -68,6 +68,10 @@ func (s *Server) planAgentUpdates(version string, want func(storage.Endpoint) bo
 			continue // already up to date
 		}
 		pkg, selfInstallable := updatePackageFor(ep.UpdateCapability)
+		if linuxAgent(ep) {
+			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": linuxUpdateNote})
+			continue
+		}
 		if !selfInstallable {
 			unsupported = append(unsupported, map[string]string{"endpoint_id": ep.ID, "hostname": ep.Hostname, "os": ep.OS, "reason": "endpoint reports no supported native package capability"})
 			continue
@@ -88,8 +92,8 @@ func (s *Server) planAgentUpdates(version string, want func(storage.Endpoint) bo
 	return ready, unsupported, nil
 }
 
-// rolloutTargets resolves what a request covers: every non-retired endpoint
-// for all, else the named ones.
+// rolloutTargets resolves what a request covers: every Windows endpoint for
+// all (Linux agents update over root access), else the named ones.
 func (s *Server) rolloutTargets(all bool, ids []string) ([]string, error) {
 	if !all {
 		return sortedTargets(ids), nil
@@ -100,12 +104,15 @@ func (s *Server) rolloutTargets(all bool, ids []string) ([]string, error) {
 	}
 	var out []string
 	for _, ep := range eps {
-		if ep.Status != "retired" {
+		if ep.Status != "retired" && !linuxAgent(ep) {
 			out = append(out, ep.ID)
 		}
 	}
 	return sortedTargets(out), nil
 }
+
+// linuxUpdateNote is what the hub says when asked to update a Linux agent.
+const linuxUpdateNote = "Linux agents update with scripts/update-linux-agents.sh, not through the hub"
 
 // canaryProblem says why a canary list cannot stage this request.
 func canaryProblem(canary, targets []string) string {

@@ -68,7 +68,6 @@ type session struct {
 	UID       string            `json:"uid,omitempty"`
 	Expires   int64             `json:"expires"`
 	KeyID     string            `json:"key_id"`
-	Routine   bool              `json:"routine,omitempty"`
 	Version   string            `json:"version,omitempty"`
 	Packages  []pkg             `json:"packages,omitempty"`
 	Tenant    string            `json:"tenant,omitempty"`
@@ -176,8 +175,7 @@ func (s *session) record(kind, name, sha string) {
 // Request is what begin freezes: release VERSION NAME[=SHA]... or trust TENANT with the statement text.
 type Request struct {
 	Op        string
-	Routine   bool
-	Key       string // release key id or label (ignored for routine)
+	Key       string // release key id or label
 	Version   string
 	Packages  []string // NAME[=SHA256]
 	Tenant    string
@@ -203,28 +201,14 @@ func trustLines(text, tenant string) error {
 // freeze validates a request against the store and returns the session to write.
 func freeze(s *storeFile, r Request, now time.Time) (*session, error) {
 	out := &session{Op: r.Op, Expires: now.Add(SessionTTL).Unix(), UID: os.Getenv("SUDO_UID")}
-	if r.Op == "release" && r.Routine {
-		if len(s.RoutineKeys) == 0 {
-			return nil, errors.New("no routine key is stored")
-		}
-		rk := s.RoutineKeys[len(s.RoutineKeys)-1]
-		if _, ok := rk.Wraps[rootSeal]; !ok {
-			return nil, errors.New("root does not hold the routine key")
-		}
-		if !s.routineListed(rk.ID) {
-			return nil, errors.New("the release key has not listed the routine key with OmniNull yet")
-		}
-		out.KeyID, out.Routine = rk.ID, true
-	} else {
-		k, err := s.findKey(r.Key)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := k.Wraps[rootSeal]; !ok {
-			return nil, errors.New("root does not hold this key")
-		}
-		out.KeyID = k.ID
+	k, err := s.findKey(r.Key)
+	if err != nil {
+		return nil, err
 	}
+	if _, ok := k.Wraps[rootSeal]; !ok {
+		return nil, errors.New("root does not hold this key")
+	}
+	out.KeyID = k.ID
 	switch r.Op {
 	case "release":
 		if !versionRe.MatchString(r.Version) {

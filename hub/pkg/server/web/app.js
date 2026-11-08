@@ -524,7 +524,6 @@
     fleetTrust: null,
     fleetTrustError: "",
     remoteOff: null,
-    routineKeys: null,
     maintWindowByEndpoint: {},
     maintSettings: null,
     maintCatalog: null,
@@ -1333,16 +1332,12 @@
     if (!DEMO_REMOTE_OFF) DEMO_REMOTE_OFF = { "linux-prod-db-01": true };
     return DEMO_REMOTE_OFF;
   }
-  var DEMO_ROUTINE_KEYS = { epoch: 3, signature: "demo", keys: [
-    { id: "routine-2026-10", xy: "9f3a61c0b7e24d58a1c4fe0932ab57d6c8e11f4a03b9d27c5e68a4f1b3d90c72a8e5", public_key: "" },
-    { id: "routine-2026-09", xy: "17d4e9a2c6b08f35e1a97d4c20b6f83a5d19e7c4b02a68f3d5e1c97a40b2d8f6e3a1", public_key: "" } ] };
   function demoFleetTrust() {
     var eps = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]);
     var agoS = function (m) { return Math.round((Date.now() - m * 60000) / 1000); };
     return { endpoints: eps.map(function (e) {
       var row = { endpoint_id: e.id, hostname: e.hostname, agent_version: e.driver_version, verification: "agent", trust_bundle: "signed", keys: "all pinned",
-        profile: "engagement", ceiling: "", host_authority: false, hub_isolated: !!e.is_isolated, agent_isolated: !!e.is_isolated, reported_at: new Date(Date.now() - 40000).toISOString(),
-        routine_epoch: 3, routine_keys: 2 };
+        profile: "engagement", ceiling: "", host_authority: false, hub_isolated: !!e.is_isolated, agent_isolated: !!e.is_isolated, reported_at: new Date(Date.now() - 40000).toISOString() };
       if (e.id === "linux-prod-db-01") {
         Object.assign(row, { ceiling: "signed-scripts", host_authority: true, host_keys: [{ id: "a1", role: "tap" }, { id: "b2", role: "auto" }],
           host_allow: [{ name: "btrfs-scrub", sha256: "x", modes: ["audit", "enforce"] }, { name: "cleanup", sha256: "y", modes: ["enforce"] }],
@@ -1477,7 +1472,6 @@
         if (base === "/api/v1/maintenance/windows") { resolve(demoWindows(path)); return; }
         if (base === "/api/v1/fleet/trust") { resolve(demoFleetTrust()); return; }
         if (base === "/api/v1/remote-access/settings") { resolve({ off: Object.keys(demoRemoteOff()).filter(function (k) { return demoRemoteOff()[k]; }).sort() }); return; }
-        if (base === "/api/v1/trust/routine-keys") { resolve(JSON.parse(JSON.stringify(DEMO_ROUTINE_KEYS))); return; }
         if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
         if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
         if (base === "/api/v1/maintenance/playbooks") { resolve(demoPlaybooks()); return; }
@@ -2330,7 +2324,9 @@
         request("/api/v1/agents/update", "POST", { endpoint_ids: [asset.endpoint.id], version: targetVer })
           .then(function () { toast("Upgrade to v" + targetVer + " queued for " + asset.name, "ok"); refresh(); })
           .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
-      }, { disabled: !IS_ADMIN, why: isOutdated ? "Queue upgrade to v" + targetVer : "Already running latest v" + targetVer }));
+      }, { disabled: !IS_ADMIN || asset.endpoint.update_capability === "deb",
+        why: asset.endpoint.update_capability === "deb" ? "Linux agents update with scripts/update-linux-agents.sh"
+          : isOutdated ? "Queue upgrade to v" + targetVer : "Already running latest v" + targetVer }));
 
       menu.appendChild(menuItem("Rescan this host", "i-refresh", "r", function () { rescan(asset); }));
 
@@ -2751,9 +2747,9 @@
        that restarts into a broken build takes its host's enforcement with it,
        and there is no console-side undo. */
     confirmSheet({
-      title: "Push agent updates to the whole fleet",
-      consequence: "Every enrolled agent that supports self-update downloads the bundled build and restarts. Enforcement on each host is briefly down during the restart, and an agent that fails to come back has to be recovered on the host itself.",
-      detail: "Hosts on native packages are skipped and reported instead.",
+      title: "Push agent updates to the Windows machines",
+      consequence: "Every Windows agent downloads the bundled build and restarts. Enforcement on each host is briefly down during the restart, and an agent that fails to come back has to be recovered on the host itself.",
+      detail: "Linux agents update with scripts/update-linux-agents.sh.",
       confirmLabel: "Push updates",
       onConfirm: sendAgentUpdates
     });
@@ -3368,18 +3364,21 @@
         h("span", { cls: "floating-count-pill", text: selCount + " selected" })
       ];
 
-      if (agentedSelected.length > 0) {
+      var hubUpdated = agentedSelected.filter(function (a) { return a.endpoint.update_capability !== "deb"; });
+      if (hubUpdated.length > 0) {
         acts.push(h("button", {
-          cls: "btn btn-primary mini", type: "button", text: "Upgrade Agents (" + agentedSelected.length + ")",
+          cls: "btn btn-primary mini", type: "button", text: "Upgrade Agents (" + hubUpdated.length + ")",
           on: {
             click: function () {
-              var epIds = agentedSelected.map(function (a) { return a.endpoint.id; });
+              var epIds = hubUpdated.map(function (a) { return a.endpoint.id; });
               request("/api/v1/agents/update", "POST", { endpoint_ids: epIds, version: targetVer })
                 .then(function () { toast("Queued v" + targetVer + " upgrade for " + epIds.length + " agent(s)", "ok"); refresh(); })
                 .catch(function (e) { toast("Upgrade failed: " + e.message, "crit"); });
             }
           }
         }));
+      }
+      if (agentedSelected.length > 0) {
         acts.push(h("button", {
           cls: "btn mini", type: "button", text: "Isolate (" + agentedSelected.length + ")",
           on: { click: function () { bulkIsolate(true); } }
@@ -8022,33 +8021,15 @@
     var listCard = card("Operators",
       simpleTable(["Email", "Role", "Granted by", "Added", ""], rows));
 
-    view.appendChild(h("div", { cls: "pad stack" }, listCard, opGrantCard, deviceCredentialCard(), releaseKeysCard()));
+    view.appendChild(h("div", { cls: "pad stack" }, listCard, opGrantCard, deviceCredentialCard(), retiredReleasesCard()));
   }
 
-  /* Read-only: which routine release keys the hub holds (signed by the
-     owner's release key, which only Nightshift can use) and which agent
-     releases are retired. Changing either is not done here. */
-  function releaseKeysCard() {
-    var rk = state.routineKeys;
+  /* Read-only: which agent releases are retired. */
+  function retiredReleasesCard() {
     var us = state.updateStatus || {};
-    var keys = arrayOf(rk && rk.keys);
     var body = [];
-    if (!rk) {
-      body.push(h("p", { role: "status", text: "Reading the release keys…" }));
-    } else if (rk.error) {
-      body.push(h("p", { role: "status", text: "Release keys unavailable: " + rk.error }));
-    } else if (!keys.length) {
-      body.push(h("p", { text: "No routine release keys are held. Only the release key itself signs agent packages." }));
-    } else {
-      body.push(h("p", { text: keys.length + (keys.length === 1 ? " routine key" : " routine keys") + " at epoch " + rk.epoch + ". They sign agent packages for session-signed upkeep; the release key signed this list." }));
-      body.push(simpleTable(["Key", "Fingerprint"], keys.map(function (k) {
-        var xy = String(k.xy || "");
-        return [h("b", { text: k.id }), h("span", { cls: "mono", text: xy.length > 20 ? xy.slice(0, 10) + "…" + xy.slice(-10) : xy || "—" })];
-      }), { sortable: false }));
-    }
     var retired = arrayOf(us.retired_versions);
     var running = function (v) { return arrayOf(us.endpoints).filter(function (e) { return shortVersion(e.driver_version) === v; }).length; };
-    body.push(h("h4", { cls: "u-mt2", text: "Retired agent releases" }));
     body.push(retired.length
       ? h("ul", { cls: "stack plain-list" }, retired.map(function (v) {
         var n = running(v);
@@ -8056,8 +8037,8 @@
           h("span", { cls: "dim-2", text: n ? n + (n === 1 ? " machine still runs it until a newer release reaches it" : " machines still run it until a newer release reaches them") : "no machine runs it" }));
       }))
       : h("p", { cls: "dim-2", text: "None. A retired release is never rolled out again." }));
-    return card("Release keys", h("div", { cls: "card-body stack" }, body), null, false,
-      "Read-only here. Nightshift signs the routine key list with the release key, and retires a release from its own board; the hub only keeps and shows them.");
+    return card("Retired agent releases", h("div", { cls: "card-body stack" }, body), null, false,
+      "A retired release is not rolled out again.");
   }
 
   function confirmRevokeDeviceCredential(cr) {
@@ -10848,10 +10829,6 @@
       jobs.push(request("/api/v1/device-auth/credentials").then(function (d) {
         state.deviceCredentials = arrayOf(d && d.credentials);
       }).catch(function () { /* the card says the list could not be read */ }));
-      jobs.push(request("/api/v1/trust/routine-keys").then(function (d) { state.routineKeys = d || null; }).catch(function (e) {
-        state.routineKeys = { error: (e && e.message) || "request failed" };
-        if (resources["/api/v1/trust/routine-keys"]) delete resources["/api/v1/trust/routine-keys"].error;
-      }));
     }
     /* Terminal sessions are fleet state, not Response-page state. This fetch
        sat inside the `section === "response"` block, so an operator on Assets

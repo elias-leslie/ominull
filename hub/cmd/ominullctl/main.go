@@ -1463,7 +1463,7 @@ Fleet & CyberOps Commands:
   scanner scan|status|assets|train        Subnet discovery, sweeps, and OS fingerprinting
   alerts list                             List active behavioral anomalies and threat alerts
   mesh quarantine|release <ip>            Enforce or lift subnet quarantine mesh
-  agents versions|update <id...|all> [--version V]  Inspect fleet versions; update several machines in one rollout
+  agents versions|update <id...|all> [--version V]  Inspect fleet versions; update Windows machines in one rollout (Linux: scripts/update-linux-agents.sh)
   maint run ENDPOINT PKG... --mode M      Run maintenance packages (--no-wait prints ids)
   maint wait ID... [--all] [--timeout D]  Block until a job, run or playbook run ends or needs attention
                                           (exit 0 ok, 3 failed, 4 needs attention, 5 timeout)

@@ -241,11 +241,6 @@ func (s *Server) addTrustControl(ctx context.Context, resp map[string]interface{
 			resp["trust"] = k
 		}
 	}
-	// The release-key signed routine keys, until the agent reports pinning
-	// this epoch (older agents ignore the field).
-	if rk, _ := s.routineKeys(); rk != nil && report.RoutineEpoch < rk.Epoch {
-		resp["routine_keys"] = rk
-	}
 	profile := ""
 	if ep.MonitorOnly {
 		profile = s.monitorOnlyClamp(ep.ID, report.Profile)
@@ -791,11 +786,6 @@ type fleetTrustRow struct {
 	Refused         string                     `json:"refused,omitempty"`
 	RefusedAt       int64                      `json:"refused_at,omitempty"`
 	ReportedAt      string                     `json:"reported_at,omitempty"`
-	// Routine release keys the agent has pinned (agents from 1.8.89): the
-	// epoch of the signed list (0: none) and how many keys it holds. Set
-	// whenever the agent reported, so 0 shows as 0.
-	RoutineEpoch *int64 `json:"routine_epoch,omitempty"`
-	RoutineKeys  *int   `json:"routine_keys,omitempty"`
 }
 
 // handleFleetTrust is the fleet's trust report: which agents verify grants
@@ -864,8 +854,6 @@ func (s *Server) handleFleetTrust(w http.ResponseWriter, r *http.Request) {
 			row.Disagrees = iso != ep.IsIsolated
 			row.Refused, row.RefusedAt = rep.Refused, rep.RefusedAt
 			row.ReportedAt = seen.at.UTC().Format(time.RFC3339)
-			routineEpoch, routineKeys := rep.RoutineEpoch, rep.RoutineKeys
-			row.RoutineEpoch, row.RoutineKeys = &routineEpoch, &routineKeys
 		} else if ep.DriverVersion != "" && compareVersions(ep.DriverVersion, grantVerifyingAgentVersion) < 0 {
 			row.Verification = "hub-only"
 		} else {

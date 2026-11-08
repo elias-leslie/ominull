@@ -89,19 +89,9 @@ static inline bool ReleaseVerifyPosixKey(const char* pem, const char* msg, size_
 }
 
 /* ReleaseVerifyPosix checks against the compiled-in release key only: the
- * verifier for trust bundles and routine-keys statements. */
+ * verifier for trust bundles. */
 static inline bool ReleaseVerifyPosix(const char* msg, size_t len, const uint8_t* der, size_t derlen) {
     return ReleaseVerifyPosixKey(g_ReleaseVerifyPem, msg, len, der, derlen);
 }
-
-#ifdef OMINULL_AGENT_TRUST_H
-/* ReleaseVerifyPosixXY is the Trust_KeyVerifier for agent updates: the
- * compiled-in key (xy NULL) or a pinned routine key. */
-static inline bool ReleaseVerifyPosixXY(const uint8_t* xy, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
-    if (!xy) return ReleaseVerifyPosix(msg, len, der, derlen);
-    char pem[200];
-    return Trust_P256PEM(xy, pem, sizeof(pem)) && ReleaseVerifyPosixKey(pem, msg, len, der, derlen);
-}
-#endif
 
 #endif

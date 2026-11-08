@@ -53,7 +53,6 @@
 #include "../include/data_inventory_linux.h"
 #include "../include/gzip_encode.h"
 #include "../include/upload_queue.h"
-#include "../include/agent_update_linux.h"
 #include "../include/cert_renewal.h"
 
 #ifndef OMINULL_PROC_ROOT
@@ -68,16 +67,6 @@
 // replaces /opt/ominull, and the trust anchor has to survive that.
 #define OMINULL_DEFAULT_CA_PATH "/etc/ominull/ca.crt"
 
-// Where a downloaded release is staged before it is verified and installed.
-// This must be a directory only root can write. The previous implementation
-// staged in /tmp under a name derived from the advertised version - fully
-// predictable, in a world-writable directory, then installed as root with
-// dpkg, whose maintainer scripts also run as root. That gave any local user
-// two ways to become root: plant the file, or win the race between the
-// download finishing and dpkg opening it. Verifying the download does not fix
-// that on its own; the file has to live somewhere unprivileged users cannot
-// reach between the check and the install.
-#define OMINULL_UPDATE_DIR "/var/lib/ominull/updates"
 #define MAX_FLOWS_PER_BATCH 64
 #define MAX_PATH_LEN 512
 
@@ -120,7 +109,6 @@ typedef struct {
      * protected file; --key remains only as a compatibility migration input. */
     char key_path[256];
     bool verbose;
-    bool auto_update;
     /* Direct self-issued hubs use a pinned Ominull CA. Public ACME or
      * Cloudflare endpoints use the operating system trust store instead. */
     bool pin_hub_ca;
@@ -446,7 +434,6 @@ static void SetConfigValue(LINUX_AGENT_CONFIG* config, const char* key, const ch
     else if (strcmp(key, "client_cert_path") == 0) snprintf(config->client_cert_path, sizeof(config->client_cert_path), "%s", value);
     else if (strcmp(key, "client_key_path") == 0) snprintf(config->client_key_path, sizeof(config->client_key_path), "%s", value);
 	    else if (strcmp(key, "device_credential") == 0 || strcmp(key, "api_key") == 0) snprintf(config->api_key, sizeof(config->api_key), "%s", value);
-    else if (strcmp(key, "auto_update") == 0) config->auto_update = strcmp(value, "0") != 0;
 	else if (strcmp(key, "pin_hub_ca") == 0) config->pin_hub_ca = strcmp(value, "0") != 0;
     else if (strcmp(key, "allow_plaintext") == 0) config->allow_plaintext = strcmp(value, "1") == 0;
 }
@@ -470,8 +457,7 @@ static void LoadLegacyArguments(LINUX_AGENT_CONFIG* config, const char* raw) {
             option = strtok_r(NULL, " \t", &save);
             continue;
         }
-        if (strcmp(option, "--no-auto-update") == 0) {
-            config->auto_update = false;
+        if (strcmp(option, "--no-auto-update") == 0) { /* retired: this agent never updates itself */
             option = strtok_r(NULL, " \t", &save);
             continue;
         }
@@ -593,7 +579,6 @@ static bool ConfigureFromStdin(void) {
     if (!allowPlaintext && strncmp(hub, "https://", 8) != 0) return false;
     if (mkdir("/etc/ominull", 0755) != 0 && errno != EEXIST) return false;
     if (mkdir("/var/lib/ominull", 0755) != 0 && errno != EEXIST) return false;
-    if (mkdir(OMINULL_UPDATE_DIR, 0700) != 0 && errno != EEXIST) return false;
     if (!WritePrivateFile("/etc/ominull/agent.key", key, 0600)) return false;
 	if (pinHubCA && !CopyPrivateFile(caSource, "/etc/ominull/ca.crt", 0644)) return false;
     if (certSource[0] && !CopyPrivateFile(certSource, "/etc/ominull/client.crt", 0600)) return false;
@@ -607,7 +592,7 @@ static bool ConfigureFromStdin(void) {
                      "hub_url=%s\nkey_path=/etc/ominull/agent.key\nendpoint_id=%s\nrole_tag=%s\n"
 	                 "location_id=%s\nca_path=%s\npin_hub_ca=%d\nclient_cert_path=/etc/ominull/client.crt\n"
 	                     "client_key_path=/etc/ominull/client.key\n"
-	                     "auto_update=1\nallow_plaintext=%d\n",
+	                     "allow_plaintext=%d\n",
 	                     hub, endpoint, role, location, pinHubCA ? "/etc/ominull/ca.crt" : "",
 	                     pinHubCA ? 1 : 0, allowPlaintext ? 1 : 0);
     if (n < 0 || (size_t)n >= sizeof(config) || !WritePrivateFile("/etc/ominull/agent.conf", config, 0600)) {
@@ -621,7 +606,7 @@ static bool ConfigureFromStdin(void) {
 static void PrintUsage(const char* prog) {
     printf("Ominull Linux Threat Nullification Daemon (v%s)\n", OMINULL_LINUX_AGENT_VERSION);
     printf("Usage:\n");
-	printf("  %s --hub <url> --key-file <path> [--ca <path>] [--role <role>] [--location <id>] [--no-auto-update] [--allow-plaintext] [-v]\n", prog);
+	printf("  %s --hub <url> --key-file <path> [--ca <path>] [--role <role>] [--location <id>] [--allow-plaintext] [-v]\n", prog);
     printf("\nOptions:\n");
 	printf("  --key-file <path>  Read the unique device credential from a file. Prefer this:\n");
     printf("                     an argument is world-readable through /proc/<pid>/cmdline.\n");
@@ -630,7 +615,6 @@ static void PrintUsage(const char* prog) {
     printf("                     its private key. Enrolment issues both; without them the hub has\n");
 	printf("                     direct native mTLS adds a second matching proof.\n");
 	printf("  --allow-plaintext  Permit an http:// hub. Credentials then cross the network in the clear.\n");
-    printf("  --no-auto-update   Report the running version but never install a hub-offered package.\n");
     printf("  --version          Print the version and exit.\n");
     printf("  --config <path>    Read package-owned runtime configuration.\n");
     printf("  --configure-stdin  Install enrollment material from stdin.\n");
@@ -2352,12 +2336,12 @@ static void AdoptDeviceCredential(LINUX_AGENT_CONFIG* config, const char* respJs
     int n = snprintf(rendered, sizeof(rendered),
                      "hub_url=%s\nkey_path=%s\nendpoint_id=%s\nrole_tag=%s\n"
                      "location_id=%s\nca_path=%s\nclient_cert_path=%s\n"
-					 "client_key_path=%s\npin_hub_ca=%d\nauto_update=%d\nallow_plaintext=%d\n",
+					 "client_key_path=%s\npin_hub_ca=%d\nallow_plaintext=%d\n",
                      config->hub_url, config->key_path, config->endpoint_id,
                      config->role_tag, config->location_id, config->ca_path,
                      config->client_cert_path, config->client_key_path,
 					 config->pin_hub_ca ? 1 : 0,
-                     config->auto_update ? 1 : 0, config->allow_plaintext ? 1 : 0);
+                     config->allow_plaintext ? 1 : 0);
     if (n < 0 || (size_t)n >= sizeof(rendered) ||
         !WritePrivateFile(config->config_path, rendered, 0600)) {
         printf("[!] The unique credential is active, but the old inline agent configuration could not be rewritten.\n");
@@ -2503,277 +2487,6 @@ static void AdoptRenewedClientCert(const LINUX_AGENT_CONFIG* config, const char*
     memset(b64, 0, sizeof(b64));
     memset(keyPem, 0, sizeof(keyPem));
     memset(certPem, 0, sizeof(certPem));
-}
-
-// IsSafeToken rejects anything outside the character set a package URL or version can
-// legitimately use, so a malformed hub response can never reach the shell as an operator.
-static bool IsSafeToken(const char* s, bool allowUrlChars) {
-    if (!s || !s[0]) return false;
-    for (const char* p = s; *p; p++) {
-        if (isalnum((unsigned char)*p)) continue;
-        if (*p == '.' || *p == '_' || *p == '-') continue;
-        if (allowUrlChars && (*p == ':' || *p == '/' || *p == '~' || *p == '%' || *p == '+')) continue;
-        return false;
-    }
-    return true;
-}
-
-// IsHexDigest reports whether a string is exactly a SHA-256 hex digest.
-static bool IsHexDigest(const char* s) {
-    size_t n = 0;
-    for (; s[n]; n++) {
-        if (!isxdigit((unsigned char)s[n])) return false;
-    }
-    return n == 64;
-}
-
-// HubPathOf takes only the path from a descriptor URL, and only if it points at
-// the hub's package route.
-//
-// The agent fetches that path from the hub it is already configured to talk to
-// and ignores the advertised host entirely. Behind a reverse proxy the hub
-// legitimately advertises a different host than the agent dials, so matching on
-// the host would break valid deployments - and ignoring it is strictly safer
-// anyway, because then no hub response can point the download somewhere else.
-static const char* HubPathOf(const char* url) {
-    const char* path = strstr(url, "://");
-    path = path ? strchr(path + 3, '/') : (url[0] == '/' ? url : NULL);
-    if (!path || strncmp(path, "/download/", 10) != 0) return NULL;
-    if (!IsSafeToken(path, true)) return NULL;
-    return path;
-}
-
-// PrepareUpdateDir creates the staging directory and refuses to use one that
-// anybody but root can write to.
-//
-// Everything downstream depends on this: the package, its signature and the
-// pinned public key all land here, and the whole point is that no unprivileged
-// process can touch them between verification and install. A directory that
-// already exists with the wrong owner or mode is treated as hostile rather
-// than corrected, because the safe response to "something else made this" is
-// to stop.
-static bool PrepareUpdateDir(void) {
-    mkdir("/var/lib/ominull", 0755);
-    if (mkdir(OMINULL_UPDATE_DIR, 0700) != 0 && errno != EEXIST) {
-        printf("[!] Cannot create %s: %s\n", OMINULL_UPDATE_DIR, strerror(errno));
-        return false;
-    }
-
-    struct stat st;
-    if (lstat(OMINULL_UPDATE_DIR, &st) != 0) {
-        printf("[!] Cannot stat %s: %s\n", OMINULL_UPDATE_DIR, strerror(errno));
-        return false;
-    }
-    if (!S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-        printf("[!] Refusing to stage an update in %s: it must be a root-owned directory "
-               "that is not group- or world-writable.\n", OMINULL_UPDATE_DIR);
-        return false;
-    }
-    return true;
-}
-
-// WriteStagedFile writes one file into the staging directory.
-//
-// O_NOFOLLOW and O_EXCL-on-fresh-create matter even here: the directory should
-// be unreachable to other users, so a symlink in it means an assumption has
-// already been broken and the write must not proceed through it.
-static bool WriteStagedFile(const char* name, const char* content, mode_t mode) {
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s", OMINULL_UPDATE_DIR, name);
-    unlink(path);
-    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode);
-    if (fd < 0) {
-        printf("[!] Cannot write %s: %s\n", path, strerror(errno));
-        return false;
-    }
-    size_t len = strlen(content);
-    ssize_t written = write(fd, content, len);
-    if (close(fd) != 0 || written < 0 || (size_t)written != len) {
-        printf("[!] Short write to %s\n", path);
-        unlink(path);
-        return false;
-    }
-    return true;
-}
-
-// ApplyAgentUpdate installs a newer agent package when the hub offers one on a
-// telemetry heartbeat.
-//
-// Nothing is installed that has not been proved genuine first. The package is
-// checked against the digest the hub advertised, and then - the check that
-// actually matters - against a detached ECDSA P-256 signature verified with the
-// release public key compiled into this binary. That key does not come from the
-// hub, so a compromised hub, or anyone on the plain-HTTP path between agent and
-// hub, can serve any bytes they like and none of them will be installed.
-//
-// The install itself runs detached: dpkg's prerm stops this very daemon, so a
-// child of the current process would be torn down mid-install.
-static void ApplyAgentUpdate(const LINUX_AGENT_CONFIG* config, const char* respJson) {
-    // Bounded retry, not a single shot. Everything that can go wrong before the
-    // install - a dropped download, a hub restarting mid-fetch - would otherwise
-    // wedge this endpoint on the offered version until the daemon restarted,
-    // because one attempt is all it would ever make. Retrying without a bound is
-    // the opposite failure: a package that can never verify would be fetched
-    // every heartbeat forever.
-    static char attemptedVersion[64] = {0};
-    static int attempts = 0;
-
-    if (!config->auto_update || !respJson) return;
-    const char* block = strstr(respJson, "\"agent_update\"");
-    if (!block) return;
-
-    char version[64] = {0}, pkg[32] = {0}, url[512] = {0}, sigUrl[512] = {0}, sha256[80] = {0};
-    if (!ExtractJsonString(block, "version", version, sizeof(version))) return;
-    if (!ExtractJsonString(block, "url", url, sizeof(url))) return;
-    ExtractJsonString(block, "package", pkg, sizeof(pkg));
-
-    if (strcmp(attemptedVersion, version) != 0) {
-        snprintf(attemptedVersion, sizeof(attemptedVersion), "%s", version);
-        attempts = 0;
-    }
-    if (attempts >= 3) return;
-    attempts++;
-
-    if (pkg[0] && strcmp(pkg, "deb") != 0) {
-        printf("[!] Hub offers agent v%s as a '%s' package; this daemon only self-installs .deb.\n", version, pkg);
-        return;
-    }
-    if (geteuid() != 0) {
-        printf("[!] Agent v%s is available but this daemon is not running as root; skipping self-update.\n", version);
-        return;
-    }
-
-    // No signature, no install. A hub that cannot produce one is offering a
-    // package this agent has no way to trust, and there is no degraded mode
-    // worth having here - an unverified root install is the thing being
-    // prevented, not an inconvenience to work around.
-    if (!ExtractJsonString(block, "signature", sigUrl, sizeof(sigUrl)) ||
-        !ExtractJsonString(block, "sha256", sha256, sizeof(sha256))) {
-        printf("[!] Rejected agent update v%s: the hub offered it without a signature and digest.\n", version);
-        return;
-    }
-    if (!IsHexDigest(sha256)) {
-        printf("[!] Rejected agent update v%s: advertised digest is not a SHA-256 hex string.\n", version);
-        return;
-    }
-    if (!IsSafeToken(version, false)) {
-        printf("[!] Rejected agent update v%s: malformed package descriptor.\n", version);
-        return;
-    }
-    /* An update that installed but did not run here was rolled back; a newer
-     * release is needed, not another try of this one. */
-    char failedMark[192];
-    snprintf(failedMark, sizeof(failedMark), "%s/failed-%s", OMINULL_UPDATE_DIR, version);
-    if (access(failedMark, F_OK) == 0) {
-        if (attempts == 1) printf("[!] Agent v%s was rolled back on this host after it failed to run; waiting for a newer release.\n", version);
-        return;
-    }
-    /* Never backwards: an older signed package is still validly signed, so
-     * only the version check keeps a hub from downgrading this host to a
-     * release with a known hole. */
-    if (!Trust_UpdateVersionAdmissible(version, OMINULL_LINUX_AGENT_VERSION)) {
-        printf("[!] Rejected agent update v%s: not newer than the running v%s.\n", version, OMINULL_LINUX_AGENT_VERSION);
-        attempts = 3;
-        return;
-    }
-    /* The authority signed this version for this host: the response authority's
-     * grant, verified here against the pinned key. */
-    const char* why = Trust_UpdateAuthorized(&g_Trust, respJson, strlen(respJson), version, (int64_t)time(NULL));
-    if (why) {
-        Trust_Refuse(&g_Trust, (int64_t)time(NULL), "agent update refused: %s", why);
-        attempts--;   /* the grant may still arrive; this was not a download attempt */
-        return;
-    }
-    /* The release key signs package name, version and digest together. */
-    char releaseSig[512] = {0};
-    if (!ExtractJsonString(block, "release_sig", releaseSig, sizeof(releaseSig)) || !releaseSig[0]) {
-        printf("[!] Rejected agent update v%s: the hub sent no signed release statement.\n", version);
-        return;
-    }
-    for (const char* c = releaseSig; *c; c++) {
-        if (!isalnum((unsigned char)*c) && *c != '+' && *c != '/' && *c != '=') {
-            printf("[!] Rejected agent update v%s: release statement signature is not base64.\n", version);
-            return;
-        }
-    }
-
-    const char* pkgPath = HubPathOf(url);
-    const char* sigPath = HubPathOf(sigUrl);
-    if (!pkgPath || !sigPath) {
-        printf("[!] Rejected agent update v%s: package or signature is not on a hub download path.\n", version);
-        return;
-    }
-
-    const char* pkgName = strrchr(pkgPath, '/');
-    pkgName = pkgName ? pkgName + 1 : pkgPath;
-    char wantName[128];
-    if (!Trust_AgentArtifactName(version, wantName, sizeof(wantName)) || strcmp(pkgName, wantName) != 0) {
-        printf("[!] Rejected agent update v%s: the offered package is not this agent's own artifact.\n", version);
-        return;
-    }
-    char statement[512];
-    int sn = Trust_ReleaseStatement(pkgName, version, sha256, statement, sizeof(statement));
-    if (sn < 0 || sn >= (int)sizeof(statement)) return;
-    /* The statement must verify against the compiled-in release key or a
-     * pinned routine key; that one key goes to apply.sh as release.pub, so
-     * the package signature must verify with the same key. */
-    uint8_t releaseDer[160];
-    size_t releaseDerLen = Response_Base64Decode(releaseSig, strlen(releaseSig), releaseDer, sizeof(releaseDer));
-    int signer = Trust_UpdateSigner(&g_Trust, ReleaseVerifyPosixXY, statement, (size_t)sn, releaseDer, releaseDerLen);
-    if (signer < 0) {
-        printf("[!] Rejected agent update v%s: the release statement does not verify against the release key or a pinned routine key.\n", version);
-        return;
-    }
-    char signerName[40], signerPem[200];
-    const char* releasePub = OMINULL_RELEASE_PUBKEY_PEM;
-    Trust_SignerName(&g_Trust, signer, signerName, sizeof(signerName));
-    if (signer > 0) {
-        if (!Trust_P256PEM(g_Trust.routine[signer - 1].xy, signerPem, sizeof(signerPem))) return;
-        releasePub = signerPem;
-    }
-    printf("[*] Agent v%s release statement verified by key %s.\n", version, signerName);
-    if (!PrepareUpdateDir()) return;
-    if (!WriteStagedFile("release.pub", releasePub, 0600)) return;
-    char sigLine[520];
-    snprintf(sigLine, sizeof(sigLine), "%s\n", releaseSig);
-    if (!WriteStagedFile("release.statement", statement, 0600)) return;
-    if (!WriteStagedFile("release.sig.b64", sigLine, 0600)) return;
-
-    printf("[*] Hub published agent v%s (running v%s); fetching and verifying before install.\n",
-           version, OMINULL_LINUX_AGENT_VERSION);
-    fflush(stdout);
-
-    // The updater runs as a script in the staging directory rather than as an
-    // inline shell command so that every step is written down in one auditable
-    // place, and `set -e` guarantees a failed download, a wrong digest or a bad
-    // signature stops before dpkg is ever reached.
-    /* The release signature is what makes an update safe, and it is checked
-     * below regardless. The CA pin here is a second, earlier line: it keeps the
-     * package from being fetched from anyone but the hub in the first place,
-     * so a hostile path cannot even spend the endpoint's bandwidth or learn
-     * which version it is on. */
-    char curlSec[HUB_CURL_ARGS_LEN];
-    HubCurlSecurityArgs(config, curlSec, sizeof(curlSec));
-
-    char script[8192];
-    AgentUpdateScript spec = {
-        .dir = OMINULL_UPDATE_DIR, .binary = "/opt/ominull/bin/ominulld",
-        .log_path = "/var/log/ominull-update.log", .unit = "ominull-agent.service",
-        .version = version, .curl_args = curlSec, .hub_url = config->hub_url,
-        .pkg_path = pkgPath, .sig_path = sigPath, .sha256 = sha256, .settle_seconds = 45, .key_name = signerName,
-    };
-    int n = AgentUpdate_BuildScript(&spec, script, sizeof(script));
-    if (n < 0) {
-        printf("[!] Rejected agent update v%s: updater script would be truncated.\n", version);
-        return;
-    }
-    if (!WriteStagedFile("apply.sh", script, 0700)) return;
-
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd),
-             "setsid nohup sh %s/apply.sh >/dev/null 2>&1 </dev/null &", OMINULL_UPDATE_DIR);
-    int rc = system(cmd);
-    (void)rc;
 }
 
 /* The hub answers a rejected batch with a status and a body, and curl reports
@@ -3443,7 +3156,6 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         AdoptRenewedClientCert(config, respBuf);
         Trust_ProcessHeartbeat(&g_Trust, respBuf, strlen(respBuf), (int64_t)time(NULL));
         SyncEnforcement(config, respBuf);
-        ApplyAgentUpdate(config, respBuf);
         ProcessResponseOffers(config, respBuf);
     }
     HubContact(accepted);
@@ -3688,7 +3400,6 @@ int main(int argc, char* argv[]) {
     strcpy(config.ca_path, OMINULL_DEFAULT_CA_PATH);
     strcpy(config.role_tag, "workstation");
     strcpy(config.location_id, "loc-default");
-    config.auto_update = true;
 	config.pin_hub_ca = true;
     strcpy(config.config_path, "/etc/ominull/agent.conf");
     gethostname(config.hostname, sizeof(config.hostname) - 1);
@@ -3742,8 +3453,6 @@ int main(int argc, char* argv[]) {
             strncpy(config.ca_path, argv[++i], sizeof(config.ca_path) - 1);
         } else if (strcmp(argv[i], "--allow-plaintext") == 0) {
             config.allow_plaintext = true;
-        } else if (strcmp(argv[i], "--no-auto-update") == 0) {
-            config.auto_update = false;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             config.verbose = true;
         } else if (strcmp(argv[i], "--version") == 0) {
@@ -3853,8 +3562,7 @@ int main(int argc, char* argv[]) {
         printf("  Hub Trust:     NONE - cleartext transport%s\n",
                config.allow_plaintext ? " (--allow-plaintext)" : " (will refuse to report)");
     }
-    printf("  Agent Version: %s (self-update %s)\n", OMINULL_LINUX_AGENT_VERSION,
-           config.auto_update ? "enabled" : "disabled");
+    printf("  Agent Version: %s\n", OMINULL_LINUX_AGENT_VERSION);
     printf("===============================================================================\n");
 
     signal(SIGINT, SignalHandler);
@@ -3873,7 +3581,6 @@ int main(int argc, char* argv[]) {
     Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
     g_ReleaseVerifyPem = OMINULL_RELEASE_PUBKEY_PEM;
     g_Trust.verify_release = ReleaseVerifyPosix;
-    Trust_LoadRoutine(&g_Trust);
     printf("  Trust:         response key %s, auto-isolation key %s, policy key %s; manifest %s\n",
            g_Trust.have_key[TRUST_KEY_RESPONSE] ? "pinned" : "missing", g_Trust.have_key[TRUST_KEY_AUTO] ? "pinned" : "missing",
            g_Trust.have_key[TRUST_KEY_POLICY] ? "pinned" : "missing", g_Trust.manifest.have ? g_Trust.manifest.profile : "none yet");

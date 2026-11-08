@@ -19,9 +19,9 @@ func TestCanaryUpdateDoesNotPublishToOtherEndpoints(t *testing.T) {
 	if err := db.SetSetting("desired_agent_version", "1.1.0"); err != nil {
 		t.Fatal(err)
 	}
-	seedSignedRelease(t, s.binaryDir, "ominull-agent_1.2.0_amd64.deb")
+	seedSignedRelease(t, s.binaryDir, "ominull-agent-windows-1.2.0.msi")
 	for _, id := range []string{"canary", "hold"} {
-		seedEndpointWithCapability(t, db, id, "Linux", "1.1.0", "deb")
+		seedEndpointWithCapability(t, db, id, "Windows", "1.1.0", "msi")
 	}
 	poll := func(id string) bool {
 		t.Helper()
@@ -64,7 +64,7 @@ func TestUpdateStatusUsesPublishedBundleAfterPreviousRollout(t *testing.T) {
 	if err := db.SetSetting("desired_agent_version", "1.1.0"); err != nil {
 		t.Fatal(err)
 	}
-	seedEndpointWithCapability(t, db, "canary", "Linux", "1.1.0", "deb")
+	seedEndpointWithCapability(t, db, "canary", "Windows", "1.1.0", "msi")
 	r := httptest.NewRequest("GET", "/api/v1/agents/update-status", nil)
 	r.Header.Set("X-API-Key", "mock_admin_token")
 	w := httptest.NewRecorder()
@@ -85,7 +85,7 @@ func TestUpdateStatusDoesNotCallStaleEndpointOnline(t *testing.T) {
 	t.Parallel()
 	s, db := setupTestServer(t)
 	defer db.Close()
-	seedEndpointWithCapability(t, db, "stale-agent", "Linux", "1.1.0", "deb")
+	seedEndpointWithCapability(t, db, "stale-agent", "Windows", "1.1.0", "msi")
 	ep, err := db.GetEndpoint("stale-agent")
 	if err != nil {
 		t.Fatal(err)
@@ -117,9 +117,9 @@ func TestStagedRolloutReleasesAfterHealthyCanary(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
 	s.agentVersion = "1.2.0"
-	seedSignedRelease(t, s.binaryDir, "ominull-agent_1.2.0_amd64.deb")
+	seedSignedRelease(t, s.binaryDir, "ominull-agent-windows-1.2.0.msi")
 	for _, id := range []string{"canary", "fleet-a", "fleet-b"} {
-		seedEndpointWithCapability(t, db, id, "Linux", "1.1.0", "deb")
+		seedEndpointWithCapability(t, db, id, "Windows", "1.1.0", "msi")
 	}
 	body := `{"all":true,"version":"1.2.0","canary":["canary"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
@@ -157,7 +157,7 @@ func TestStagedRolloutReleasesAfterHealthyCanary(t *testing.T) {
 	// The new binary's first report races dpkg (stale package answer); the
 	// updater's restart a moment later reports clean provenance.
 	if err := db.UpsertEndpoint(storage.Endpoint{ID: "canary", TenantID: "default", Hostname: "canary", OS: "Linux", DriverVersion: "1.2.0",
-		UpdateCapability: "deb", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "mismatch"}); err != nil {
+		UpdateCapability: "msi", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "mismatch"}); err != nil {
 		t.Fatal(err)
 	}
 	s.advanceAgentRollouts(time.Now())
@@ -188,9 +188,9 @@ func TestStagedRolloutHaltsOnBadCanary(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
 	s.agentVersion = "1.2.0"
-	seedSignedRelease(t, s.binaryDir, "ominull-agent_1.2.0_amd64.deb")
+	seedSignedRelease(t, s.binaryDir, "ominull-agent-windows-1.2.0.msi")
 	for _, id := range []string{"canary", "fleet-a"} {
-		seedEndpointWithCapability(t, db, id, "Linux", "1.1.0", "deb")
+		seedEndpointWithCapability(t, db, id, "Windows", "1.1.0", "msi")
 	}
 	body := `{"endpoint_ids":["canary","fleet-a"],"version":"1.2.0","canary":["canary"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
@@ -200,7 +200,7 @@ func TestStagedRolloutHaltsOnBadCanary(t *testing.T) {
 	}
 	// The canary runs the version but not from the native package.
 	if err := db.UpsertEndpoint(storage.Endpoint{ID: "canary", TenantID: "default", Hostname: "canary", OS: "Linux", DriverVersion: "1.2.0",
-		UpdateCapability: "deb", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "unmanaged"}); err != nil {
+		UpdateCapability: "msi", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "unmanaged"}); err != nil {
 		t.Fatal(err)
 	}
 	// A first unclean report is the package's own restart racing dpkg: wait.
@@ -248,10 +248,10 @@ func TestPlainUpdateSupersedesStagedRollout(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
 	s.agentVersion = "1.2.0"
-	seedSignedRelease(t, s.binaryDir, "ominull-agent_1.2.0_amd64.deb")
-	seedSignedRelease(t, s.binaryDir, "ominull-agent_1.3.0_amd64.deb")
+	seedSignedRelease(t, s.binaryDir, "ominull-agent-windows-1.2.0.msi")
+	seedSignedRelease(t, s.binaryDir, "ominull-agent-windows-1.3.0.msi")
 	for _, id := range []string{"canary", "fleet-a"} {
-		seedEndpointWithCapability(t, db, id, "Linux", "1.1.0", "deb")
+		seedEndpointWithCapability(t, db, id, "Windows", "1.1.0", "msi")
 	}
 	body := `{"all":true,"version":"1.2.0","canary":["canary"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
@@ -289,10 +289,10 @@ func TestStagedRolloutQueuesNoCanaryWhenOneCannotInstall(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
 	s.agentVersion = "1.2.0"
-	seedSignedRelease(t, s.binaryDir, "ominull-agent_1.2.0_amd64.deb")
-	seedEndpointWithCapability(t, db, "a", "Linux", "1.1.0", "deb")
+	seedSignedRelease(t, s.binaryDir, "ominull-agent-windows-1.2.0.msi")
+	seedEndpointWithCapability(t, db, "a", "Windows", "1.1.0", "msi")
 	seedEndpointWithCapability(t, db, "b", "Linux", "1.1.0", "")
-	seedEndpointWithCapability(t, db, "c", "Linux", "1.1.0", "deb")
+	seedEndpointWithCapability(t, db, "c", "Windows", "1.1.0", "msi")
 	body := `{"endpoint_ids":["a","b","c"],"version":"1.2.0","canary":["a","b"]}`
 	r := httptest.NewRequest("POST", "/api/v1/agents/update", strings.NewReader(body))
 	r.Header.Set("X-API-Key", "mock_admin_token")
@@ -312,9 +312,9 @@ func TestStagedRolloutRefusesBadCanaries(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
 	s.agentVersion = "1.2.0"
-	seedSignedRelease(t, s.binaryDir, "ominull-agent_1.2.0_amd64.deb")
-	seedEndpointWithCapability(t, db, "a", "Linux", "1.1.0", "deb")
-	seedEndpointWithCapability(t, db, "b", "Linux", "1.1.0", "deb")
+	seedSignedRelease(t, s.binaryDir, "ominull-agent-windows-1.2.0.msi")
+	seedEndpointWithCapability(t, db, "a", "Windows", "1.1.0", "msi")
+	seedEndpointWithCapability(t, db, "b", "Windows", "1.1.0", "msi")
 	for _, body := range []string{
 		`{"endpoint_ids":["a"],"version":"1.2.0","canary":["b"]}`,
 		`{"endpoint_ids":["a","b"],"version":"1.2.0","canary":["a","b"]}`,
@@ -328,19 +328,19 @@ func TestStagedRolloutRefusesBadCanaries(t *testing.T) {
 // healthyCanary records an endpoint running version from its native package.
 func healthyCanary(t *testing.T, s *Server, id, version string) {
 	t.Helper()
-	expected, ok := nativePackageForCapability("deb")
+	expected, ok := nativePackageForCapability("msi")
 	if !ok {
-		t.Fatal("no native package for deb")
+		t.Fatal("no native package for msi")
 	}
 	if err := s.store.UpsertEndpoint(storage.Endpoint{ID: id, TenantID: "default", Hostname: id, OS: "Linux", DriverVersion: version,
-		UpdateCapability: "deb", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "native",
+		UpdateCapability: "msi", Status: "online", LastSeenAt: time.Now().UTC(), ProvenanceStatus: "native",
 		InstallType: expected.InstallType, PackageIdentifier: expected.Identifier, RegisteredPackageVersion: version}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // The update status lists the retired agent releases, so the console can name
-// them next to the routine release keys.
+// them.
 func TestUpdateStatusListsRetiredReleases(t *testing.T) {
 	t.Parallel()
 	s, db := setupTestServer(t)

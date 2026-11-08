@@ -18,7 +18,6 @@ const InstalledPath = "/usr/local/sbin/ominull-release-signer"
 
 const usage = `ominull-release-signer: the OMINULL_SIGNING_COMMAND for OmniNull releases
   pubkey                              PEM public key of the release key ($OMINULL_SIGNING_KEY: id or label)
-  pubkey routine                      PEM public key of the routine key (OMINULL_SIGNING_ROUTINE=1)
   begin release VERSION NAME[=SHA]... open a signing session for one release; prints the token
   begin trust TENANT STATEMENT_FILE   the same for one trust bundle
   sign FILE                           DER ECDSA-SHA256 signature on stdout ($OMINULL_SIGNING_SESSION from begin)
@@ -60,9 +59,7 @@ func run(cfg Config, a []string, stdin io.Reader, stdout, stderr io.Writer) erro
 	switch a[0] {
 	case "pubkey":
 		if len(a) == 1 {
-			return pubkey(stdout, os.Getenv("OMINULL_SIGNING_KEY"), false)
-		} else if len(a) == 2 && a[1] == "routine" {
-			return pubkey(stdout, "", true)
+			return pubkey(stdout, os.Getenv("OMINULL_SIGNING_KEY"))
 		}
 	case "begin":
 		return userBegin(cfg, a[1:], stdout, stderr)
@@ -96,20 +93,12 @@ func publicFile() (map[string]any, error) {
 	return m, json.Unmarshal(b, &m)
 }
 
-func pubkey(w io.Writer, want string, routine bool) error {
+func pubkey(w io.Writer, want string) error {
 	m, err := publicFile()
 	if err != nil {
 		return err
 	}
 	list, _ := m["keys"].([]any)
-	if routine {
-		list, _ = m["routine_keys"].([]any)
-		if len(list) == 0 {
-			return errors.New("no routine key exists yet")
-		}
-		want = ""
-		list = list[len(list)-1:]
-	}
 	var hit []string
 	var names []string
 	for _, e := range list {
@@ -141,10 +130,6 @@ func sudo(cfg Config, stdin io.Reader, stdout, stderr io.Writer, op string, args
 }
 
 func userBegin(cfg Config, a []string, stdout, stderr io.Writer) error {
-	routine := "0"
-	if os.Getenv("OMINULL_SIGNING_ROUTINE") == "1" {
-		routine = "1"
-	}
 	switch {
 	case len(a) >= 3 && a[0] == "release":
 		names := make([]string, 0, len(a)-2)
@@ -156,14 +141,14 @@ func userBegin(cfg Config, a []string, stdout, stderr io.Writer) error {
 			}
 			names = append(names, p)
 		}
-		return sudo(cfg, nil, stdout, stderr, "root-begin", append([]string{routine, os.Getenv("OMINULL_SIGNING_KEY"), "release", a[1]}, names...)...)
+		return sudo(cfg, nil, stdout, stderr, "root-begin", append([]string{os.Getenv("OMINULL_SIGNING_KEY"), "release", a[1]}, names...)...)
 	case len(a) == 3 && a[0] == "trust":
 		f, err := os.Open(a[2])
 		if err != nil {
 			return err
 		}
 		defer f.Close()
-		return sudo(cfg, io.LimitReader(f, maxText+1), stdout, stderr, "root-begin", routine, os.Getenv("OMINULL_SIGNING_KEY"), "trust", a[1])
+		return sudo(cfg, io.LimitReader(f, maxText+1), stdout, stderr, "root-begin", os.Getenv("OMINULL_SIGNING_KEY"), "trust", a[1])
 	}
 	return usageErr{}
 }
@@ -210,12 +195,12 @@ func rootCfg(base Config, a []string, need int) (Config, []string, error) {
 }
 
 func rootBegin(base Config, a []string, stdin io.Reader, stdout io.Writer) error {
-	cfg, a, err := rootCfg(base, a, 3)
+	cfg, a, err := rootCfg(base, a, 2)
 	if err != nil {
 		return err
 	}
-	r := Request{Routine: a[0] == "1", Key: a[1], Op: a[2]}
-	rest := a[3:]
+	r := Request{Key: a[0], Op: a[1]}
+	rest := a[2:]
 	switch r.Op {
 	case "release":
 		if len(rest) < 1 {

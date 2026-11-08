@@ -1517,13 +1517,21 @@ func agentPackageForCapability(capability string) (string, bool) {
 	return "", false
 }
 
-// updatePackageFor resolves the package an endpoint can install for itself.
+// linuxAgent says the endpoint installs .deb packages: those are updated over
+// root access by scripts/update-linux-agents.sh, never through the hub.
+func linuxAgent(ep storage.Endpoint) bool {
+	pkg, _ := agentPackageForCapability(ep.UpdateCapability)
+	return pkg == "deb"
+}
+
+// updatePackageFor resolves the package the hub offers an endpoint to install
+// for itself: Windows only.
 //
 // The reported capability is authoritative. An endpoint that has never
 // reported one is not given an update descriptor: the final fleet only accepts
 // package-manager-owned Linux and Windows agents.
 func updatePackageFor(capability string) (string, bool) {
-	if pkg, ok := agentPackageForCapability(capability); ok {
+	if pkg, ok := agentPackageForCapability(capability); ok && pkg != "deb" {
 		return pkg, true
 	}
 	return "", false
@@ -1653,7 +1661,7 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.supersedeAgentRollouts(r, version)
 	scheduled, unsupported, err := s.scheduleAgentUpdates(version, func(ep storage.Endpoint) bool {
-		return req.All || contains(req.EndpointIDs, ep.ID)
+		return (req.All && !linuxAgent(ep)) || contains(req.EndpointIDs, ep.ID)
 	}, grantedTargets(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1662,7 +1670,7 @@ func (s *Server) handleAgentsUpdate(w http.ResponseWriter, r *http.Request) {
 
 	scope := "the named endpoints"
 	if req.All {
-		scope = "the whole fleet"
+		scope = "every Windows agent"
 	}
 	s.audit(r, "AGENT_UPDATE_PUSH", version, fmt.Sprintf("Queued agent v%s for %s: %d endpoint(s) scheduled, %d could not self-update", version, scope, len(scheduled), len(unsupported)))
 
@@ -1703,7 +1711,7 @@ func (s *Server) handleAgentsUpdateStatus(w http.ResponseWriter, r *http.Request
 		if time.Since(ep.LastSeenAt) < 30*time.Second {
 			status = "online"
 		}
-		observed = append(observed, map[string]string{"endpoint_id": ep.ID, "driver_version": ep.DriverVersion, "status": status})
+		observed = append(observed, map[string]string{"endpoint_id": ep.ID, "os": ep.OS, "driver_version": ep.DriverVersion, "status": status})
 		if compareVersions(ep.DriverVersion, latest) < 0 {
 			outdated = append(outdated, map[string]string{
 				"endpoint_id":    ep.ID,
@@ -1766,7 +1774,7 @@ func (s *Server) handleBootstrapPS1(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "bootstrap credentials must be supplied by the enrollment body, not a URL")
 		return
 	}
-	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA(), RoutineFloor: s.routineFloor()}
+	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA()}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GeneratePowerShell(opts)))
@@ -1781,7 +1789,7 @@ func (s *Server) handleBootstrapSH(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "bootstrap credentials must be supplied by the enrollment body, not a URL")
 		return
 	}
-	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA(), RoutineFloor: s.routineFloor()}
+	opts := bootstrap.Options{HubURL: s.downloadBase(r), AgentHubURL: s.agentHubURL, AgentVersion: s.agentVersion, UseSystemCA: s.agentUsesSystemCA()}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(bootstrap.GenerateBash(opts)))
@@ -3468,7 +3476,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/bootstrap.ps1", s.handleBootstrapPS1)
 	mux.HandleFunc("/bootstrap.sh", s.handleBootstrapSH)
 	mux.HandleFunc("/download/", s.handleDownload)
-	mux.HandleFunc("/download/routine-keys.json", s.handleRoutineKeysDownload)
 
 	// 3. Multi-Tenant REST API & Hierarchy
 	mux.HandleFunc("/api/v1/hierarchy", s.authMiddleware(s.handleGetHierarchy))
@@ -3487,8 +3494,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/fleet/trust", s.authMiddleware(s.handleFleetTrust))
 	mux.HandleFunc("/api/v1/trust/statement", s.authMiddleware(s.handleTrustStatement))
 	mux.HandleFunc("/api/v1/trust/bundle", s.authMiddleware(s.handleTrustBundle))
-	mux.HandleFunc("/api/v1/trust/routine-keys", s.authMiddleware(requireAdminRole(s.handleRoutineKeys)))
-	mux.HandleFunc("/api/v1/trust/routine-keys/statement", s.authMiddleware(requireAdminRole(s.handleRoutineKeysStatement)))
 	mux.HandleFunc("/api/v1/agent/config", s.deviceOrLegacyMiddleware(s.handleAgentConfig))
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.authorized(s.resolveAgentUpdate, s.handleAgentsUpdate)))
 	mux.HandleFunc("/api/v1/agents/rollback", s.authMiddleware(requireAdminRole(s.handleAgentRollback)))

@@ -33,7 +33,6 @@ void Agent_TrustInit(const char* endpoint_id) {
         Trust_Distrust(&g_Trust);
     }
     g_Trust.verify_release = WinVerifyRelease;
-    Trust_LoadRoutine(&g_Trust);
     g_TrustLoaded = true;
     printf("[*] Trust: response key %s, auto-isolation key %s, policy key %s; manifest %s.\n",
            g_Trust.have_key[TRUST_KEY_RESPONSE] ? "pinned" : "missing", g_Trust.have_key[TRUST_KEY_AUTO] ? "pinned" : "missing",
@@ -179,25 +178,6 @@ bool Agent_TrustSecureDirectory(const char* dir) {
  * against the release key compiled into this agent (CNG). */
 bool Agent_VerifyReleaseMessage(const char* msg, size_t len, const unsigned char* der, size_t derlen) {
     return ReleaseVerifyWinMsg(OMINULL_RELEASE_PUBKEY_XY, msg, len, der, derlen);
-}
-
-static bool WinVerifyKey(const uint8_t* xy, const char* msg, size_t len, const uint8_t* der, size_t derlen) {
-    return ReleaseVerifyWinMsg(xy ? xy : OMINULL_RELEASE_PUBKEY_XY, msg, len, der, derlen);
-}
-
-/* Agent_TrustUpdateSigner finds the key that signed an agent update's release
- * statement: the compiled-in key or a pinned routine key. Returns false when
- * none does; else copies that key's point (for the package signature, which
- * must verify with the same key) and its name (main or routine:<id>). */
-bool Agent_TrustUpdateSigner(const char* statement, size_t len, const unsigned char* der, size_t derlen, unsigned char xy[64], char* name,
-                             size_t cap) {
-    if (!g_TrustLoaded) return false;
-    if (!g_Trust.routine_loaded) Trust_LoadRoutine(&g_Trust);
-    int signer = Trust_UpdateSigner(&g_Trust, WinVerifyKey, statement, len, der, derlen);
-    if (signer < 0) return false;
-    memcpy(xy, signer == 0 ? OMINULL_RELEASE_PUBKEY_XY : g_Trust.routine[signer - 1].xy, 64);
-    Trust_SignerName(&g_Trust, signer, name, cap);
-    return true;
 }
 
 static bool WinVerifyRelease(const char* msg, size_t len, const uint8_t* der, size_t derlen) {

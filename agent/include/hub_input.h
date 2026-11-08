@@ -36,7 +36,6 @@ enum {
     HI_ABI_SCRIPT_PAYLOAD_FIELDS,
     HI_ABI_TRUST_RULE,
     HI_ABI_TRUST_MANIFEST,
-    HI_ABI_TRUST_ROUTINE_KEY,
     HI_ABI_TRUST_ACTION,
     HI_ABI_SHA256_CTX,
 };
@@ -79,8 +78,6 @@ bool hi_trust_rule_valid(const void* rule);
 const char* hi_trust_parse_baselines(const char* payload, const char* end, const char* self, void* action);
 const char* hi_trust_parse_action(const char* payload, size_t len, const char* kind, const char* grant_endpoint, const char* self, void* action);
 bool hi_trust_read_grant_object(const char* v, const char* ve, void* grant, uint8_t* payload, size_t* plen);
-bool hi_trust_parse_routine_list(const char* s, void* keys, int* count);
-bool hi_trust_positive_int(const char* v, const char* ve, int64_t* out);
 bool hi_trust_is_ip_literal(const char* s);
 bool hi_trust_is_allow_entry(const char* s);
 bool hi_trust_public_address(const char* s);

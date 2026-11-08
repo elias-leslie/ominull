@@ -71,8 +71,7 @@ authority refuses.
 
 | Action | Class | Verdict | Why |
 |---|---|---|---|
-| Agent update, release signed with the release key | agent_update | undoable | agents can be rolled back (retire, then roll forward); staged rollouts hold the rest until canaries are healthy |
-| Agent update, release signed with a routine key | agent_update | undoable | same; a rollout to more than one endpoint without named canaries is refused |
+| Agent update (Windows) | agent_update | undoable | agents can be rolled back (retire, then roll forward); staged rollouts hold the rest until canaries are healthy |
 | Terminal session | remote | dangerous (lab machine: undoable) | a person's machine |
 | Remote screen session | remote | dangerous (lab machine: undoable) | a person's machine |
 | Isolate a machine | isolation | undoable | the hub can release it |

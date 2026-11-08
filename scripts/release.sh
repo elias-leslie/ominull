@@ -3,8 +3,8 @@
 #
 # The order is part of the update contract: build and sign the native artifacts,
 # deploy the hub (scripts/deploy-hub.sh: build, copy, restart), publish the agent
-# packages on it (scripts/publish-agents.sh), then ask the running hub to roll the
-# retained fleet. Every endpoint release is a signed native package. A hub-only
+# packages on it (scripts/publish-agents.sh), install on the Linux machines
+# (scripts/update-linux-agents.sh), then ask the running hub to roll the Windows fleet. Every endpoint release is a signed native package. A hub-only
 # change needs none of this: scripts/deploy-hub.sh alone puts it live.
 set -euo pipefail
 
@@ -24,9 +24,6 @@ CANARY_IDS=""
 # A hub release goes out whenever something it ships changed; none when nothing
 # did (docs/project-guide.md, "Releases"). Thresholds are tuning data on the hub,
 # so a threshold change needs no release at all.
-# A release signed with a routine key (OMINULL_SIGNING_ROUTINE=1) always rolls
-# out canaries first; the lab machines are the standing canaries.
-ROUTINE_CANARIES="${OMINULL_ROUTINE_CANARIES:-linux-ominull-target-linux}"
 
 usage() {
     sed -n '2,8p' "$0"
@@ -34,8 +31,8 @@ usage() {
 
 Options:
   --version X.Y.Z  release version (otherwise use VERSION)
-  --canary IDS     comma-separated endpoint IDs; one request, the hub rolls these,
-                   then the rest once they are healthy (halts if not)
+  --canary IDS     comma-separated endpoint IDs to do first: Linux ones head the Linux
+                   run; the hub rolls Windows ones, then the rest once they are healthy
   --skip-tests     skip local quality tests (never skips signing or live checks)
   --hub-only       deploy the hub only (runs scripts/deploy-hub.sh: no version, no signing)
   --agents-only    skip build/deploy; roll agents against an already-live hub
@@ -45,19 +42,18 @@ Batching: refuses when nothing the agents ship (agent, packaging, screen, the bu
 scripts; tests and docs excluded) changed since the last "Release X.Y.Z" commit.
 
 Gates (skipped by --skip-tests): gofmt, hub go test -race and vet, topology and router
-script tests, release header/convergence/batching tests, bash -n on the release scripts,
+script tests, release header/convergence/batching tests, the Linux installer test, bash -n on the release scripts,
 BPF build and the Linux collector feedback loops, fuzz-agent.sh --regress; then build,
-sign, fresh-install verify, package lifecycle, deploy-hub.sh, publish-agents.sh, rollout.
+sign, fresh-install verify, package lifecycle, deploy-hub.sh, publish-agents.sh, the Linux
+machines (update-linux-agents.sh), then the hub's Windows rollout.
 
 Environment:
-  OMINULL_SIGNING_ROUTINE=1     routine key: canaries first (OMINULL_ROUTINE_CANARIES,
-                                default linux-ominull-target-linux)
   OMINULL_SIGNING_BACKEND, OMINULL_SIGNING_COMMAND   signer (sign-release.sh)
   OMINULL_HUB_URL, OMINULL_ADMIN_KEY   hub API; unset: read from the production config
   BPFTOOL                       bpftool path for build-bpf.sh (e.g. /usr/sbin/bpftool)
 
-Run it under st tools run (heavy lane). The exact routine command (signer, canaries)
-is in the private operations brief, "Current checkpoint".
+Run it under st tools run (heavy lane). The exact command (signer) is in the private
+operations brief, "Gates and release".
 EOF
 }
 
@@ -97,11 +93,6 @@ if [ "${DO_HUB}" -eq 1 ]; then
     fi
 fi
 
-if [ "${OMINULL_SIGNING_ROUTINE:-0}" = 1 ] && [ -z "${CANARY_IDS}" ]; then
-    CANARY_IDS="${ROUTINE_CANARIES}"
-    echo "[*] Routine-signed release: canaries first (${CANARY_IDS})."
-fi
-
 if [ -n "${VERSION}" ]; then
     "${ROOT_DIR}/scripts/version.sh" bump "${VERSION}"
 else
@@ -128,11 +119,14 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/test-release-headers.py"
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
     bash "${ROOT_DIR}/scripts/test-release-batching.sh"
-    bash -n "${ROOT_DIR}/scripts/build-packages.sh" "${ROOT_DIR}/scripts/sign-release.sh" "${ROOT_DIR}/scripts/sign-trust-bundle.sh" \
-        "${ROOT_DIR}/scripts/deploy-hub.sh" "${ROOT_DIR}/scripts/publish-agents.sh" "${ROOT_DIR}/scripts/pve/install.sh" "${ROOT_DIR}/scripts/lib/hub-admin-key.sh" \
-        "${ROOT_DIR}/scripts/retire-macos-agent.sh" \
-        "${ROOT_DIR}/scripts/retire-hub-host-agent.sh" \
-        "${ROOT_DIR}/scripts/test-package-lifecycle.sh"
+    bash "${ROOT_DIR}/scripts/test-install-agent-deb.sh"
+    bash "${ROOT_DIR}/scripts/test-update-linux-agents.sh"
+    # bash -n reads only its first file.
+    for script in build-packages.sh sign-release.sh sign-trust-bundle.sh update-linux-agents.sh lib/install-agent-deb.sh \
+        deploy-hub.sh publish-agents.sh pve/install.sh lib/hub-admin-key.sh retire-macos-agent.sh retire-hub-host-agent.sh \
+        test-package-lifecycle.sh; do
+        bash -n "${ROOT_DIR}/scripts/${script}"
+    done
 
     bash "${ROOT_DIR}/scripts/build-bpf.sh"
     echo "[*] Running Linux collector and isolation feedback loops."
@@ -169,9 +163,6 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_script_exec_linux" "${ROOT_DIR}/agent/tests/test_script_exec_linux.c"
     "${ROOT_DIR}/build/test_script_exec_linux"
-    gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
-        -o "${ROOT_DIR}/build/test_agent_update_linux" "${ROOT_DIR}/agent/tests/test_agent_update_linux.c"
-    "${ROOT_DIR}/build/test_agent_update_linux"
     gcc -O2 -Wall -Wextra -Wformat=2 -I"${ROOT_DIR}/agent/include" \
         -o "${ROOT_DIR}/build/test_cert_renewal" "${ROOT_DIR}/agent/tests/test_cert_renewal.c"
     "${ROOT_DIR}/build/test_cert_renewal"
@@ -220,6 +211,15 @@ fi
     exit 1
 }
 : "${OMINULL_ADMIN_KEY:?export OMINULL_ADMIN_KEY for the rollout phase}"
+
+# Linux machines take the package over root access, not from the hub. One failure
+# stops the release here, before any Windows machine is queued.
+if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then
+    "${ROOT_DIR}/scripts/update-linux-agents.sh" "${VERSION}" ${CANARY_IDS:+--canary "${CANARY_IDS}"}
+else
+    echo "[*] --no-wait: Linux machines not touched; run scripts/update-linux-agents.sh ${VERSION}."
+fi
+
 hdr() {
     hub_curl_config "${OMINULL_ADMIN_KEY}" "${HUB_URL}"
 }
@@ -357,6 +357,22 @@ if ! printf '%s' "${INITIAL_STATUS}" | jq -e --argjson ids "${CANARY_IDS_JSON}" 
 fi
 COHORT_IDS_JSON="$(printf '%s' "${INITIAL_STATUS}" | jq -c --argjson canaries "${CANARY_IDS_JSON}" \
     '[.endpoints[] | select(.status == "online") | .endpoint_id] + $canaries | unique')"
+# Linux canaries went first above, so the hub is asked for the Windows ones only.
+HUB_CANARIES="$(printf '%s' "${INITIAL_STATUS}" | jq -r --argjson ids "${CANARY_IDS_JSON}" \
+    '[.endpoints[] | select(.endpoint_id as $id | $ids | index($id) != null)
+      | select((.os // "") | ascii_downcase | contains("linux") | not) | .endpoint_id] | join(",")')"
+if [ -n "${CANARY_IDS}" ] && [ -z "${HUB_CANARIES}" ] && [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
+    # The Linux canaries were not touched, so nothing has earned the rest a go.
+    echo "[+] --no-wait: Linux canaries not installed; full-fleet queue deferred."
+    exit 0
+fi
+# With every Windows machine named there is no rest to hold, and the hub refuses
+# such a staged rollout.
+if [ -n "${HUB_CANARIES}" ] && printf '%s' "${INITIAL_STATUS}" | jq -e --argjson ids "$(target_json "${HUB_CANARIES}")" '
+    [.endpoints[] | select((.os // "") | ascii_downcase | contains("linux") | not)
+     | select(.endpoint_id as $id | $ids | index($id) == null)] | length == 0' >/dev/null; then
+    HUB_CANARIES=""
+fi
 OFFLINE_IDS_JSON="$(printf '%s' "${INITIAL_STATUS}" | jq -c --argjson required "${COHORT_IDS_JSON}" \
     '[.endpoints[] | select(.status == "offline") | .endpoint_id | select(. as $id | ($required | index($id)) == null)]')"
 if [ "${WAIT_FOR_AGENTS}" -eq 1 ] && [ "${COHORT_IDS_JSON}" = "[]" ]; then
@@ -387,8 +403,8 @@ wait_rollout() {
     return 1
 }
 
-if [ -n "${CANARY_IDS}" ] && printf '%s' "${INITIAL_STATUS}" | jq -e 'has("staged_rollouts")' >/dev/null; then
-    STAGED="$(queue "" "${CANARY_IDS}")"
+if [ -n "${HUB_CANARIES}" ] && printf '%s' "${INITIAL_STATUS}" | jq -e 'has("staged_rollouts")' >/dev/null; then
+    STAGED="$(queue "" "${HUB_CANARIES}")" || { echo "[-] The hub refused the staged rollout." >&2; exit 1; }
     printf '%s' "${STAGED}" | jq -c '{desired_version,scheduled_count: ((.scheduled // []) | length),rollout: .rollout.id}'
     ROLLOUT_ID="$(printf '%s' "${STAGED}" | jq -r '.rollout.id // ""')"
     if [ -z "${ROLLOUT_ID}" ]; then
@@ -404,11 +420,11 @@ if [ -n "${CANARY_IDS}" ] && printf '%s' "${INITIAL_STATUS}" | jq -e 'has("stage
     exit 0
 fi
 
-if [ -n "${CANARY_IDS}" ]; then
+if [ -n "${HUB_CANARIES}" ]; then
     # A hub without staged rollouts would ignore the canary field and update
     # everything at once, so it gets two requests instead.
-    queue_report "${CANARY_IDS}"
-    if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then wait_for "${CANARY_IDS}"; fi
+    queue_report "${HUB_CANARIES}"
+    if [ "${WAIT_FOR_AGENTS}" -eq 1 ]; then wait_for "${HUB_CANARIES}"; fi
     if [ "${WAIT_FOR_AGENTS}" -eq 0 ]; then
         echo "[+] Canary update queued; full-fleet queue deferred by --no-wait."
         exit 0

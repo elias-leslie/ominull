@@ -147,3 +147,32 @@ func TestRetiredSettingsAreDropped(t *testing.T) {
 		t.Errorf("a live setting was dropped: setup.complete = %q", v)
 	}
 }
+
+// A queued update for a Linux agent goes at startup; a Windows one stays.
+func TestQueuedLinuxUpdatesAreDropped(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ominull.db")
+	store, err := New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, capability := range map[string]string{"lin": "deb", "win": "msi"} {
+		if err := store.UpsertEndpoint(Endpoint{ID: id, TenantID: "default", UpdateCapability: capability}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RequestAgentUpdate(id, "9.9.9"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.Close()
+	store, err = New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if job, _ := store.GetAgentUpdateJob("lin"); job != nil {
+		t.Errorf("Linux job kept: %+v", job)
+	}
+	if job, _ := store.GetAgentUpdateJob("win"); job == nil {
+		t.Error("Windows job dropped")
+	}
+}

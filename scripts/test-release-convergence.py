@@ -209,6 +209,37 @@ class ReleaseConvergence(unittest.TestCase):
         self.assertIn("online cohort converged", result.stdout)
         self.assertEqual(len([method for method, _ in requests if method == "POST"]), 2)
 
+    def linux_and_windows(self, staged=None):
+        response = status(online=("lin", "win-a", "win-b"), offline=(), staged=staged)
+        for endpoint in response["endpoints"]:
+            endpoint["os"] = "Linux 6.8" if endpoint["endpoint_id"] == "lin" else "Windows 11"
+        return response
+
+    def posts(self, requests):
+        return [body for method, body in requests if method == "POST"]
+
+    def test_linux_canary_is_not_sent_to_the_hub(self):
+        result, requests = self.release([self.linux_and_windows(staged="")], canary="lin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.posts(requests), [{"all": True, "version": VERSION}])
+
+    def test_windows_canary_is_what_the_hub_gets(self):
+        result, requests = self.release([
+            self.linux_and_windows(staged=""),
+            self.linux_and_windows(staged="released"),
+        ], canary="lin,win-a")
+        self.assertEqual(self.posts(requests), [{"all": True, "version": VERSION, "canary": ["win-a"]}])
+
+    def test_naming_every_windows_machine_is_a_plain_rollout(self):
+        result, requests = self.release([self.linux_and_windows(staged="")], canary="win-a,win-b")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.posts(requests), [{"all": True, "version": VERSION}])
+
+    def test_no_wait_with_only_linux_canaries_queues_nothing(self):
+        result, requests = self.release([self.linux_and_windows()], canary="lin", wait=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.posts(requests), [])
+
     def test_staged_rollout_is_one_request(self):
         result, requests = self.release([
             status(outdated=("required",), staged=""), status(staged="canary"), status(staged="released"),

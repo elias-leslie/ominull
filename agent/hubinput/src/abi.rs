@@ -8,7 +8,6 @@ pub const MAX_PAYLOAD_JSON_LEN: usize = 65536;
 pub const TRUST_MAX_ALLOW: usize = 32;
 pub const TRUST_MAX_RULES: usize = 64;
 pub const TRUST_MAX_CAPS: usize = 12;
-pub const TRUST_MAX_ROUTINE_KEYS: usize = 4;
 pub const TRUST_MAX_PAYLOAD: usize = 8192;
 pub const SCRIPT_PARAM_NAME_MAX: usize = 65;
 pub const SCRIPT_PARAM_VALUE_MAX: usize = 2048;
@@ -110,12 +109,6 @@ pub struct TrustManifest {
 }
 
 #[repr(C)]
-pub struct TrustRoutineKey {
-    pub id: [u8; 17],
-    pub xy: [u8; 64],
-}
-
-#[repr(C)]
 pub struct TrustAction {
     pub op: c_int,
     pub allow: [[u8; 64]; TRUST_MAX_ALLOW],
@@ -139,7 +132,6 @@ const _: () = {
     assert!(size_of::<ResponseJobOffer>() == 192 + 800 + MAX_PAYLOAD_JSON_LEN + 8);
     assert!(size_of::<ScriptParam>() == 65 + 2048 + 1);
     assert!(size_of::<TrustRule>() == 92);
-    assert!(size_of::<TrustRoutineKey>() == 81);
     assert!(size_of::<Sha256Ctx>() == 104);
 };
 

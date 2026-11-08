@@ -60,9 +60,8 @@ pub extern "C" fn hi_abi_size(which: c_int) -> usize {
         4 => size_of::<ScriptPayloadFields>(),
         5 => size_of::<TrustRule>(),
         6 => size_of::<TrustManifest>(),
-        7 => size_of::<TrustRoutineKey>(),
-        8 => size_of::<TrustAction>(),
-        9 => size_of::<Sha256Ctx>(),
+        7 => size_of::<TrustAction>(),
+        8 => size_of::<Sha256Ctx>(),
         _ => 0,
     }
 }
@@ -354,25 +353,6 @@ pub unsafe extern "C" fn hi_trust_read_grant_object(v: *const c_char, ve: *const
     match trust::read_grant_object(span(v, ve), &mut *g, out(payload_p.cast(), TRUST_MAX_PAYLOAD)) {
         Some(n) => {
             *plen = n;
-            true
-        }
-        None => false,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn hi_trust_parse_routine_list(s: *const c_char, o: *mut c_void, count: *mut c_int) -> bool {
-    *count = 0;
-    let Some(s) = text(s) else { return false };
-    let items: &mut [TrustRoutineKey] = slice::from_raw_parts_mut(o.cast(), TRUST_MAX_ROUTINE_KEYS);
-    trust::parse_routine_list(s, items, &mut *count)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn hi_trust_positive_int(v: *const c_char, ve: *const c_char, o: *mut i64) -> bool {
-    match trust::positive_int(span(v, ve)) {
-        Some(x) => {
-            *o = x;
             true
         }
         None => false,

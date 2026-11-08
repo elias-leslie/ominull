@@ -16,7 +16,8 @@ var retiredTables = []string{
 }
 
 // retiredSettings are settings keys nothing reads any more: the retired
-// copilot and Nightshift, the shared-key agent login (closed on every hub),
+// copilot and Nightshift, the shared-key agent login (closed on every hub), the
+// routine release keys,
 // and the markers of one-time repairs that ran everywhere and whose code is
 // gone.
 var retiredSettings = []string{
@@ -25,6 +26,7 @@ var retiredSettings = []string{
 	"nightshift_device_salt",
 	"copilot.config",
 	"legacy_agent_auth",
+	"routine_release_keys",
 	"byte_count_repair_v1",
 	"byte_rate_repair_v1",
 	"anomaly_hunt_tier_backfill_v1",
@@ -33,6 +35,12 @@ var retiredSettings = []string{
 // dropRetiredTables drops each retired table that exists and holds no rows,
 // and the retired settings keys.
 func (s *Store) dropRetiredTables() error {
+	// Queued updates for Linux agents never run now: they update over root
+	// access, not through the hub.
+	if _, err := s.db.Exec(`DELETE FROM agent_update_jobs WHERE completed_at IS NULL AND endpoint_id IN
+		(SELECT id FROM endpoints WHERE LOWER(TRIM(update_capability)) = 'deb')`); err != nil {
+		return fmt.Errorf("dropping queued Linux agent updates: %w", err)
+	}
 	// A database from before 2026-11-06 still holds the relay key under its
 	// Nightshift name; keep it under the Aico one (a key already issued there
 	// wins) before the old name goes.

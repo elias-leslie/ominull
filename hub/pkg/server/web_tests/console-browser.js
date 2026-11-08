@@ -203,12 +203,11 @@
   chipBtn('Isolation mismatch').click(); await wait();
   const rows = () => [...document.querySelectorAll('#view')].map(v=>v.textContent).join(' ');
   assert(/prod-api-02/.test(rows()) && !/prod-db-01/.test(rows()),'Isolation mismatch filter shows the wrong machines');
-  /* Release keys on the Access page. */
+  /* Retired releases on the Access page. */
   a.state.filters={}; a.state.section='access'; document.getElementById('view').dataset.section=''; a.render();
-  await until(() => /Release keys/.test(document.getElementById('view').textContent) && a.state.routineKeys, 'the release keys card');
+  await until(() => /Retired agent releases/.test(document.getElementById('view').textContent), 'the retired releases card');
   document.getElementById('view').dataset.section=''; a.render();
   const v = document.getElementById('view').textContent;
-  assert(/routine-2026-10/.test(v) && /epoch 3/.test(v),'Routine keys missing');
   assert(/Retired/.test(v) && /1\.0\.0/.test(v) && /machines? still run/.test(v),'Retired releases missing');
   a.state.remoteOff=saved.r; a.state.filters=saved.f; a.state.routeTab=saved.tab; a.state.routeTabKey=saved.key; a.state.section=saved.sec; document.getElementById('view').dataset.section=''; a.render();
  });

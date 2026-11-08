@@ -1,9 +1,8 @@
 /*
  * Release signature check for the Windows agent through CNG: a DER ECDSA
  * P-256 signature over a SHA-256 digest, against a raw public point (X then
- * Y, 32 bytes each). The compiled-in release key verifies trust bundles,
- * routine-keys statements and agent updates; a pinned routine key verifies
- * agent updates only (Trust_UpdateSigner).
+ * Y, 32 bytes each): the compiled-in release key, for trust bundles and agent
+ * updates.
  */
 #ifndef OMINULL_RELEASE_VERIFY_WIN_H
 #define OMINULL_RELEASE_VERIFY_WIN_H

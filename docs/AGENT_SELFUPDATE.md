@@ -1,15 +1,19 @@
 # Agent self-update
 
-The supported endpoint updates are native Debian packages on Linux and an MSI
-on Windows. Every package has a detached ECDSA P-256 signature and a SHA-256
-sidecar. The release public key is compiled into each agent; the private key is
-kept in the operations vault.
+Every package has a detached ECDSA P-256 signature and a SHA-256 sidecar, made
+with the one release key. Its public half is compiled into each agent; the
+private key stays in the operator's key store.
 
-The hub advertises an update only when the package, digest, and signature are
-present in its configured artifact directory. Agents use only the path from the
-hub descriptor and never follow a descriptor to another host.
+Windows agents update themselves from the MSI the hub offers. Linux agents do
+not self-update: the operator installs the Debian package with
+`scripts/update-linux-agents.sh` over root access that does not depend on the
+agent.
 
-## Common sequence
+The hub advertises a Windows update only when the package, digest, and
+signature are present in its configured artifact directory. Agents use only the
+path from the hub descriptor and never follow a descriptor to another host.
+
+## Windows sequence
 
 1. Receive a signed descriptor in an authenticated telemetry response.
 2. Validate the package path and digest.
@@ -25,20 +29,27 @@ registered package version, install type, and provenance status must agree.
 
 ## Linux
 
-The agent stages under `/var/lib/ominull/updates`, owned by root and mode `0700`,
-then invokes `dpkg -i`. The package owns `/opt/ominull/bin/ominulld`,
-`/etc/ominull/agent.conf`, and `ominull-agent.service`. The maintainer scripts
-create and enable the unit, preserve enrollment identity on upgrade, refuse a
-downgrade, and remove endpoint identity only on purge. They never remove the
-hub database or PKI. New configuration uses a unique device credential file;
-legacy inline shared-key configuration is migrated out of the service path by
-the updated agent.
+`scripts/update-linux-agents.sh VERSION [--canary IDS] [--only IDS] [--reinstall]`
+checks the package signature against the release key, then goes machine by
+machine (canaries first). On each it runs `scripts/lib/install-agent-deb.sh` as
+root over Proxmox (`pct exec`, `qm guest exec`, or ssh to the host) or locally
+with sudo. That script downloads the package from the hub the agent already
+talks to, checks the digest the operator verified, runs `dpkg -i`, and waits for
+the service to stay up; otherwise the previous binary goes back. The hub must
+then hear the new version from the machine, or the previous binary goes back
+too. The first failure stops the run. Powered-off machines are listed for a rerun
+and are never started for this. The signature is checked against the key in
+`agent/include/release_key.h`, the one the agents pin.
 
-The update is launched independently of the current daemon because the package
-transaction stops that daemon. A failed package transaction is logged and the
-existing executable remains authoritative. The agent's release version and
-`dpkg-query` result are reported separately so manual or partial installs are
-visible.
+The package owns `/opt/ominull/bin/ominulld`, `/etc/ominull/agent.conf`, and
+`ominull-agent.service`. The maintainer scripts create and enable the unit,
+preserve enrollment identity on upgrade, refuse a downgrade, and remove endpoint
+identity only on purge. They never remove the hub database or PKI. New
+configuration uses a unique device credential file.
+
+The hub refuses a Linux endpoint in an agent update and drops any Linux update
+still queued from an older release. The agent still reports the `deb` capability
+so the console and the status API know how the machine is packaged.
 
 ## Windows
 
@@ -58,41 +69,6 @@ owns file replacement and rollback; the agent only waits for its service to
 stop, invokes Windows Installer, and starts the package-owned service after a
 successful transaction. A failed transaction leaves the prior MSI installation
 authoritative.
-
-## Routine release keys
-
-Besides the compiled-in release key, an agent accepts up to four routine
-release keys, and only for agent updates: the package `.sig` and its
-`OMINULL-RELEASE-V1` release statement. Trust bundles, host authority, script
-grants, key rotation and routine-key statements still verify against the
-compiled-in key alone.
-
-The hub sends them at the top level of the heartbeat answer, while the
-agent's reported `routine_epoch` is below the hub's, as
-`"routine_keys": {"epoch": N, "keys": "<list>", "sig": "<base64 DER>"}`.
-The agent rebuilds the statement
-
-```
-OMINULL-ROUTINE-KEYS-V1
-epoch=<N>
-keys=<id>:<xy>,<id>:<xy>
-```
-
-(each line ends in `\n`; `id` is 16 lowercase hex, `xy` the 128 lowercase hex of
-the raw P-256 point, entries sorted by id, at most four, an empty list revokes
-them all) and checks the release key's signature over it. Anything malformed
-is refused. A set is taken only at an epoch above every one pinned before
-(the same epoch and keys again changes nothing); `routine.epoch` keeps that
-floor even if `routine.pin` is deleted. `routine.pin` (next to `trust.pin`)
-holds the epoch, list and signature, and the signature is checked again at
-every start; a changed pin is ignored and reported.
-
-For an update the agent tries the compiled-in key, then each routine key, on
-the release statement. The package signature must verify with the same key:
-on Linux that key is written as `release.pub` for the install script's
-openssl checks; on Windows CNG checks the package with it. The log says which
-key verified (`main` or `routine:<id>`). The trust report carries
-`routine_epoch` (0 when none) and `routine_keys` (how many are pinned).
 
 ## Rollback and dead-man behavior
 

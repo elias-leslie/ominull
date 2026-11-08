@@ -155,10 +155,12 @@ downgrades are refused. Remove stops and unregisters the package service.
 Purge is explicit and removes only that package's private endpoint files; hub
 database, PKI, release, and backup data are preserved.
 
-Agents self-update only after checking the package digest and the release key
-pinned in the binary. Linux uses `dpkg`; Windows uses `msiexec`. A failed
-download, signature, package transaction, restart, or heartbeat leaves the
-current package authoritative.
+Windows agents self-update with `msiexec` only after checking the package digest
+and the release key pinned in the binary. Linux machines take updates from
+`scripts/update-linux-agents.sh`, which checks the signature first and puts the
+previous binary back if the new one will not stay running. A failed download,
+signature, package transaction, restart, or heartbeat leaves the current package
+authoritative.
 
 ## CLI and API
 
@@ -257,7 +259,6 @@ belong to that name, so reattach with the same one.
 | `/api/v1/agents/update` | POST | queue signed native package update |
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
 | `/api/v1/agents/rollback` | POST | admin: `{version, reason}` retires an agent release: halts its staged rollouts, drops its queued updates and refuses to roll it again; machines already on it stay until a newer release; no authorization needed |
-| `/api/v1/trust/routine-keys` | GET/POST | admin: the routine release keys the pinned release key listed, `{epoch, keys:[{id, public_key}], signature}` over `OMINULL-ROUTINE-KEYS-V1` (`/statement` returns the exact bytes; a higher epoch replaces, an empty list revokes). Agents get it in the heartbeat and accept a routine key only for agent packages and their release statements; a release signed with one rolls out canaries first |
 | `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save applies at once and is recorded in the audit with a detection-policy note; an invalid draft or one over 16 KiB is refused with the reason; the audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
 | `/api/v1/detection/expected` | GET/POST/PUT/DELETE | the expected rules (below): GET returns `{rules, findings, explicit, now}`; POST or PUT upserts one rule by `id` (admin); DELETE `?id=` removes one (admin); every write applies at once and is audited as `EXPECTED_RULE_SAVED` / `EXPECTED_RULE_DELETED` |
 | `/api/v1/detection/expected/mark` | POST | admin: `{id, reason?, all_hosts?, days?}` turns a finding into a narrow expected rule (this program, this network, this host, this kind) and acknowledges the finding; audited as `EXPECTED_RULE_MARKED`; no release needed |
@@ -566,10 +567,11 @@ Detection thresholds, exemptions and vendor lists are tuning data on the hub
 (`hub/pkg/storage/detection_tuning.go`, changed through the detection policy
 API), so changing one needs no release at all.
 
-An agent update is authorized on the first request (no rule, no tap). The
+A Windows agent update is authorized on the first request (no rule, no tap). The
 hub signs it; agents verify the package signature themselves before installing.
-A rollout of a routine-key release to more than one endpoint must name canaries
-(otherwise it is refused). The audit row is `ACTION_AUTHORIZED`.
+The audit row is `ACTION_AUTHORIZED`. Linux agents update with
+`scripts/update-linux-agents.sh`, which `release.sh` runs before the Windows
+rollout; rerun it to pick up machines that were powered off.
 
 Official protocol and provider references:
 

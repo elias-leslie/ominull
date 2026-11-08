@@ -1,4 +1,4 @@
-/* The heartbeat reply as agent_trust.h reads it: pinned keys, routine keys,
+/* The heartbeat reply as agent_trust.h reads it: pinned keys,
  * the capability manifest, first-run enforcement adoption and enforcement
  * grants, plus the agent-update grant. Keys are pinned once from the signed
  * fixtures (trust_fixtures.h), so grants are parsed past the key lookup; each

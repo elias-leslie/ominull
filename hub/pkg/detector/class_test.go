@@ -204,9 +204,8 @@ func TestALabHostReachingHomePages(t *testing.T) {
 	flow("10.0.0.1", 53, "/usr/lib/systemd/systemd-resolved", now)
 	flow("10.0.0.1", 123, "/usr/lib/systemd/systemd-timesyncd", now)
 	flow("10.0.0.58", 9443, "/opt/ominull/bin/ominulld", now)
-	// The agent's updater (live 2026-11-08: dash running apply.sh paged).
+	// The agent's package download, as scripts/lib/install-agent-deb.sh runs it.
 	fetch := "curl -fsSL --cacert /etc/ominull/ca.crt --proto =https -m 300 -o /var/lib/ominull/updates/agent.deb https://10.0.0.58:9443/download/x.deb"
-	run("10.0.0.58", 9443, "/usr/bin/dash", "sh /var/lib/ominull/updates/apply.sh", "root", now)
 	run("10.0.0.58", 9443, "/usr/bin/curl", fetch, "root", now)
 	if got := anomaliesOfType(t, store, "LAB_ESCAPE"); len(got) != 0 {
 		t.Fatalf("lookups, the sensor and its updater raised %d lab escapes", len(got))
@@ -224,10 +223,7 @@ func TestALabHostReachingHomePages(t *testing.T) {
 		path string
 		ev   storage.Event
 	}{
-		{"/usr/bin/dash", ev("10.0.0.58", 9443, "sh /tmp/apply.sh", "root")},
-		{"/usr/bin/dash", ev("10.0.0.58", 9443, "sh /var/lib/ominull/updates/apply.sh extra", "root")},
-		{"/usr/bin/dash", ev("10.0.0.58", 9443, "sh /var/lib/ominull/updates/apply.sh", "lab")}, // LD_PRELOAD or BASH_ENV as a user
-		{"/tmp/dash", ev("10.0.0.58", 9443, "sh /var/lib/ominull/updates/apply.sh", "root")},
+		{"/usr/bin/dash", ev("10.0.0.58", 9443, "sh /var/lib/ominull/updates/apply.sh", "root")}, // the old self-updater is gone
 		{"/tmp/curl", ev("10.0.0.58", 9443, fetch, "root")},
 		{"/usr/bin/curl", ev("10.0.0.58", 9443, fetch, "lab")}, // curl connects before it opens the root-only file
 		{"/usr/bin/curl", ev("10.0.0.5", 22, fetch, "root")},   // the URL names another host
@@ -239,7 +235,7 @@ func TestALabHostReachingHomePages(t *testing.T) {
 			t.Fatalf("%s %+v is not the updater", c.path, c.ev)
 		}
 	}
-	if !isSensorUpdater(ev("10.0.0.58", 443, "curl -o /var/lib/ominull/updates/agent.deb.sig https://10.0.0.58/x.sig", "root"), "/usr/bin/curl") {
+	if !isSensorUpdater(ev("10.0.0.58", 443, "curl -o /var/lib/ominull/updates/agent.deb https://10.0.0.58/x.deb", "root"), "/usr/bin/curl") {
 		t.Fatal("an https URL without a port is port 443")
 	}
 }

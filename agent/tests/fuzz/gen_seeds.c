@@ -64,7 +64,6 @@ int main(int argc, char** argv) {
     seed("fuzz_diff", "grant", "{" GRANT("script_exec", D64) ",\"payload_b64\":\"eyJyb3V0ZSI6InJlbGVhc2UifQ==\"}");
     seed("fuzz_diff", "descriptor", "{\"version\":\"1.8.117\",\"url\":\"https://hub/x\",\"sha256\":\"" D64 "\",\"signature\": \"abcd\",\"package\":\"p\","
          "\"threat_indicators\":[\"10.0.0.9\",\"10.0.0.10\"],\"device_credential\":\"omd_0123456789012345678901234567890123456789012345678901234567890123\"}");
-    seed("fuzz_diff", "routine", "0123456789abcdef:" D64 D64 ",0123456789abcde0:" D64 D64);
     seed("fuzz_diff", "escapes", "{\"source\":\"x\\n\\t\\\\\\\"\\u0041\\u00e9\\u20ac\\ud83d\\ude00\",\"interpreter\":\"/bin/\\u0073h\",\"script_id\":\"a\\u0041\",\"script_version\":1,\"parameters\":{\"a\\u0041\":\"v\\ud83d\\ude00\",\"n\":12,\"b\":true}}");
     seed("fuzz_diff", "bulk", "{\"route\":\"/api/v1/endpoints/isolate-bulk\",\"targets\":[\"ep-1\",\"ep-2\"],\"body\":{\"allow_ips\":[\"10.0.0.1\"]},\"baselines\":[]}");
 

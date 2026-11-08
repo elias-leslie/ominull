@@ -27,7 +27,7 @@ failures=0
 expect() {
     local want="$1"; shift
     local out
-    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
+    out="$(env -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
     if ! grep -qF -- "${want}" <<<"${out}"; then
         echo "FAIL: release.sh $* should say: ${want}" >&2
         echo "${out}" | sed 's/^/    /' >&2
@@ -37,7 +37,7 @@ expect() {
 passed="version.sh"
 expect_not_batched() {
     local out
-    out="$(env -u OMINULL_SIGNING_ROUTINE -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
+    out="$(env -u OMINULL_DEPLOY_CMD bash scripts/release.sh "$@" 2>&1 || true)"
     if grep -qE 'nothing to release' <<<"${out}"; then
         echo "FAIL: release.sh $* should not be held back:" >&2
         echo "${out}" | sed 's/^/    /' >&2

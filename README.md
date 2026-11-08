@@ -25,10 +25,11 @@ Ominull is an endpoint telemetry, detection, and containment hub for operators m
   and a client certificate from the hub's own CA; a presented certificate must
   name the same endpoint as the credential. See [trust fabric](docs/TRUST_FABRIC.md)
   and [agent TLS](docs/AGENT_TLS.md).
-- **Signature-verified bootstrap and self-update.** Native `.deb` and `.msi`
-  packages carry a SHA-256 digest and a detached ECDSA P-256 signature, checked
-  against a public key compiled into the agent before the platform package
-  manager runs. See [self-update](docs/AGENT_SELFUPDATE.md).
+- **Signature-verified packages.** Native `.deb` and `.msi` packages carry a
+  SHA-256 digest and a detached ECDSA P-256 signature. Bootstrap and the Windows
+  self-update check it against the release key before the package manager runs;
+  Linux machines get their updates from the operator's script, which checks it
+  first. See [self-update](docs/AGENT_SELFUPDATE.md).
 - **Detection.** Per-process transfer sizes are scored with a modified z-score
   (median and median absolute deviation, which tolerate heavy-tailed traffic
   better than mean and standard deviation), alongside threat-intelligence

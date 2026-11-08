@@ -34,7 +34,6 @@ static inline void Diff_Abi(void) {
     DIFF(hi_abi_size(HI_ABI_SCRIPT_PAYLOAD_FIELDS) == sizeof(ScriptPayloadFields), "ScriptPayloadFields size");
     DIFF(hi_abi_size(HI_ABI_TRUST_RULE) == sizeof(TrustRule), "TrustRule size");
     DIFF(hi_abi_size(HI_ABI_TRUST_MANIFEST) == sizeof(TrustManifest), "TrustManifest size");
-    DIFF(hi_abi_size(HI_ABI_TRUST_ROUTINE_KEY) == sizeof(TrustRoutineKey), "TrustRoutineKey size");
     DIFF(hi_abi_size(HI_ABI_TRUST_ACTION) == sizeof(TrustAction), "TrustAction size");
     DIFF(hi_abi_size(HI_ABI_SHA256_CTX) == sizeof(ResponseSHA256Context), "ResponseSHA256Context size");
 }
@@ -246,16 +245,6 @@ static inline void Diff_AddressList(const char* text) {
     for (int i = 0; i < a.n && i < 256; i++) DIFF(strcmp(a.tokens[i], b.tokens[i]) == 0, "address list token");
 }
 
-static inline void Diff_RoutineList(const char* s) {
-    static TrustRoutineKey a[TRUST_MAX_ROUTINE_KEYS], b[TRUST_MAX_ROUTINE_KEYS];
-    int ca = -1, cb = -1;
-    memset(a, 0xA5, sizeof(a));
-    memset(b, 0xA5, sizeof(b));
-    bool ra = Trust_ParseRoutineList(s, a, &ca), rb = hi_trust_parse_routine_list(s, b, &cb);
-    DIFF(ra == rb, "Trust_ParseRoutineList verdict");
-    if (ra) DIFF(ca == cb && memcmp(a, b, sizeof(a)) == 0, "routine keys");
-}
-
 static inline void Diff_Address(const char* s) {
     DIFF(Trust_IsIPLiteral(s) == hi_trust_is_ip_literal(s), "Trust_IsIPLiteral");
     DIFF(Trust_IsAllowEntry(s) == hi_trust_is_allow_entry(s), "Trust_IsAllowEntry");
@@ -283,16 +272,11 @@ static inline void Diff_TjValue(const char* v, const char* ve) {
         if (ra) {
             DIFF(strcmp(a, b) == 0, "TJ_Plain value");
             Diff_Address(a);
-            Diff_RoutineList(a);
         }
     }
     int64_t ia = -1, ib = -1;
     bool ra = TJ_Int(v, ve, &ia), rb = hi_tj_int(v, ve, &ib);
     DIFF(ra == rb && (!ra || ia == ib), "TJ_Int");
-    ia = ib = -1;
-    ra = Trust_PositiveInt(v, ve, &ia);
-    rb = hi_trust_positive_int(v, ve, &ib);
-    DIFF(ra == rb && (!ra || ia == ib), "Trust_PositiveInt");
     DIFF((TJ_SkipValue(v, ve, 1) == hi_tj_skip_value(v, ve, 1)), "TJ_SkipValue");
     DIFF((TJ_SkipString(v, ve) == hi_tj_skip_string(v, ve)), "TJ_SkipString");
     static char la[64][64], lb[64][64];
@@ -364,7 +348,7 @@ static inline void Diff_Trust(const char* raw, size_t n) {
     static const char* const keys[] = {
         "route", "body", "targets", "baselines", "endpoints", "rules", "service", "destination", "protocol", "port", "target_ip", "endpoint_id",
         "version", "allow_ips", "grant", "payload_b64", "v", "tenant_id", "profile", "signer_key_id", "signature", "seq", "issued_at", "caps",
-        "trust", "routine_keys", "capability_manifest", "is_isolated", "isolation_allow_ips", "quarantined_peers", "isolation_baseline",
+        "trust", "capability_manifest", "is_isolated", "isolation_allow_ips", "quarantined_peers", "isolation_baseline",
         "enforcement_grants", "agent_update_grant", "agent_update", "epoch", "keys", "sig", "response_key", "auto_isolate_key", "policy_key", "bundle_sig",
     };
     Diff_TjValue(raw, end);
@@ -490,7 +474,6 @@ static inline void Diff_One(const uint8_t* data, size_t n) {
     Diff_Trust(raw, n);
     Diff_Hex(text, tn);
     Diff_Sha256(data, n);
-    if (tn < TRUST_ROUTINE_LIST_MAX + 1) Diff_RoutineList(text);
     /* Signing is slow; a fixed slice of inputs, so a saved crash replays. */
     if (n == 0 || (data[n - 1] & 0x0F) == 0) Diff_Ed25519(data, n);
     free(raw);

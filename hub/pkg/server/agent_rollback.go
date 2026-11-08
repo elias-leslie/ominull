@@ -103,3 +103,23 @@ func (s *Server) handleAgentRollback(w http.ResponseWriter, r *http.Request) {
 		"note": "machines already on it stay there until a newer release reaches them",
 	})
 }
+
+func decodeStrictBody(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return false
+	}
+	return true
+}
+
+func requireAdminRole(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Role") != "admin" {
+			writeJSONError(w, http.StatusForbidden, "admin role required")
+			return
+		}
+		next(w, r)
+	}
+}
