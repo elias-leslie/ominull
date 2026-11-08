@@ -267,18 +267,14 @@ func renderDataPolicy(p storage.DataPolicy, canaries []string, reason string) st
 
 // callerEndpoint is the endpoint a device request speaks for, and answers the
 // request itself when the caller may not speak for it. Only an endpoint's own
-// device credential (with its certificate, when one is presented) qualifies;
-// the legacy tenant key only in migration mode and only inside its tenant. No
-// other role: the policy carries canary paths, and an inventory run can replace
+// device credential (with its certificate, when one is presented) qualifies.
+// No other role: the policy carries canary paths, and an inventory run can replace
 // the endpoint's stored picture. Operators use the admin routes.
 func (s *Server) callerEndpoint(w http.ResponseWriter, r *http.Request, claimed string) (string, bool) {
 	id := strings.TrimSpace(r.Header.Get("X-Device-Endpoint-ID"))
 	if id == "" {
-		if r.Header.Get("X-Role") != "tenant" || !s.legacyAgentAuthEnabled() {
-			writeJSONError(w, http.StatusForbidden, "only the endpoint's own device credential may use this route")
-			return "", false
-		}
-		id = strings.TrimSpace(claimed)
+		writeJSONError(w, http.StatusForbidden, "only the endpoint's own device credential may use this route")
+		return "", false
 	} else if claimed != "" && claimed != id {
 		writeJSONError(w, http.StatusForbidden, "a device may only speak for itself")
 		return "", false

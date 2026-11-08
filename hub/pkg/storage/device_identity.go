@@ -43,8 +43,7 @@ func (s *Store) IssueDeviceCredential(endpointID string) (string, DeviceCredenti
 }
 
 // issueDeviceCredentialLocked is the rotation primitive. The caller holds the
-// store write lock, which also makes the legacy-agent migration decision and
-// credential issuance one serial operation.
+// store write lock.
 func (s *Store) issueDeviceCredentialLocked(endpointID string) (string, DeviceCredential, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -88,37 +87,6 @@ func (s *Store) issueDeviceCredentialLocked(endpointID string) (string, DeviceCr
 		return "", DeviceCredential{}, err
 	}
 	return credential, DeviceCredential{ID: id, EndpointID: endpointID, CreatedAt: now}, nil
-}
-
-// EnsureDeviceCredential migrates one older shared-key endpoint. It returns a
-// plaintext credential only when the endpoint needs one, and only for the
-// heartbeat that will deliver it to the new agent. A just-issued but unused
-// credential is rotated if a legacy heartbeat arrives again: that covers a
-// lost response without storing the secret in SQLite. Once the new agent uses
-// it, last_used_at is set and legacy requests no longer rotate it.
-func (s *Store) EnsureDeviceCredential(endpointID string) (string, bool, error) {
-	endpointID = strings.TrimSpace(endpointID)
-	if endpointID == "" {
-		return "", false, errors.New("endpoint id is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var id string
-	var lastUsed sql.NullTime
-	err := s.db.QueryRow(`SELECT id, last_used_at FROM device_credentials
-		WHERE endpoint_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1`, endpointID).
-		Scan(&id, &lastUsed)
-	if err == nil && lastUsed.Valid {
-		return "", false, nil
-	}
-	if err != nil && err != sql.ErrNoRows {
-		return "", false, err
-	}
-	credential, _, err := s.issueDeviceCredentialLocked(endpointID)
-	if err != nil {
-		return "", false, err
-	}
-	return credential, true, nil
 }
 
 // VerifyDeviceCredential authenticates a new agent request and records last

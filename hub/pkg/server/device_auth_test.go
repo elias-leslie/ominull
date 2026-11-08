@@ -67,17 +67,13 @@ func TestDeviceCredentialBindsAgentRoutesAndRevocation(t *testing.T) {
 		t.Fatalf("revoked device credential was accepted: %d %s", w.Code, w.Body.String())
 	}
 
-	// A fresh package install must not silently fall back to the shared tenant
-	// key once migration mode has been closed.
-	if err := store.SetSetting("legacy_agent_auth", "disabled"); err != nil {
-		t.Fatal(err)
-	}
+	// The shared tenant key never stands in for a device credential.
 	legacy := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(batch))
 	legacy.Header.Set("X-API-Key", "mock_tenant_token")
 	legacyRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(legacyRec, legacy)
 	if legacyRec.Code != http.StatusUnauthorized {
-		t.Fatalf("shared tenant credential remained active after disable: %d %s", legacyRec.Code, legacyRec.Body.String())
+		t.Fatalf("shared tenant credential was accepted on an agent route: %d %s", legacyRec.Code, legacyRec.Body.String())
 	}
 }
 
@@ -100,63 +96,10 @@ func TestDeviceCredentialCannotReadAnotherEndpointConfiguration(t *testing.T) {
 	}
 }
 
-func TestLegacyHeartbeatDeliversAndRetriesUniqueCredentialMigration(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-
-	body := `{"type":"telemetry","endpoint_id":"legacy-linux","tenant_id":"t-01","hostname":"legacy-linux","os":"Linux","events":[]}`
-	legacyHeartbeat := func() map[string]interface{} {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
-		req.Header.Set("X-API-Key", "mock_tenant_token")
-		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("legacy heartbeat was refused: %d %s", w.Code, w.Body.String())
-		}
-		var response map[string]interface{}
-		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode migration response: %v", err)
-		}
-		return response
-	}
-
-	first := legacyHeartbeat()
-	firstCredential, ok := first["device_credential"].(string)
-	if !ok || !strings.HasPrefix(firstCredential, "omd_") {
-		t.Fatalf("legacy heartbeat did not deliver a unique credential: %#v", first)
-	}
-	second := legacyHeartbeat()
-	secondCredential, ok := second["device_credential"].(string)
-	if !ok || secondCredential == firstCredential {
-		t.Fatalf("lost-response migration did not rotate an unused credential: %#v", second)
-	}
-
-	device := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
-	device.Header.Set(deviceCredentialHeader, secondCredential)
-	deviceResponse := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(deviceResponse, device)
-	if deviceResponse.Code != http.StatusOK {
-		t.Fatalf("migrated device credential was refused: %d %s", deviceResponse.Code, deviceResponse.Body.String())
-	}
-	if strings.Contains(deviceResponse.Body.String(), "device_credential") {
-		t.Fatal("device-authenticated heartbeat kept returning migration material")
-	}
-
-	items, err := store.ListDeviceCredentials()
-	if err != nil || len(items) != 2 {
-		t.Fatalf("expected two historical migration records, got %d (%v)", len(items), err)
-	}
-}
-
 func TestOperatorCanReadEventsViaAdminAuth(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
-
-	if err := store.SetSetting("legacy_agent_auth", "disabled"); err != nil {
-		t.Fatal(err)
-	}
 
 	// 1. Admin JWT Bearer token
 	w := call(srv, srv.handleEvents, http.MethodGet, "/api/v1/events", "mock_admin_token", "")
@@ -171,5 +114,25 @@ func TestOperatorCanReadEventsViaAdminAuth(t *testing.T) {
 	srv.Handler().ServeHTTP(wKey, req)
 	if wKey.Code != http.StatusOK {
 		t.Fatalf("operator events read via X-API-Key returned status %d: %s", wKey.Code, wKey.Body.String())
+	}
+}
+
+// A supervised run's heartbeat comes from the agent on its own credential,
+// like the job ack and result; the device-route list must let it through.
+func TestDeviceCredentialMayPostResponseProgress(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	for _, path := range []string{"/api/v1/response/jobs/ack", "/api/v1/response/jobs/result", "/api/v1/response/jobs/progress"} {
+		if !isAllowedDeviceRoute(http.MethodPost, path) {
+			t.Errorf("%s is not a device route", path)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs/progress", strings.NewReader(`{}`))
+	req.Header.Set(deviceCredentialHeader, issueTestCredential(t, store, "linux-progress"))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), "permitted agent endpoints") {
+		t.Fatalf("a device credential was refused on the progress route: %d %s", w.Code, w.Body.String())
 	}
 }

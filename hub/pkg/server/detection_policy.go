@@ -545,7 +545,6 @@ var tuningDirections = map[string]tuningDirection{
 	"intel_page_confidence":   higherLoosens,
 	"auto_isolate_roles":      removeLoosens,
 	"page_incident_hours":     higherLoosens,
-	"page_budget_per_week":    ignored, // a health note; it never holds a page back
 	"lan_sweep_hosts":         higherLoosens,
 	"lab_escape_hosts":        higherLoosens,
 	"beacon_page_score":       higherLoosens,

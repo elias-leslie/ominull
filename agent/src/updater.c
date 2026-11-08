@@ -141,8 +141,8 @@ static bool DownloadToFile(const AGENT_CONFIG* config, const char* path, const c
         MultiByteToWideChar(CP_UTF8, 0, config->api_key, -1, wKey, 128);
         /* %ls for the same reason as hub_client.c: %s in a wide format is
          * a narrow string to mingw, and this header carried one character.
-         * Retained pre-device installs use X-API-Key until their next
-         * heartbeat adopts the unique credential. */
+         * A pre-device install sends X-API-Key, which the hub refuses
+         * (re-enroll it). */
         const wchar_t* credentialHeader = strncmp(config->api_key, "omd_", 4) == 0
             ? L"X-Ominull-Device-Credential" : L"X-API-Key";
         swprintf(wHeaders, 512, L"%ls: %ls\r\n", credentialHeader, wKey);

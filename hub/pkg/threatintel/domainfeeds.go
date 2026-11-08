@@ -26,8 +26,8 @@ import (
 
 // DomainFeedStatus is how one list fared at its last fetch.
 type DomainFeedStatus struct {
-	Name      string    `json:"name"`
-	Domains   int       `json:"domains"`
+	Name      string     `json:"name"`
+	Domains   int        `json:"domains"`
 	FetchedAt *time.Time `json:"fetched_at,omitempty"` // the last good fetch; absent before one
 	// Error is the last failure; the names from the last good fetch stay in
 	// force meanwhile (Domains counts them).

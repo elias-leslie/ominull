@@ -133,7 +133,6 @@ func (e *Engine) Start(ctx context.Context) {
 	// Every finding is classified before it is written, whoever writes it.
 	e.store.SetAlertClassifier(e.stampClass)
 	e.StartSilenceWatch(subCtx)
-	go e.backfillHuntTier()
 	// Events arriving meanwhile are safe: a runtime first seen live starts
 	// learning, and the seed then moves its baseline start back to when the
 	// profiles first saw it (storage.SeedAgentDestinations).

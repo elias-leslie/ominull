@@ -2,8 +2,6 @@ package detector
 
 import (
 	"encoding/json"
-	"log"
-	"sort"
 
 	"ominull/hub/pkg/storage"
 )
@@ -25,16 +23,6 @@ func TierFor(anomalyType string) string {
 		return storage.TierHunt
 	}
 	return storage.TierPage
-}
-
-// HuntTypes lists the hunt-tier detector types, sorted.
-func HuntTypes() []string {
-	out := make([]string, 0, len(huntTypes))
-	for t := range huntTypes {
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // applyTier stamps a hunt lead: held as a hunt lead, the tier in its evidence,
@@ -65,17 +53,5 @@ func applyTier(a *storage.AnomalyAlert, ep storage.Endpoint, cfg storage.Detecti
 		if raw, err := json.Marshal(fields); err == nil {
 			a.Evidence = string(raw)
 		}
-	}
-}
-
-// backfillHuntTier moves findings recorded before the tiers existed, once.
-func (e *Engine) backfillHuntTier() {
-	n, err := e.store.BackfillHuntTier(HuntTypes())
-	if err != nil {
-		log.Printf("[-] moving earlier behavioural findings to hunt leads failed: %v", err)
-		return
-	}
-	if n > 0 {
-		log.Printf("[*] moved %d earlier behavioural findings to hunt leads", n)
 	}
 }

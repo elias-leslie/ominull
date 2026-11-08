@@ -10,14 +10,13 @@ import (
 
 const deviceCredentialHeader = "X-Ominull-Device-Credential"
 
-// deviceOrLegacyMiddleware is the machine-route seam. New agents authenticate
-// with a credential issued to exactly one endpoint. Existing 1.7.x agents may
-// continue through the old shared-key middleware during a bounded migration;
-// no new installer or package config emits that path.
+// deviceOrLegacyMiddleware is the machine-route seam. Agents authenticate
+// with a credential issued to exactly one endpoint; the old shared tenant key
+// is refused here (its migration ended), operator keys pass as before.
 func (s *Server) deviceOrLegacyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	legacy := s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Role") == "tenant" && !s.legacyAgentAuthEnabled() {
-			writeJSONError(w, http.StatusUnauthorized, "legacy agent authentication is disabled; enroll this device for a unique credential")
+		if r.Header.Get("X-Role") == "tenant" {
+			writeJSONError(w, http.StatusUnauthorized, "shared-key agent authentication is retired; enroll this device for a unique credential")
 			return
 		}
 		next(w, r)
@@ -71,7 +70,8 @@ func isAllowedDeviceRoute(method, path string) bool {
 		return true
 	case method == http.MethodGet && path == "/api/v1/agent/config":
 		return true
-	case method == http.MethodPost && (path == "/api/v1/response/jobs/ack" || path == "/api/v1/response/jobs/result"):
+	case method == http.MethodPost && (path == "/api/v1/response/jobs/ack" || path == "/api/v1/response/jobs/result" ||
+		path == "/api/v1/response/jobs/progress"):
 		return true
 	case (method == http.MethodPost || method == http.MethodPut) && path == "/api/v1/evidence/items":
 		return true
@@ -81,45 +81,6 @@ func isAllowedDeviceRoute(method, path string) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func (s *Server) legacyAgentAuthEnabled() bool {
-	mode, err := s.store.GetSetting("legacy_agent_auth")
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(mode), "migration")
-}
-
-type legacyAgentAuthRequest struct {
-	Mode string `json:"mode"`
-}
-
-func (s *Server) handleLegacyAgentAuth(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		mode, _ := s.store.GetSetting("legacy_agent_auth")
-		writeJSON(w, http.StatusOK, map[string]string{"mode": strings.TrimSpace(mode)})
-	case http.MethodPost:
-		var req legacyAgentAuthRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "unreadable legacy authentication body")
-			return
-		}
-		mode := strings.ToLower(strings.TrimSpace(req.Mode))
-		if mode != "migration" && mode != "disabled" {
-			writeJSONError(w, http.StatusBadRequest, "mode must be migration or disabled")
-			return
-		}
-		if err := s.store.SetSetting("legacy_agent_auth", mode); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "legacy authentication mode could not be saved")
-			return
-		}
-		s.audit(r, "LEGACY_AGENT_AUTH_CHANGED", "agent-auth", "Set legacy agent authentication mode to "+mode)
-		writeJSON(w, http.StatusOK, map[string]string{"mode": mode})
-	default:
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 

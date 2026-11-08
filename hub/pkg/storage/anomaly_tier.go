@@ -99,54 +99,6 @@ func (s *Store) RunsAgentRuntimes(tenantID, endpointID string) bool {
 		tenantID, endpointID).Scan(&one) == nil
 }
 
-const huntBackfillSetting = "anomaly_hunt_tier_backfill_v1"
-
-// BackfillHuntTier moves the findings of the given types recorded before
-// detection tiers existed into the hunt tier, once. Findings a learning window
-// holds keep their reason, and so do the subnet sweep's new-device findings
-// (ids alert-disc-*), which share the NOVEL_DESTINATION type but are not
-// behavioural. It reports how many rows it moved; a second call
-// moves nothing.
-func (s *Store) BackfillHuntTier(types []string) (int64, error) {
-	if len(types) == 0 {
-		return 0, nil
-	}
-	if done, err := s.GetSetting(huntBackfillSetting); err != nil || done != "" {
-		return 0, err
-	}
-	args := make([]any, 0, len(types))
-	for _, t := range types {
-		args = append(args, t)
-	}
-	stmt := `UPDATE anomaly_alerts SET held_reason = ? WHERE rowid IN (
-		SELECT rowid FROM anomaly_alerts WHERE held_reason = '' AND id NOT LIKE 'alert-disc-%' AND anomaly_type IN (?` +
-		strings.Repeat(", ?", len(types)-1) + `) LIMIT ?)`
-	args = append(append([]any{HeldHunt}, args...), pruneBatch)
-	var moved int64
-	for {
-		// Batches give the lock up between them, like retention.
-		n, err := s.execBatch(stmt, args)
-		if err != nil {
-			return moved, err
-		}
-		moved += n
-		if n < pruneBatch {
-			break
-		}
-	}
-	return moved, s.SetSetting(huntBackfillSetting, time.Now().UTC().Format(time.RFC3339))
-}
-
-func (s *Store) execBatch(stmt string, args []any) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.db.Exec(stmt, args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
 // HuntWindow counts the hunt leads raised since a point in time.
 type HuntWindow struct {
 	Total   int            `json:"total"`
@@ -260,33 +212,6 @@ func (s *Store) OpenIncident(tenantID, endpointID, key string, since time.Time) 
 		}
 	}
 	return id, worst, rows.Err()
-}
-
-// PagedAlerts lists the paging findings raised since a point in time, the
-// drill endpoint aside, oldest first. A page that joined an open incident is
-// included: the caller groups them by evidence.incident.
-func (s *Store) PagedAlerts(since time.Time, excludeEndpoint string) ([]AnomalyAlert, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rows, err := s.db.Query(`SELECT id, tenant_id, endpoint_id, hostname, anomaly_type, severity, title, description,
-		COALESCE(evidence, ''), held_reason, process_path, dst_ip, dst_port, timestamp FROM anomaly_alerts
-		WHERE timestamp >= ? AND held_reason IN ('', ?) AND endpoint_id != ? AND json_valid(evidence)
-			AND json_extract(evidence, '$.class') = ?
-		ORDER BY timestamp`, since.UTC(), HeldIncident, excludeEndpoint, ClassPage)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []AnomalyAlert
-	for rows.Next() {
-		var a AnomalyAlert
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.EndpointID, &a.Hostname, &a.AnomalyType, &a.Severity, &a.Title,
-			&a.Description, &a.Evidence, &a.HeldReason, &a.ProcessPath, &a.DstIP, &a.DstPort, &a.Timestamp); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
 }
 
 // RecordedAlerts returns the newest record and digest findings (held as

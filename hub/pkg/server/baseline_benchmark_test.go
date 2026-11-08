@@ -135,7 +135,6 @@ func setupTestServerBench(b *testing.B) (*Server, *storage.Store) {
 		APIKey:    "mock_tenant_token",
 		CreatedAt: time.Now().UTC(),
 	})
-	_ = store.SetSetting("legacy_agent_auth", "migration")
 
 	_ = store.UpsertEndpoint(storage.Endpoint{
 		ID:                       "bench-ep-01",

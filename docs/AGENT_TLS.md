@@ -32,10 +32,9 @@ is returned only once in the protected enrollment response. A direct native
 client certificate is an additional matching proof, not a replacement for the
 credential. Its subject must equal the endpoint named by the credential.
 
-Retained 1.7.x agents may use the shared tenant key only while the explicit
-`legacy_agent_auth=migration` setting is open. The updated native binary adopts
-the unique credential from a successful heartbeat and rewrites its protected
-configuration. Disable that setting after canary and fleet proof.
+The shared tenant key is never accepted on an agent route: the 1.7.x
+migration that let it stand in for a device credential has ended, and an
+agent without one is re-enrolled.
 
 The initial CA fetch is trust-on-first-use and must use an operator-approved
 channel. After enrollment, an agent refuses a missing CA, unknown issuer,

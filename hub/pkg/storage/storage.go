@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"slices"
 	"sort"
@@ -692,10 +691,6 @@ func (s *Store) initSchema() error {
 		return err
 	}
 
-	if err := s.migrateNightshiftSettings(); err != nil {
-		return err
-	}
-
 	if err := s.initDeviceIdentitySchema(); err != nil {
 		return err
 	}
@@ -765,13 +760,6 @@ func (s *Store) initSchema() error {
 	}
 	if err := s.initAicoPushSchema(); err != nil {
 		return err
-	}
-	// A failed repair is retried at the next start; it never keeps the hub down.
-	if err := s.repairByteCounts(); err != nil {
-		log.Printf("[!] %v", err)
-	}
-	if err := s.repairImplausibleRates(); err != nil {
-		log.Printf("[!] %v", err)
 	}
 	return nil
 }

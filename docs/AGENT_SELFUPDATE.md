@@ -11,9 +11,7 @@ hub descriptor and never follow a descriptor to another host.
 
 ## Common sequence
 
-1. Receive a signed descriptor in an authenticated telemetry response. A
-   retained shared-key endpoint may receive its unique device credential in
-   this same response during the explicit migration window.
+1. Receive a signed descriptor in an authenticated telemetry response.
 2. Validate the package path and digest.
 3. Verify the detached signature against the pinned public key.
 4. Stage in a package-owned, administrator-only location.

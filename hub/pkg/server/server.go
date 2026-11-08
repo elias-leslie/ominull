@@ -3662,7 +3662,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/agents/update", s.authMiddleware(s.authorized(s.resolveAgentUpdate, s.handleAgentsUpdate)))
 	mux.HandleFunc("/api/v1/agents/rollback", s.authMiddleware(requireAdminRole(s.handleAgentRollback)))
 	mux.HandleFunc("/api/v1/agents/update-status", s.authMiddleware(requireAdmin(s.handleAgentsUpdateStatus)))
-	mux.HandleFunc("/api/v1/device-auth/legacy", s.authMiddleware(s.handleLegacyAgentAuth))
 	mux.HandleFunc("/api/v1/device-auth/credentials", s.authMiddleware(requireAdmin(s.handleDeviceCredentials)))
 	// The baseline isolation policy: what an isolated host is still allowed to
 	// reach. Reading it is open to any authenticated operator - an analyst

@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -11,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/storage"
 )
@@ -19,7 +17,7 @@ import (
 // Health findings.
 //
 // The hub summarises its own state (alerts, quiet agents, certificates,
-// storage, maintenance, detection health) as OCSF-shaped findings. Since
+// storage, maintenance) as OCSF-shaped findings. Since
 // Nightshift retired they are not pulled by anyone: aico_push.go turns them
 // into Status rows and the paging alerts into notices, and an administrator
 // can read the raw list at GET /api/v1/health/findings for diagnostics.
@@ -322,101 +320,6 @@ func (s *Server) recordedDigest(now time.Time, uid, title string, types []string
 	return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, msg, nil, unmapped), nil
 }
 
-// detectionHealthFinding compares the incidents that paged in the last week
-// with the page budget (page_budget_per_week). Over budget it needs a look
-// (low severity, so its Aico row warns) and names the noisiest rule, so the
-// rule gets tuned; it never holds a page back. An incident the rules make
-// expected today (the rule was tuned after the page) would not page again, so
-// it is listed but not counted against the budget: the finding goes quiet once
-// the noisy rule is fixed, not a week later.
-func (s *Server) detectionHealthFinding(now time.Time) (feedFinding, error) {
-	alerts, err := s.store.PagedAlerts(now.Add(-7*24*time.Hour), detector.DrillEndpointID)
-	if err != nil {
-		return feedFinding{}, err
-	}
-	tuning := s.store.GetDetectionTuning()
-	endpoints, observed, err := s.replayEndpoints()
-	if err != nil {
-		return feedFinding{}, err
-	}
-	cx := detector.NewClassContext(tuning, endpoints, observed)
-	type incident struct {
-		typ  string
-		open bool
-	}
-	found := map[string]*incident{}
-	var order []string
-	for _, a := range alerts {
-		var ev struct {
-			Incident string `json:"incident"`
-		}
-		_ = json.Unmarshal([]byte(a.Evidence), &ev)
-		key := ev.Incident
-		if key == "" {
-			key = a.ID
-		}
-		_, covered := detector.ExpectedBy(tuning, a, cx.RoleOf(endpointByID(endpoints, a.EndpointID)))
-		in := found[key]
-		if in == nil {
-			in = &incident{typ: a.AnomalyType}
-			found[key] = in
-			order = append(order, key)
-		}
-		in.open = in.open || !covered
-	}
-	budget := tuning.PageBudgetPerWeek
-	byType := map[string]int{}
-	covered := 0
-	for _, key := range order {
-		if in := found[key]; in.open {
-			byType[in.typ]++
-		} else {
-			covered++
-		}
-	}
-	counted := len(order) - covered
-	noisiest, most := "", 0
-	for typ, n := range byType {
-		if n > most || (n == most && typ < noisiest) {
-			noisiest, most = typ, n
-		}
-	}
-	unmapped := map[string]any{"window_days": 7, "incidents": counted, "budget": budget, "by_type": byType, "now_expected": covered}
-	const uid, title = "ominull.detection.health", "Detection health"
-	note := ""
-	if covered > 0 {
-		note = fmt.Sprintf(" (%d more would not page under today's rules)", covered)
-	}
-	if counted <= budget {
-		return s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusResolved,
-			fmt.Sprintf("%s paged in the last 7 days, within the weekly page budget of %d%s", plural(counted, "incident", "incidents"), budget, note), nil, unmapped), nil
-	}
-	unmapped["noisiest"] = noisiest
-	msg := fmt.Sprintf("%s paged in the last 7 days, more than the weekly page budget of %d. The noisiest rule is %s (%s); if those were not worth a page, tune that rule. Every page was still sent.",
-		plural(counted, "incident", "incidents"), budget, ruleName(noisiest), plural(most, "incident", "incidents"))
-	if most == 1 {
-		// No rule stands out: name them all.
-		unmapped["noisiest"] = ""
-		names := make([]string, 0, len(byType))
-		for typ := range byType {
-			names = append(names, ruleName(typ))
-		}
-		sort.Strings(names)
-		msg = fmt.Sprintf("%s paged in the last 7 days, more than the weekly page budget of %d, each from a different rule (%s). No rule is repeating, so there is nothing to tune. Every page was still sent.",
-			plural(counted, "incident", "incidents"), budget, strings.Join(names, ", "))
-	}
-	return s.feedFinding(now, uid, title, ocsfSevLow, ocsfStatusNew, msg+note, nil, unmapped), nil
-}
-
-func endpointByID(eps []storage.Endpoint, id string) storage.Endpoint {
-	for _, ep := range eps {
-		if ep.ID == id {
-			return ep
-		}
-	}
-	return storage.Endpoint{ID: id}
-}
-
 // ruleName is a detector's type in owner words.
 func ruleName(typ string) string {
 	if name, ok := ruleNames[typ]; ok {
@@ -637,8 +540,6 @@ func (s *Server) healthFindings(now time.Time) []feedFinding {
 	add("digest", []feedFinding{dg}, err)
 	ae, err := s.agentEgressFinding(now)
 	add("agent_egress", []feedFinding{ae}, err)
-	dh, err := s.detectionHealthFinding(now)
-	add("detection_health", []feedFinding{dh}, err)
 	g, err := s.agentFinding(now)
 	add("agents", []feedFinding{g}, err)
 	acf, err := s.agentCertFinding(now)

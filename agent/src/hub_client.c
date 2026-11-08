@@ -576,9 +576,9 @@ static bool HubPostTelemetryBody(const AGENT_CONFIG* config, const void* body, s
     }
     HINTERNET hConnect = g_http.connect;
 
-    /* New identities use their endpoint credential header. A retained legacy
-     * install keeps its legacy shared key on X-API-Key only until the hub's
-     * successful response delivers the unique credential. */
+    /* Enrolled identities use their endpoint credential header. A pre-device
+     * install still sends its shared key on X-API-Key, which the hub now
+     * refuses: such an install is re-enrolled. */
     WCHAR wPath[512] = {0};
     MultiByteToWideChar(CP_UTF8, 0, "/api/v1/events", -1, wPath, 512);
 

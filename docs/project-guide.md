@@ -432,9 +432,7 @@ three) a lead is also muted to LOW, the detector's
 severity kept as `detector_severity`. New-device findings from the retired
 scheduled subnet sweep (`alert-disc-*`, kept until anomaly retention removes
 them) share the `NOVEL_DESTINATION` type and keep paging. Discovery now runs
-only on demand. Findings
-recorded before the tiers were moved once at startup (setting
-`anomaly_hunt_tier_backfill_v1`). The replay route reports `paging`: before
+only on demand. The replay route reports `paging`: before
 (every kept finding not held by learning) and after (kept findings of paging
 detectors), by type and by host. The health findings carry the leads as
 `ominull.anomalies.hunt` (always informational).
@@ -540,8 +538,7 @@ What is pushed (a body of `{"notices": [...], "rows": [...]}`, at most 50 of eac
   as notices). `next_run` is five minutes ahead, so a hub that stops pushing shows late. A row the hub stops producing (a
   section that recovered, a key taken off the retired list) is sent once more as `ok`, "Resolved: the OmniNull hub no
   longer reports this", with no `next_run`, so it never shows late (setting `aico_push_rows` lists the rows Aico
-  shows). `ominull.detection.health` warns while paged incidents exceed the weekly page budget. Per-item findings fold into
-  one row per family (`ominull.run`, `ominull.decisions`, `ominull.compliance`) with the worst state.
+  shows). Per-item findings fold into one row per family (`ominull.run`, `ominull.decisions`, `ominull.compliance`) with the worst state.
 - **Retired release keys.** Setting `retired_release_keys` (JSON `[{"id","clean_from"}]`, default
   `[{"id":"1932669bb5871af4","clean_from":"1.8.71"}]`) gives one row `ominull.builds.<id>` per key: `warn` naming up to
   six enrolled, not retired agents (offline ones included) whose build is older than `clean_from` or unreadable,

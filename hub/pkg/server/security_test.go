@@ -275,23 +275,28 @@ func TestRequiredClientCertsApplyToThePlainListener(t *testing.T) {
 	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: ClientCertsRequired})
 
 	batch := `{"type":"telemetry","endpoint_id":"linux-victim","events":[]}`
+	credential := issueTestCredential(t, store, "linux-victim")
+	post := func(header, value string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/api/v1/events", strings.NewReader(batch))
+		r.Header.Set(header, value)
+		w := httptest.NewRecorder()
+		srv.deviceOrLegacyMiddleware(srv.handleEvents)(w, r)
+		return w
+	}
 
-	w := call(srv, srv.handleEvents, "POST", "/api/v1/events", "mock_tenant_token", batch)
-	if w.Code != http.StatusForbidden {
+	if w := post(deviceCredentialHeader, credential); w.Code != http.StatusForbidden {
 		t.Errorf("a certificate-free endpoint reported over the plain listener while --client-certs required: got %d\n%s", w.Code, w.Body.String())
 	}
 
 	// An operator is not an endpoint claiming to be one.
-	w = call(srv, srv.handleEvents, "POST", "/api/v1/events", "mock_admin_token", batch)
-	if w.Code == http.StatusForbidden {
+	if w := post("X-API-Key", "mock_admin_token"); w.Code == http.StatusForbidden {
 		t.Errorf("the admin credential was refused on the telemetry route: %s", w.Body.String())
 	}
 
-	// And with the fleet mid-migration, an endpoint without one still reports.
+	// With certificates optional, an endpoint reports on its credential alone.
 	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: ClientCertsOptional})
-	w = call(srv, srv.handleEvents, "POST", "/api/v1/events", "mock_tenant_token", batch)
-	if w.Code == http.StatusForbidden {
-		t.Errorf("--client-certs optional refused an endpoint with no certificate: %s", w.Body.String())
+	if w := post(deviceCredentialHeader, credential); w.Code != http.StatusOK {
+		t.Errorf("--client-certs optional refused an endpoint with no certificate: %d %s", w.Code, w.Body.String())
 	}
 }
 

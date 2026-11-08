@@ -24,8 +24,8 @@ document). The header comment of the Linux file is the reference. In short:
 
 The agent fetches `POST /api/v1/data/policy` hourly (404 or an unparseable policy switches scanning off) and posts a
 run to `POST /api/v1/data/inventory` without blocking its main loop (a curl multi transfer stepped each second, 300 s
-limit). Both routes accept only the endpoint's own device credential (and its certificate when presented); the
-legacy tenant key only in migration mode and only inside its tenant. No console or admin role can use them.
+limit). Both routes accept only the endpoint's own device credential (and its certificate when presented). No
+console or admin role can use them.
 
 ## Policy (hub)
 

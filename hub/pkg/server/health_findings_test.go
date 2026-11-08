@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/storage"
 )
@@ -202,8 +201,8 @@ func TestNightshiftFeedQuietFleetIsResolved(t *testing.T) {
 			t.Fatalf("%s is not resolved on a quiet fleet: %q", f.FindingInfo.UID, f.Message)
 		}
 	}
-	if len(doc.Findings) != 17 {
-		t.Fatalf("findings = %d, want hub, anomalies, hunt leads, digest, agent egress, detection health, agents, agent certificates, policy expiry, inventory, router collector, router certificate, maintenance runs, maintenance schedule, detection policy soundness, floor drill and changes", len(doc.Findings))
+	if len(doc.Findings) != 16 {
+		t.Fatalf("findings = %d, want hub, anomalies, hunt leads, digest, agent egress, agents, agent certificates, policy expiry, inventory, router collector, router certificate, maintenance runs, maintenance schedule, detection policy soundness, floor drill and changes", len(doc.Findings))
 	}
 }
 
@@ -262,107 +261,5 @@ func TestNightshiftFeedDigestIsANote(t *testing.T) {
 	byClass, _ := f.Unmapped["by_class"].(map[string]any)
 	if byClass["record"] != float64(2) || byClass["digest"] != float64(1) || f.Unmapped["groups"] != float64(2) {
 		t.Fatalf("digest unmapped = %v", f.Unmapped)
-	}
-}
-
-// Over the weekly page budget the finding needs a look and names the noisiest rule.
-func TestNightshiftFeedDetectionHealthNamesTheNoisiestRule(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	now := time.Now().UTC()
-	find := func() feedRead {
-		t.Helper()
-		var doc feedDoc
-		w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", "mock_admin_token")
-		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
-			t.Fatal(err)
-		}
-		for _, f := range doc.Findings {
-			if f.FindingInfo.UID == "ominull.detection.health" {
-				return feedRead{f.StatusID, f.SeverityID, f.Message, f.Unmapped}
-			}
-		}
-		t.Fatal("no detection health finding in the feed")
-		return feedRead{}
-	}
-	page := func(id, typ, incident, held string) {
-		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "e", Hostname: "dev",
-			AnomalyType: typ, Severity: "HIGH", Title: typ, HeldReason: held,
-			Evidence: `{"class":"page","incident":"` + incident + `"}`, Timestamp: now.Add(-time.Hour)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	page("a", "C2_BEACONING", "inc-a", "")
-	if f := find(); f.StatusID != ocsfStatusResolved || !strings.Contains(f.Message, "within the weekly page budget of 1") {
-		t.Fatalf("one incident = %d %q", f.StatusID, f.Message)
-	}
-	// A page that joined inc-a is the same incident; a drill page is not counted.
-	page("a2", "C2_BEACONING", "inc-a", storage.HeldIncident)
-	if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: "drill", TenantID: "t-01", EndpointID: detector.DrillEndpointID,
-		AnomalyType: "DECOY_TOUCH", Severity: "CRITICAL", Evidence: `{"class":"page"}`, Timestamp: now.Add(-time.Hour)}); err != nil {
-		t.Fatal(err)
-	}
-	if f := find(); f.StatusID != ocsfStatusResolved {
-		t.Fatalf("a joined page or the drill counted: %q", f.Message)
-	}
-	page("b", "C2_BEACONING", "inc-b", "")
-	page("c", "DECOY_TOUCH", "inc-c", "")
-	f := find()
-	if f.StatusID != ocsfStatusNew || f.SeverityID != ocsfSevLow ||
-		f.Message != "3 incidents paged in the last 7 days, more than the weekly page budget of 1. The noisiest rule is beacon (2 incidents); if those were not worth a page, tune that rule. Every page was still sent." {
-		t.Fatalf("over budget = %d/%d %q", f.StatusID, f.SeverityID, f.Message)
-	}
-}
-
-// A page the rules make expected today (the noisy rule was tuned after it) would not page again, so it is
-// listed but no longer counts against the weekly budget: the finding goes quiet when the rule is fixed.
-func TestNightshiftFeedDetectionHealthGoesQuietOnceTheRuleIsTuned(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	now := time.Now().UTC()
-	find := func() feedRead {
-		t.Helper()
-		var doc feedDoc
-		w := feedRequest(srv, http.MethodGet, "/api/v1/health/findings", "mock_admin_token")
-		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
-			t.Fatal(err)
-		}
-		for _, f := range doc.Findings {
-			if f.FindingInfo.UID == "ominull.detection.health" {
-				return feedRead{f.StatusID, f.SeverityID, f.Message, f.Unmapped}
-			}
-		}
-		t.Fatal("no detection health finding in the feed")
-		return feedRead{}
-	}
-	page := func(id, program string) {
-		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: id, TenantID: "t-01", EndpointID: "e", Hostname: "dev",
-			AnomalyType: "NEW_PLACE_UPLOAD", Severity: "HIGH", Title: id, ProcessPath: program, DstIP: "203.0.113.5", DstPort: 443,
-			Evidence: `{"class":"page","incident":"inc-` + id + `"}`, Timestamp: now.Add(-time.Hour)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	page("a", "/usr/bin/agy")
-	page("b", "/usr/bin/agy")
-	page("c", "/usr/bin/stranger")
-	if f := find(); f.StatusID != ocsfStatusNew || !strings.HasPrefix(f.Message, "3 incidents paged in the last 7 days, more than the weekly page budget of 1.") {
-		t.Fatalf("before the rule = %d %q", f.StatusID, f.Message)
-	}
-	tuning := store.GetDetectionTuning()
-	tuning.ExpectedRules = append(tuning.ExpectedRules, storage.ExpectedRule{ID: "agy-test", Reason: "test: our own agent",
-		Findings: []string{"NEW_PLACE_UPLOAD"}, Programs: []storage.ExpectedProgram{{Path: "/usr/bin/agy", Exact: true}}})
-	if _, err := store.SaveDetectionTuning(tuning, "test"); err != nil {
-		t.Fatal(err)
-	}
-	f := find()
-	if f.StatusID != ocsfStatusResolved || !strings.Contains(f.Message, "1 incident paged in the last 7 days, within the weekly page budget of 1 (2 more would not page under today's rules)") {
-		t.Fatalf("after the rule = %d %q", f.StatusID, f.Message)
-	}
-	// A page nothing covers still counts.
-	page("d", "/usr/bin/stranger")
-	if f := find(); f.StatusID != ocsfStatusNew || !strings.HasPrefix(f.Message, "2 incidents paged in the last 7 days") {
-		t.Fatalf("an uncovered page still counts = %d %q", f.StatusID, f.Message)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,13 +41,6 @@ func setupTestServer(t *testing.T) (*Server, *storage.Store) {
 		APIKey:    "mock_tenant_token",
 		CreatedAt: time.Now().UTC(),
 	})
-	// Existing-route tests model an upgrade in the bounded migration window.
-	// Fresh package installs leave this unset, which means legacy shared-key
-	// agent authentication is disabled until an operator explicitly enables it.
-	if err := store.SetSetting("legacy_agent_auth", "migration"); err != nil {
-		t.Fatalf("enable test migration mode: %v", err)
-	}
-
 	srv := newTestServer(t, store, "mock_admin_token", tempDir, "http://10.0.0.57:9999", "1.1.0")
 	return srv, store
 }
@@ -882,8 +877,8 @@ func mtlsListener(t *testing.T, srv *Server) string {
 	t.Cleanup(func() { ln.Close() })
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/events", srv.authMiddleware(srv.handleEvents))
-	mux.HandleFunc("/api/v1/agent/config", srv.authMiddleware(srv.handleAgentConfig))
+	mux.HandleFunc("/api/v1/events", srv.deviceOrLegacyMiddleware(srv.handleEvents))
+	mux.HandleFunc("/api/v1/agent/config", srv.deviceOrLegacyMiddleware(srv.handleAgentConfig))
 	go func() { _ = http.Serve(ln, mux) }()
 	return "https://" + ln.Addr().String()
 }
@@ -917,14 +912,39 @@ func issueAgentCert(t *testing.T, m *pki.Manager, endpointID string) *tls.Certif
 	return &cert
 }
 
-func postTelemetryAs(t *testing.T, c *http.Client, base, endpointID string, extra map[string]string) (int, error) {
+// testCredentials holds the device credential each test server issued per
+// endpoint, keyed by the store, so a test can speak as a named endpoint.
+var testCredentials sync.Map
+
+func issueTestCredential(t *testing.T, store *storage.Store, endpointID string) string {
+	t.Helper()
+	key := fmt.Sprintf("%p/%s", store, endpointID)
+	if v, ok := testCredentials.Load(key); ok {
+		return v.(string)
+	}
+	if ep, err := store.GetEndpoint(endpointID); err != nil || ep == nil {
+		if err := store.UpsertEndpoint(storage.Endpoint{ID: endpointID, TenantID: "t-01", Hostname: "h", OS: "Linux"}); err != nil {
+			t.Fatalf("create endpoint %s: %v", endpointID, err)
+		}
+	}
+	credential, _, err := store.IssueDeviceCredential(endpointID)
+	if err != nil {
+		t.Fatalf("issue device credential for %s: %v", endpointID, err)
+	}
+	testCredentials.Store(key, credential)
+	return credential
+}
+
+// postTelemetryAs reports as endpointID with that endpoint's own device
+// credential, through the server the client was built for.
+func postTelemetryAs(t *testing.T, srv *Server, c *http.Client, base, endpointID string, extra map[string]string) (int, error) {
 	t.Helper()
 	body := []byte(`{"type":"telemetry","endpoint_id":"` + endpointID + `","hostname":"h","os":"Linux","events":[]}`)
 	req, err := http.NewRequest("POST", base+"/api/v1/events", bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("X-API-Key", "mock_tenant_token")
+	req.Header.Set(deviceCredentialHeader, issueTestCredential(t, srv.store, endpointID))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range extra {
 		req.Header.Set(k, v)
@@ -938,10 +958,9 @@ func postTelemetryAs(t *testing.T, c *http.Client, base, endpointID string, extr
 	return resp.StatusCode, nil
 }
 
-// The API key is shared by every agent on a tenant, so on its own it says which
-// tenant is calling and nothing about which host. This is the test that the
-// certificate closes that gap: holding the key is no longer enough to report as
-// - or read the update descriptor of - a host you are not.
+// A certificate is a second proof on top of the device credential: it must
+// name the same endpoint, so holding another host's credential is not enough
+// to report as - or read the update descriptor of - a host you are not.
 func TestClientCertificateBindsARequestToOneEndpoint(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
@@ -955,13 +974,13 @@ func TestClientCertificateBindsARequestToOneEndpoint(t *testing.T) {
 	client := agentClient(t, srv, own)
 
 	// 1. Reporting as itself is what the certificate is for.
-	if code, err := postTelemetryAs(t, client, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
+	if code, err := postTelemetryAs(t, srv, client, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
 		t.Fatalf("an endpoint reporting under its own certificate got %d (err %v); want 200", code, err)
 	}
 
-	// 2. Reporting as a different host is refused, even holding a valid key and
-	// a valid certificate. This is the impersonation the binding exists to stop.
-	code, err := postTelemetryAs(t, client, base, "linux-beta", nil)
+	// 2. Reporting as a different host is refused, even holding that host's
+	// credential and a valid certificate. This is the impersonation the binding exists to stop.
+	code, err := postTelemetryAs(t, srv, client, base, "linux-beta", nil)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -972,7 +991,7 @@ func TestClientCertificateBindsARequestToOneEndpoint(t *testing.T) {
 	// 3. The same binding covers the update descriptor, which would otherwise
 	// tell any key holder which release a named host is about to install.
 	req, _ := http.NewRequest("GET", base+"/api/v1/agent/config?endpoint_id=linux-beta", nil)
-	req.Header.Set("X-API-Key", "mock_tenant_token")
+	req.Header.Set(deviceCredentialHeader, issueTestCredential(t, store, "linux-alpha"))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("agent/config request failed: %v", err)
@@ -984,14 +1003,13 @@ func TestClientCertificateBindsARequestToOneEndpoint(t *testing.T) {
 
 	// 4. The identity comes from the handshake and not from a header. A caller
 	// that sets X-Client-CN by hand must not be able to name itself: the
-	// middleware strips it, so this is a request with no certificate at all and
-	// the endpoint it claims is simply believed - the pre-certificate behaviour
-	// the fleet is being migrated off, not an impersonation route.
+	// middleware strips it, so this is a request with no certificate at all,
+	// which optional mode lets through on the credential alone.
 	plain := agentClient(t, srv, nil)
-	if code, err := postTelemetryAs(t, plain, base, "linux-beta", map[string]string{"X-Client-CN": "linux-alpha"}); err != nil || code != http.StatusOK {
-		t.Fatalf("an endpoint without a certificate got %d (err %v); want 200 while the fleet migrates", code, err)
+	if code, err := postTelemetryAs(t, srv, plain, base, "linux-beta", map[string]string{"X-Client-CN": "linux-alpha"}); err != nil || code != http.StatusOK {
+		t.Fatalf("an endpoint without a certificate got %d (err %v); want 200 with certificates optional", code, err)
 	}
-	if code, err := postTelemetryAs(t, plain, base, "linux-alpha", map[string]string{"X-Client-CN": "linux-alpha"}); err != nil || code != http.StatusOK {
+	if code, err := postTelemetryAs(t, srv, plain, base, "linux-alpha", map[string]string{"X-Client-CN": "linux-alpha"}); err != nil || code != http.StatusOK {
 		t.Fatalf("a forged X-Client-CN changed the outcome: got %d (err %v)", code, err)
 	}
 }
@@ -1017,17 +1035,17 @@ func TestClientCertificateFromAnotherCAIsRefused(t *testing.T) {
 		t.Fatalf("second PKI failed: %v", err)
 	}
 	forged := issueAgentCert(t, otherPKI, "linux-alpha")
-	if _, err := postTelemetryAs(t, agentClient(t, srv, forged), base, "linux-alpha", nil); err == nil {
+	if _, err := postTelemetryAs(t, srv, agentClient(t, srv, forged), base, "linux-alpha", nil); err == nil {
 		t.Fatalf("a certificate from a foreign CA was accepted")
 	}
 
 	srv.SetTLS(TLSOptions{Listen: "127.0.0.1:0", ClientCerts: ClientCertsRequired})
 	strict := mtlsListener(t, srv)
-	if code, err := postTelemetryAs(t, agentClient(t, srv, nil), strict, "linux-alpha", nil); err != nil || code != http.StatusForbidden {
+	if code, err := postTelemetryAs(t, srv, agentClient(t, srv, nil), strict, "linux-alpha", nil); err != nil || code != http.StatusForbidden {
 		t.Fatalf("--client-certs required let an endpoint with no certificate through: code %d, err %v", code, err)
 	}
 	own := issueAgentCert(t, srv.pki, "linux-alpha")
-	if code, err := postTelemetryAs(t, agentClient(t, srv, own), strict, "linux-alpha", nil); err != nil || code != http.StatusOK {
+	if code, err := postTelemetryAs(t, srv, agentClient(t, srv, own), strict, "linux-alpha", nil); err != nil || code != http.StatusOK {
 		t.Fatalf("an enrolled endpoint got %d (err %v) from a hub requiring certificates; want 200", code, err)
 	}
 }
@@ -1142,11 +1160,11 @@ func TestTheConsoleCanSeeWhichEndpointsAreCertificateBound(t *testing.T) {
 
 	// One endpoint reports under a certificate, one under the key alone.
 	bound := agentClient(t, srv, issueAgentCert(t, srv.pki, "linux-alpha"))
-	if code, err := postTelemetryAs(t, bound, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
+	if code, err := postTelemetryAs(t, srv, bound, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
 		t.Fatalf("certificate holder got %d (err %v); want 200", code, err)
 	}
 	plain := agentClient(t, srv, nil)
-	if code, err := postTelemetryAs(t, plain, base, "linux-beta", nil); err != nil || code != http.StatusOK {
+	if code, err := postTelemetryAs(t, srv, plain, base, "linux-beta", nil); err != nil || code != http.StatusOK {
 		t.Fatalf("key-only endpoint got %d (err %v); want 200", code, err)
 	}
 
@@ -1172,7 +1190,7 @@ func TestTheConsoleCanSeeWhichEndpointsAreCertificateBound(t *testing.T) {
 
 	// An endpoint that stops presenting one has to stop showing one, or the
 	// console keeps reporting a binding that is no longer being enforced.
-	if code, err := postTelemetryAs(t, plain, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
+	if code, err := postTelemetryAs(t, srv, plain, base, "linux-alpha", nil); err != nil || code != http.StatusOK {
 		t.Fatalf("the same endpoint reporting without a certificate got %d (err %v); want 200", code, err)
 	}
 	if cn := byID()["linux-alpha"]; cn != "" {
@@ -1274,10 +1292,13 @@ func TestResponseRoutesFailClosedByDefault(t *testing.T) {
 
 	// Verify telemetry response does not emit response_offers
 	telemetryReq := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(`[{"endpoint_id":"ep-1","event_type":"heartbeat"}]`))
-	telemetryReq.Header.Set("X-API-Key", "mock_tenant_token")
+	telemetryReq.Header.Set(deviceCredentialHeader, issueTestCredential(t, store, "ep-1"))
 	telemetryReq.Header.Set("Content-Type", "application/json")
 	wTel := httptest.NewRecorder()
 	handler.ServeHTTP(wTel, telemetryReq)
+	if wTel.Code != http.StatusOK {
+		t.Fatalf("telemetry was refused: %d %s", wTel.Code, wTel.Body.String())
+	}
 	if strings.Contains(wTel.Body.String(), "response_offers") {
 		t.Errorf("telemetry response contained response_offers while gated off: %s", wTel.Body.String())
 	}

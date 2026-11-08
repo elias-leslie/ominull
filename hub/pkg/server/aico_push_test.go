@@ -631,33 +631,3 @@ func TestAicoResolvedRowsFitTheRoom(t *testing.T) {
 		t.Fatalf("room 0 = %+v", out)
 	}
 }
-
-// Over the weekly page budget, detection health is a warn row, not ok.
-func TestAicoDetectionHealthOverBudgetWarns(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	now := time.Now().UTC()
-	state := func() string {
-		for _, r := range srv.aicoRows(now) {
-			if r.ID == "ominull.detection.health" {
-				return r.State
-			}
-		}
-		t.Fatal("no detection health row")
-		return ""
-	}
-	if got := state(); got != "ok" {
-		t.Fatalf("no pages = %s", got)
-	}
-	for _, inc := range []string{"inc-a", "inc-b"} {
-		if err := store.CreateAnomalyAlert(storage.AnomalyAlert{ID: inc + "-1", TenantID: "t-01", EndpointID: "e", Hostname: "dev",
-			AnomalyType: "C2_BEACONING", Severity: "HIGH", Title: "t", Evidence: `{"class":"page","incident":"` + inc + `"}`,
-			Timestamp: now.Add(-time.Hour)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := state(); got != "warn" {
-		t.Fatalf("over budget = %s", got)
-	}
-}

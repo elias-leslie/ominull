@@ -131,12 +131,8 @@ type DetectionTuning struct {
 
 	// PageIncidentHours is how long one incident (device, rule family,
 	// counterparty) stays open: later alerts add to its count and only an
-	// escalation asks again. PageBudgetPerWeek is the alert-fatigue target:
-	// when a week pages more incidents than this, the feed carries an info
-	// "detection health" note naming the noisiest rule. It never suppresses
-	// a page.
+	// escalation asks again.
 	PageIncidentHours int `json:"page_incident_hours"`
-	PageBudgetPerWeek int `json:"page_budget_per_week"`
 
 	// LANSweepHosts is how many home-zone hosts one process may reach in the
 	// sweep window before it pages; LabEscapeHosts how many hosts outside
@@ -226,7 +222,6 @@ func defaultDetectionTuning() DetectionTuning {
 		IntelPageConfidence:  IntelPageConfidenceDefault,
 		AutoIsolateRoles:     []string{RoleLab, RolePersonal},
 		PageIncidentHours:    24,
-		PageBudgetPerWeek:    1,
 		LANSweepHosts:        10,
 		LabEscapeHosts:       1,
 		BeaconPageScore:      0.90,
@@ -475,7 +470,6 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AutoIsolateRoles = tidyList(t.AutoIsolateRoles)
 	t.IntelPageConfidence = clampInt(t.IntelPageConfidence, 1, 100, IntelPageConfidenceDefault)
 	t.PageIncidentHours = clampInt(t.PageIncidentHours, 1, 168, 24)
-	t.PageBudgetPerWeek = clampInt(t.PageBudgetPerWeek, 1, 1000, 1)
 	t.LANSweepHosts = clampInt(t.LANSweepHosts, 2, 256, 10)
 	t.LabEscapeHosts = clampInt(t.LabEscapeHosts, 1, 256, 1)
 	if t.BeaconPageScore <= 0 || t.BeaconPageScore > 1 {

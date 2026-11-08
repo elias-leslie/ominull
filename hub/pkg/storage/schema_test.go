@@ -69,9 +69,8 @@ func TestUpgradedSchemaLeavesLegacyRowsInert(t *testing.T) {
 			t.Fatalf("upgrade changed preserved %s rows: %d", table, rows)
 		}
 	}
-	value, err := store.GetSetting("copilot.config")
-	if err != nil || value != `{"enabled":true}` {
-		t.Fatalf("upgrade changed legacy setting: value=%q err=%v", value, err)
+	if value, err := store.GetSetting("copilot.config"); err != nil || value != "" {
+		t.Fatalf("upgrade kept the retired copilot setting: value=%q err=%v", value, err)
 	}
 	// No current schema initializer or retained API recreates, migrates, or
 	// evaluates these rows. Their continued presence is historical data only.
@@ -118,16 +117,15 @@ func TestRetiredTablesDroppedOnlyWhenEmpty(t *testing.T) {
 	}
 }
 
-// The relay key keeps working under its Aico setting name, and the settings
-// Nightshift left with no reader are removed.
-func TestNightshiftSettingsMigrate(t *testing.T) {
+// Settings keys nothing reads any more are gone after a start.
+func TestRetiredSettingsAreDropped(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ominull.db")
 	store, err := New(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range map[string]string{oldRelayKeySetting: "hash-1", "nightshift_feed_key_sha256": "x", "nightshift_device_salt": "y"} {
-		if err := store.SetSetting(k, v); err != nil {
+	for _, k := range append([]string{"setup.complete"}, retiredSettings...) {
+		if err := store.SetSetting(k, "x"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -137,12 +135,15 @@ func TestNightshiftSettingsMigrate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if v, _ := store.GetSetting(newRelayKeySetting); v != "hash-1" {
-		t.Fatalf("relay key after migration = %q", v)
-	}
-	for _, k := range append([]string{oldRelayKeySetting}, deadNightshiftSettings...) {
+	for _, k := range retiredSettings {
 		if v, _ := store.GetSetting(k); v != "" {
 			t.Errorf("%s still set", k)
 		}
+	}
+	if v, _ := store.GetSetting("aico_relay_key_sha256"); v != "x" {
+		t.Errorf("the relay key was not kept under its Aico name: %q", v)
+	}
+	if v, _ := store.GetSetting("setup.complete"); v != "x" {
+		t.Errorf("a live setting was dropped: setup.complete = %q", v)
 	}
 }

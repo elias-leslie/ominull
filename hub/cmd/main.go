@@ -134,7 +134,6 @@ func main() {
 			// Existing production data is already configured. Upgrades must not
 			// reopen first-run setup or replace its identity model in place.
 			_ = store.SetSetting("setup.complete", "true")
-			_ = store.SetSetting("legacy_agent_auth", "migration")
 		}
 	}
 	// Older package installs kept their non-secret setup in hub.env flags. On
