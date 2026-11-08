@@ -969,6 +969,43 @@
   var DEMO_CACHE = null;
   var demoScreenSeq = 0;
 
+  /* The topology workspace in the hub's shape (storage.TopologyWorkspace):
+     the demo graph with segments, address scopes, per-port shares and the
+     conversations behind each pair. */
+  function demoWorkspace() {
+    var g = DEMO_CACHE["/api/v1/topology/graph"];
+    var eps = arrayOf(DEMO_CACHE["/api/v1/endpoints"]);
+    function seg(ip) {
+      if (ip.indexOf("10.0.4.") === 0) return ["corp", "Corporate HQ LAN", "private"];
+      if (ip.indexOf("172.16.10.") === 0) return ["dc", "Data center", "private"];
+      return ["internet", "Internet", "public"];
+    }
+    function epFor(ip) { return eps.filter(function (e) { return e.ip === ip; })[0]; }
+    var nodes = g.nodes.map(function (n) {
+      var s = seg(n.ip), ep = epFor(n.ip);
+      var out = Object.assign({}, n, { network_id: s[0], network_label: s[1], address_scope: s[2], estate_member: s[2] === "private" });
+      if (ep) out.endpoint_id = ep.endpoint_id;
+      return out;
+    });
+    var procs = { 88: "C:\\Windows\\System32\\lsass.exe", 135: "C:\\Windows\\System32\\svchost.exe", 389: "C:\\Windows\\System32\\lsass.exe",
+      443: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", 445: "System", 5432: "/usr/lib/postgresql/16/bin/postgres" };
+    /* The hub names edge protocols in upper case (TCP, UDP), as the Protocol filter expects. */
+    var edges = g.edges.map(function (e) {
+      var proto = String(e.protocol || "").toUpperCase();
+      return Object.assign({}, e, { protocol: proto, measured_flows: e.flow_count, ports: [{ port: e.port, protocol: proto, flow_count: e.flow_count, total_bytes: e.total_bytes, measured_flows: e.flow_count, verdict: e.verdict }] });
+    });
+    var conversations = g.edges.map(function (e) {
+      var ep = epFor(e.source), external = seg(e.target)[2] === "public";
+      return { source: e.source, target: e.target, endpoint_id: ep ? ep.endpoint_id : "", process: procs[e.port] || "",
+        domain: external ? "cdn.example.invalid" : "", domain_source: external ? "dns" : "", protocol: 6, port: e.port,
+        action: e.verdict === "blocked" ? "blocked" : "allowed", flow_count: e.flow_count, total_bytes: e.total_bytes,
+        first_seen: e.last_seen, last_seen: e.last_seen };
+    });
+    var to = new Date();
+    return { nodes: nodes, edges: edges, metrics: g.metrics, conversations: conversations, evidence_truncated: false,
+      from: new Date(to.getTime() - 86400000).toISOString(), to: to.toISOString() };
+  }
+
   /* The same merge rule the hub applies, so a demo correction visibly wins
      the field the way a live one would. */
   function DEMO_REMERGE(a) {
@@ -1262,6 +1299,7 @@
           return;
         }
         if (base === "/api/v1/detection/tuning") { resolve(demoTuning()); return; }
+        if (base === "/api/v1/topology/workspace") { resolve(demoWorkspace()); return; }
         /* Terminals live on the terminal page, which demo mode does not serve. */
         if (base === "/api/v1/terminal/sessions") { resolve({ sessions: [] }); return; }
         if (base === "/api/v1/scanner/status") { resolve(demoScanStatus(path)); return; }

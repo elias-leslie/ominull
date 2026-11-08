@@ -2,7 +2,6 @@
 Ominull is an endpoint telemetry, detection and containment hub for operators managing Linux and Windows devices. It pairs a fleet console, observed network evidence, device identity and bounded response controls with agents on each machine, all served from a self-hosted Linux hub.
 
 ## Now
-- Console: browser-check and accessibility-check the Topology rewrite (700fe82; shipped, never checked past a render)
 ## Next
 - M5: Aico owns machine inventory, intent and liveness (plan: docs/audit-2026-11-06.md)
 - M8: Tripwires: canary credentials, decoy addresses, bad-domain matching on stored DNS (plan: docs/audit-2026-11-06.md)

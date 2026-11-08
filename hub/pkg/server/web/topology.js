@@ -739,7 +739,15 @@
     function escapeKey(e) {
       if (e.key !== "Escape") return;
       if (!tooltip.hidden) hideTooltip();
-      else if (selected && root.contains(document.activeElement)) clearSelection();
+      /* A click on the graph canvas leaves focus on the page body, so Escape
+         counts there too (never while another control or dialog has focus). */
+      else if (
+        selected &&
+        root.isConnected &&
+        (root.contains(document.activeElement) ||
+          document.activeElement === document.body)
+      )
+        clearSelection();
     }
     document.addEventListener("keydown", escapeKey);
     function highlight(id) {
@@ -1241,13 +1249,14 @@
         el("span", { text: parts.join(" · ") }),
         el("span", {
           class: "tg-window",
+          title: data.to ? "The window ends at this time: newer traffic shows on the next refresh" : "",
           text: data.to
             ? "Through " + new Date(data.to).toLocaleTimeString()
             : "Waiting for observations",
         }),
       );
       shown.textContent = filtered()
-        ? num(projection.matched) + " of " + num(projection.total) + " match"
+        ? num(projection.matched) + " of " + num(projection.total) + " addresses match"
         : "";
     }
     function renderCrumbs() {
@@ -1470,7 +1479,7 @@
         );
       });
       list.append(
-        table("Hosts and groups", ["Name", "Address", "Role", "Agent", ""], nodeRows),
+        table("Hosts and groups", ["Name", "Address", "Role", "Kind", ""], nodeRows),
         table("Links", ["From → to", "Flows", "Ports", "Status", ""], edgeRows),
       );
       const hiddenRows =
