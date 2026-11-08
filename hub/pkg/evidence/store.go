@@ -1193,12 +1193,25 @@ func (s *Store) PruneExpiredBundles(now time.Time) (int, error) {
 			continue
 		}
 
-		_, _ = tx.Exec(`DELETE FROM evidence_chunks WHERE item_id IN (SELECT id FROM evidence_items WHERE bundle_id = ?)`, eb.id)
-		_, _ = tx.Exec(`DELETE FROM evidence_items WHERE bundle_id = ?`, eb.id)
-		_, _ = tx.Exec(`DELETE FROM evidence_receipts WHERE bundle_id = ?`, eb.id)
-		_, _ = tx.Exec(`DELETE FROM evidence_bundles WHERE id = ?`, eb.id)
-
-		if err := tx.Commit(); err != nil {
+		var failed error
+		for _, statement := range []string{
+			`DELETE FROM evidence_chunks WHERE item_id IN (SELECT id FROM evidence_items WHERE bundle_id = ?)`,
+			`DELETE FROM evidence_items WHERE bundle_id = ?`,
+			`DELETE FROM evidence_receipts WHERE bundle_id = ?`,
+			`DELETE FROM evidence_bundles WHERE id = ?`,
+		} {
+			if _, err := tx.Exec(statement, eb.id); err != nil {
+				failed = err
+				break
+			}
+		}
+		if failed == nil {
+			failed = tx.Commit()
+		} else {
+			_ = tx.Rollback()
+		}
+		if failed != nil {
+			log.Printf("[!] Evidence retention: could not remove bundle %s: %v", eb.id, failed)
 			continue
 		}
 
