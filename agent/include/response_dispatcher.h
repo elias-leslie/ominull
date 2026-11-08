@@ -518,6 +518,9 @@ static inline const char* Response_BundleId(const char* bundle_id, const char* j
  * caller's default; a timeout over a day is clamped to a day. */
 static inline bool Response_ForensicsPayload(const char* json, char* bundle_id, size_t bundle_cap, char* profile,
                                              size_t profile_cap, int64_t* max_bytes, int* timeout_seconds) {
+#ifdef HI_PAYLOADS
+    return hi_forensics_payload(json, bundle_id, bundle_cap, profile, profile_cap, max_bytes, timeout_seconds);
+#else
     if (!json) return false;
     const char* q = json;
     SkipWhitespace(&q);
@@ -560,6 +563,7 @@ static inline bool Response_ForensicsPayload(const char* json, char* bundle_id, 
         }
     }
     return true;
+#endif
 }
 
 /* Response_ReadOffer reads one offer object (len bytes at s) into offer.
@@ -672,6 +676,9 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
  * take different values. */
 static inline bool Screen_ReadPayload(const char* json, char* sid, size_t sid_max, char* mode, size_t mode_max, char* tok, size_t tok_max,
                                       char* op, size_t op_max, bool* unattended, bool* ask_first) {
+#ifdef HI_PAYLOADS
+    return hi_screen_payload(json, sid, sid_max, mode, mode_max, tok, tok_max, op, op_max, unattended, ask_first);
+#else
     bool seen_sid = false, seen_mode = false, seen_tok = false, seen_op = false;
     TermJson j;
     if (!TermJson_Begin(&j, json, strlen(json))) return false;
@@ -709,6 +716,7 @@ static inline bool Screen_ReadPayload(const char* json, char* sid, size_t sid_ma
         }
     }
     return true;
+#endif
 }
 
 /* ScreenCanonicalFromOffer rebuilds the exact bytes the hub digested for a
@@ -721,6 +729,9 @@ static inline bool Screen_ReadPayload(const char* json, char* sid, size_t sid_ma
  * absent (a literal false, which the hub never sends, is refused). operator,
  * session_id and connect_token are not digested and are ignored here. */
 static inline bool ScreenCanonicalFromOffer(const char* payload_json, char* out, size_t out_cap) {
+#ifdef HI_PAYLOADS
+    return hi_screen_canonical(payload_json, out, out_cap);
+#else
     if (!payload_json || !out) return false;
     char mode[16] = {0};
     bool have_mode = false, unattended = false, ask_first = false;
@@ -754,6 +765,7 @@ static inline bool ScreenCanonicalFromOffer(const char* payload_json, char* out,
                      unattended ? ",\"unattended\":true" : "",
                      ask_first ? ",\"ask_first\":true" : "");
     return n > 0 && (size_t)n < out_cap;
+#endif
 }
 
 /* TerminalCanonicalFromOffer rebuilds the bytes the hub digested for a
@@ -765,6 +777,9 @@ static inline bool ScreenCanonicalFromOffer(const char* payload_json, char* out,
  * "program" can therefore never sign one program while another starts. */
 #define TERMINAL_CANON_MAX 192
 static inline bool TerminalCanonicalFromOffer(const char* payload_json, char* out, size_t out_cap) {
+#ifdef HI_PAYLOADS
+    return hi_terminal_canonical(payload_json, out, out_cap);
+#else
     if (!payload_json || !out || out_cap == 0) return false;
     out[0] = '\0';
     char sid[64], prog[64], tok[128];
@@ -789,6 +804,7 @@ static inline bool TerminalCanonicalFromOffer(const char* payload_json, char* ou
     if (!raw) return false;
     int n = snprintf(out, out_cap, "{\"program\":\"%.*s\"}", (int)raw_len, raw);
     return n > 0 && (size_t)n < out_cap;
+#endif
 }
 
 /* VerifyResponseGrantKey checks a response job grant against a public key

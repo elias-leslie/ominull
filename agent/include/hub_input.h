@@ -21,6 +21,7 @@
 #define HI_TERM_FRAME
 #define HI_BASE64_CERT
 #define HI_OFFERS
+#define HI_PAYLOADS
 #endif
 
 enum {
