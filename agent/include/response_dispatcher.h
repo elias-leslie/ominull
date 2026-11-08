@@ -321,6 +321,7 @@ typedef struct {
     char     signer_key_id[65];
     char     signature[130];
 } ResponseGrant;
+_Static_assert(sizeof(ResponseGrant) == 800, "ResponseGrant differs from agent/hubinput/src/abi.rs");
 
 typedef struct {
     char          job_id[64];
@@ -330,6 +331,7 @@ typedef struct {
     char          payload_json[MAX_PAYLOAD_JSON_LEN];
     size_t        payload_len;
 } ResponseJobOffer;
+_Static_assert(sizeof(ResponseJobOffer) == 66536, "ResponseJobOffer differs from agent/hubinput/src/abi.rs");
 
 static inline void SkipWhitespace(const char** p) {
     while (**p && (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r')) {
@@ -421,6 +423,9 @@ static inline bool Response_Int64(char vt, const char* v, size_t vl, int64_t* ou
  * strict reader, and a key another reader could take for a known one (an
  * escape, other case) refuses the grant. */
 static inline bool ExtractGrantObjectN(const char** p, size_t n, ResponseGrant* grant) {
+#ifdef HI_OFFERS
+    return hi_extract_grant_n(p, n, grant);
+#else
     memset(grant, 0, sizeof(*grant));
     while (n && (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r')) { (*p)++; n--; }
     size_t span = 0;
@@ -478,10 +483,15 @@ static inline bool ExtractGrantObjectN(const char** p, size_t n, ResponseGrant* 
         return false;
     }
     return true;
+#endif
 }
 
 static inline bool ExtractGrantObject(const char** p, ResponseGrant* grant) {
+#ifdef HI_OFFERS
+    return hi_extract_grant(p, grant);
+#else
     return *p && ExtractGrantObjectN(p, strlen(*p), grant);
+#endif
 }
 
 /* Response_BundleIdOK: bundle ids go into evidence URLs and the manifest. */
@@ -555,6 +565,9 @@ static inline bool Response_ForensicsPayload(const char* json, char* bundle_id, 
 /* Response_ReadOffer reads one offer object (len bytes at s) into offer.
  * False when a member is malformed or repeated, or a required one is missing. */
 static inline bool Response_ReadOffer(const char* s, size_t len, ResponseJobOffer* offer) {
+#ifdef HI_OFFERS
+    return hi_read_offer(s, len, offer);
+#else
     memset(offer, 0, sizeof(*offer));
     TermJson j;
     if (!TermJson_Begin(&j, s, len)) return false;
@@ -598,12 +611,16 @@ static inline bool Response_ReadOffer(const char* s, size_t len, ResponseJobOffe
         }
     }
     return has_job_id && has_lease_id && has_kind && has_grant;
+#endif
 }
 
 /* ParseResponseOffers reads the heartbeat reply's top-level response_offers
  * array (never a "response_offers" that sits inside another value). A malformed
  * offer is dropped and the rest still read; a malformed reply yields none. */
 static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOffers, size_t maxOffers) {
+#ifdef HI_OFFERS
+    return hi_parse_offers(json, outOffers, maxOffers);
+#else
     if (!json || !outOffers || maxOffers == 0) return 0;
     TermJson top;
     if (!TermJson_Begin(&top, json, strlen(json))) return 0;
@@ -642,6 +659,7 @@ static inline int ParseResponseOffers(const char* json, ResponseJobOffer* outOff
         a.i++;
     }
     return count;
+#endif
 }
 
 /* ---------------------------------------------------------------------------

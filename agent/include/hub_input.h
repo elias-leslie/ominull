@@ -20,6 +20,7 @@
 /* One switch per family, flipped as each one passes its differential test. */
 #define HI_TERM_FRAME
 #define HI_BASE64_CERT
+#define HI_OFFERS
 #endif
 
 enum {
