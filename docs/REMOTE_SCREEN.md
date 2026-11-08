@@ -10,7 +10,7 @@ source of truth once it lands.
 See and control the screen of an enrolled endpoint in a **native desktop viewer**
 (owner decision: no in-browser viewer; the website only has a launch button),
 or drive it from `ominullctl` for agents acting on the owner's request, the same
-way the terminal already works: the hub has the response authority sign the
+way the terminal already works: the hub signs the
 grant on the first request (nobody is asked, no phone tap), a session opens over
 the existing hub relay, it is audited, and it ends at the hub's session limits. No new listening port on the endpoint (the agent
 dials out), no third-party remote tool, no second control channel. A new action
@@ -43,10 +43,10 @@ screen-specific (§4).
 
 1. Operator (console button or `ominullctl`) POSTs `/api/v1/screen/sessions`
    `{endpoint_id, mode}` where `mode` is `control` (default) or `view`.
-2. Hub `resolveScreen` describes the request and `authorized` calls the response
-   authority (`POST /v1/authorize`) at once; there is no 202 and no wait. The
-   authority refuses with the reason (HTTP error, audit `ACTION_REFUSED`) if the
-   payload is invalid or breaks the steward-run rules. The audit statement
+2. Hub `resolveScreen` describes the request and `authorized` signs it
+   at once; there is no 202 and no wait. The
+   hub refuses with the reason (HTTP error, audit `ACTION_REFUSED`) if the
+   payload is invalid. The audit statement
    (`ACTION_AUTHORIZED`) includes duration and mode:
    - control: `See and control the screen on <label>, up to <duration>, for <operator>`
    - view: `Watch the screen on <label> (no control), up to <duration>, for <operator>`
@@ -55,7 +55,7 @@ screen-specific (§4).
      the screen...`), so the audit always shows who controls it.
    - if "ask the person first" is on for the machine: append
      `the person at the keyboard is asked to allow it first`.
-3. The authority signs an EndpointGrant V2, kind `screen_session`,
+3. The hub signs an EndpointGrant V2, kind `screen_session`,
    action digest over the canonical payload `{"mode":"control"}` (exactly what
    the agent re-digests; the session length is the hub's to enforce and is
    audited only, mirroring terminal). The agent still verifies the grant itself.
@@ -449,12 +449,11 @@ endpoint at a time.
 - No new listening port: the agent/helper always dials out to the hub.
 - **Remote access off (per machine).** `PUT /api/v1/remote-access/settings`
   `{"endpoint_id":"..","off":true}` switches off every remote terminal and
-  screen session on that machine, for everyone (owner, agents, steward); it is
+  screen session on that machine, for everyone (owner, agents); it is
   stored as data (settings row `remote_access.off`), never derived from a
   hostname. Switching it off applies at once and closes the machine's open
-  sessions; switching it back on is a loosening that the authority authorizes on the same
-  request and the audit records ("Allow remote terminal and screen again").
-  Requests for that machine are refused with 403 before the authority is asked. An unreadable settings row refuses everywhere until it
+  sessions; switching it back on applies at once too, and the audit records both.
+  Requests for that machine are refused with 403 before anything is signed. An unreadable settings row refuses everywhere until it
   is rewritten. `GET /api/v1/remote-access/settings[?endpoint_id=]` reads it.
   The agent-side lock levels (docs/HOST_AUTHORITY.md) refuse terminal and screen
   too; this setting is the hub-side half, for any agent version.
@@ -643,27 +642,3 @@ This is the Linux equivalent of DXGI-as-SYSTEM.
 - No recording by default means a session leaves an audit trail (who/when/mode)
   but not a video the owner must then protect. That is deliberate for a home
   machine.
-
-## 12. The steward (bound to a stuck run)
-
-Nightshift's steward can open a screen session for a stuck maintenance run. It
-needs no tap and no stored rule: the hub checks the run, the authority signs
-the grant on the first request like any screen session, and the audit says who
-asked and why.
-
-- **Key:** `POST /api/v1/integrations/steward/key` (administrator) returns the
-  key once; `DELETE` revokes it. The steward reaches only its route list
-  (maintenance wait/escalate/list and the screen session routes).
-- **No rule:** the per-machine steward rule, its token, `POST
-  /api/v1/screen/steward` are removed, as are `rule_token` and `narrow` on a session request.
-- **Opening:** the steward sends `POST /api/v1/screen/sessions` with
-  `steward_run` (a maintenance job on that machine in needs_hands or stalled).
-  The hub opens it only inside the machine's maintenance window, never
-  unattended, for at most 30 minutes, and never on a host-locked machine;
-  otherwise it refuses with the reason and the steward escalates the run. The
-  audit statement names the steward and the run.
-- **Ending:** the hub checks bound sessions every 15 s and closes one (audited
-  `SCREEN_SESSION_CLOSED`, `steward_run_resolved`) when its run is no longer
-  stuck, or at the session's time limit.
-- The endpoint must report the screen capability in its signed profile, and
-  host-locked machines refuse.

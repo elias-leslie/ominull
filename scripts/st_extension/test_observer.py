@@ -33,9 +33,8 @@ class Fixture(unittest.TestCase):
         self.config: dict[str, Any] = {"schema_version": 1, "target_id": "fixture-target", "ssh_alias": "fixture-alias",
             "lxc_id": 100, "hub_base_url": "https://hub.example.invalid:9443",
             "admin_key_file": str(self.key_file), "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
-            "local_binary": "build/ominull-hub", "local_authority_binary": "build/ominull-response-authority"}
-        for path in (self.config["hub_package"], self.config["local_binary"],
-                     self.config["local_authority_binary"]):
+            "local_binary": "build/ominull-hub"}
+        for path in (self.config["hub_package"], self.config["local_binary"]):
             (self.root / path).write_bytes(b"fixture")
         self.config_file = self.root / "scripts/st_extension/production.local.json"
         self.write_config()
@@ -305,12 +304,12 @@ class PackageTests(Fixture):
             obs, "run", side_effect=run_without_go_probe):
             evidence = obs.package_evidence(self.root, self.config, COMMIT, self.root)
             self.assertTrue(evidence["package"]["signature_verified"])
-            self.assertEqual(set(evidence["binaries"]), {"hub", "authority"})
-            authority = self.root / self.config["local_authority_binary"]
-            authority.write_bytes(b"tampered authority")
+            self.assertEqual(set(evidence["binaries"]), {"hub"})
+            hub = self.root / self.config["local_binary"]
+            hub.write_bytes(b"tampered hub")
             with self.assertRaisesRegex(obs.ObservationError, "local_package_binary_mismatch"):
                 obs.package_evidence(self.root, self.config, COMMIT, self.root)
-            authority.write_bytes(b"isolated fixture binary")
+            hub.write_bytes(b"isolated fixture binary")
             signature = Path(str(self.root / self.config["hub_package"]) + ".sig")
             signature.write_bytes(b"invalid signature")
             with self.assertRaisesRegex(obs.ObservationError, "command_failed"):
@@ -350,8 +349,8 @@ class RemoteAndRouteTests(Fixture):
         self.write_config()
         config, _ = obs.load_config(self.root)
         with patch.object(obs, "run", return_value=b"data") as run:
-            obs.ssh(config, ["running-binary", "authority", "4242"])
-        self.assertEqual(run.call_args.args[0][-2:], ["ominull-observe", "running-binary authority 4242"])
+            obs.ssh(config, ["running-binary", "hub", "4242"])
+        self.assertEqual(run.call_args.args[0][-2:], ["ominull-observe", "running-binary hub 4242"])
         for alias in ("-oProxyCommand=x", "a b", ""):
             self.config["observer_ssh_alias"] = alias
             self.write_config()
@@ -362,7 +361,7 @@ class RemoteAndRouteTests(Fixture):
         digest = "c" * 64
         evidence = {"package": {"version": "1.8.43"}, "binaries": {
             role: {"package_sha256": digest, "source_commit": COMMIT} for role in obs.BINARIES}}
-        initial = {"hub": {"pid": 123}, "authority": {"pid": 456}}
+        initial = {"hub": {"pid": 123}}
         calls = []
         def remote(config, words, output_file=None):
             calls.append(words)
@@ -382,8 +381,7 @@ class RemoteAndRouteTests(Fixture):
                 patch.object(obs, "parse_buildinfo", return_value={"source_commit": COMMIT, "vcs_modified": False}):
             obs.running_evidence(self.config, evidence, initial, self.root)
         self.assertEqual(calls, [["digest", "hub"], ["running-digest", "hub", "123"], ["running-binary", "hub", "123"],
-                                 ["digest", "authority"], ["running-digest", "authority", "456"],
-                                 ["running-binary", "authority", "456"], ["package"]])
+                                 ["package"]])
 
 
     def test_http_routes_require_current_asset_and_anonymous_denial(self):
@@ -415,7 +413,7 @@ class RemoteAndRouteTests(Fixture):
         original = "b" * 40
         evidence = {"package": {"version": "1.8.43"}, "binaries": {
             "hub": {"running_source_commit": original}}}
-        initial = {"hub": {"pid": 123}, "authority": {"pid": 456}}
+        initial = {"hub": {"pid": 123}}
         with patch.object(obs, "pin_code", return_value={"policy_blob": COMMIT}), patch.object(
                 obs, "package_evidence", return_value=evidence), patch.object(
                 obs, "running_evidence", return_value=evidence), patch.object(
@@ -439,8 +437,8 @@ class ObserveDispatchTests(unittest.TestCase):
 
     def test_verbs_map_to_fixed_reads_in_ct_150(self):
         od = self.od
-        self.assertEqual(od.command_for(["service", "authority"])[0],
-                         ["systemctl", "show", "ominull-response-authority.service", "--property=" + od.SERVICE_PROPERTIES])
+        self.assertEqual(od.command_for(["service", "hub"])[0],
+                         ["systemctl", "show", "ominull-hub.service", "--property=" + od.SERVICE_PROPERTIES])
         self.assertEqual(od.command_for(["digest", "hub"]), (["sha256sum", "--", "/opt/ominull/bin/ominull-hub"], None))
         self.assertEqual(od.command_for(["running-binary", "hub", "77"]),
                          (["head", "-c", str(64 * 1024 * 1024 + 1), "--", "/proc/77/exe"], ("ominull-hub", "77")))

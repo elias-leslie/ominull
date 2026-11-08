@@ -36,8 +36,7 @@ sudo ominullctl setup-token
 
 The package creates `/opt/ominull/bin/ominull-hub`, `/usr/bin/ominullctl`,
 `/etc/ominull/hub.env`, the package-owned `ominull-hub.service`, and the
-root-only local setup-token file. It installs the hub service and a separate
-`ominull-response-authority.service` for response authorization. The database,
+root-only local setup-token file. The database, grant keys (`/var/lib/ominull/grants`),
 device PKI, release artifacts, backups, and operator configuration survive an
 upgrade, remove, reinstall, or hub purge. Purge is never a database delete.
 
@@ -148,8 +147,7 @@ An administrator enrolls a Linux host directly with `scripts/enroll-linux-host.s
 ## Package lifecycle and updates
 
 The hub package owns the hub binary, `ominullctl`, embedded web assets, bundled
-signed Linux/Windows endpoint artifacts, and the hub and response-authority
-systemd services. The Linux
+signed Linux/Windows endpoint artifacts, and the hub systemd service. The Linux
 agent package owns `/opt/ominull/bin/ominulld` and one systemd service. The MSI
 owns `ominulld`, user-mode WFP recovery, the `ominulld` service registration,
 and Windows Installer metadata. Package upgrades preserve enrolled identity;
@@ -182,8 +180,8 @@ An https hub with its own CA takes `--ca` or `OMINULL_HUB_CA` (e.g. `/etc/ominul
 
 Run commands on an enrolled endpoint through the hub's terminal session, over
 the agent's existing outbound channel (no listener on the endpoint, no SSH).
-Every new session is authorized on the first request (the hub asks the
-response authority to sign the grant; nobody is asked), is recorded like a console
+Every new session is authorized on the first request (the hub signs the
+grant; nobody is asked), is recorded like a console
 shell, and ends at the hub's remote shell limits (by default 4 hours, or 15
 minutes idle; see below). Linux runs `/bin/sh`,
 Windows PowerShell (as SYSTEM). Output comes back clean: the command's own
@@ -211,9 +209,7 @@ or with `GET`/`PUT /api/v1/terminal/limits`. The hub's flags or environment
 `--terminal-max-per-tenant`) are the startup defaults; values saved from the
 console win and survive restarts. Safety bounds: 5 minutes to 24 hours, idle 1
 minute up to the session length, 1 to 10 per endpoint, 1 to 50 in total.
-Lowering a limit applies at once; raising one is authorized by the response
-authority on the same request and recorded in the audit (e.g. "Remote shell:
-sessions run up to 6 hours (was 4 hours)"). Sessions already open keep the
+Any change applies at once and is recorded in the audit. Sessions already open keep the
 limits they started with, and each session's authorization names its length
 ("recorded, up to 4 hours").
 
@@ -229,7 +225,7 @@ tenant-scoped. Agent routes use a unique device credential.
 Every agent holds the one admin key, so an admin-key call is recorded as
 `admin` unless the caller names itself in `X-Ominull-Agent` (1 to 64 printable
 ASCII characters, no `"` or `\`, no leading or trailing space; an unusable one
-reads `admin`, and is a 400 on routes the authority signs). The hub records it, as a claim, as
+reads `admin`, and is a 400 on routes that sign a grant). The hub records it, as a claim, as
 `agent "<name>" (admin key)` wherever it records who acted: the audit,
 `anomaly_resolutions.resolved_by`, tuning saves, expected rules, isolations, the
 audit trail's "by". `X-Username` stays the hub's own: it is cleared on the
@@ -262,8 +258,8 @@ belong to that name, so reattach with the same one.
 | `/api/v1/agents/update-status` | GET | convergence and package provenance |
 | `/api/v1/agents/rollback` | POST | admin: `{version, reason}` retires an agent release: halts its staged rollouts, drops its queued updates and refuses to roll it again; machines already on it stay until a newer release; no authorization needed |
 | `/api/v1/trust/routine-keys` | GET/POST | admin: the routine release keys the pinned release key listed, `{epoch, keys:[{id, public_key}], signature}` over `OMINULL-ROUTINE-KEYS-V1` (`/statement` returns the exact bytes; a higher epoch replaces, an empty list revokes). Agents get it in the heartbeat and accept a routine key only for agent packages and their release statements; a release signed with one rolls out canaries first |
-| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save that loosens is authorized by the response authority on the same request (no second step) and recorded in the audit with a detection-policy note; a loosening the authority cannot read (invalid or over 16 KiB) is refused with the reason; the authority's audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
-| `/api/v1/detection/expected` | GET/POST/PUT/DELETE | the expected rules (below): GET returns `{rules, findings, explicit, now}`; POST or PUT upserts one rule by `id` (admin); DELETE `?id=` removes one (admin, tightens, applies at once); a write that loosens is authorized by the response authority on the same request and audited as `EXPECTED_RULE_SAVED` / `EXPECTED_RULE_DELETED` |
+| `/api/v1/detection/tuning` | GET/POST/DELETE | read, adjust or reset the behavioural thresholds; a save applies at once and is recorded in the audit with a detection-policy note; an invalid draft or one over 16 KiB is refused with the reason; the audit statement opens with the floor drill run against the proposed tuning (the floor cases it would newly blind) |
+| `/api/v1/detection/expected` | GET/POST/PUT/DELETE | the expected rules (below): GET returns `{rules, findings, explicit, now}`; POST or PUT upserts one rule by `id` (admin); DELETE `?id=` removes one (admin); every write applies at once and is audited as `EXPECTED_RULE_SAVED` / `EXPECTED_RULE_DELETED` |
 | `/api/v1/detection/expected/mark` | POST | admin: `{id, reason?, all_hosts?, days?}` turns a finding into a narrow expected rule (this program, this network, this host, this kind) and acknowledges the finding; audited as `EXPECTED_RULE_MARKED`; no release needed |
 | `/api/v1/detection/tuning/replay` | GET/POST | what the saved tuning (GET) or a draft (POST `{"tuning": ...}`, not saved) would still raise over stored findings (`from`/`to`, default 7 days, at most 92) |
 | `/api/v1/anomalies/resolve` | POST | admin: close findings with a recorded reason, by `ids` + `reason`, or `covered: true` for every open finding the saved tuning no longer raises; the console's alert detail gives the same `verdict` (Confirm benign / Confirm real) with a reason; what it closes is recorded as `FINDINGS_ACKNOWLEDGED` and counted on the health findings' detection-policy note, like an acknowledgement |
@@ -330,13 +326,7 @@ clause matches on any entry.
   `LATERAL_PORT_SWEEP`), which a rule covers only when it names them.
 - Exclusions in a rule always win, and no rule reaches the floor (below).
 
-The response authority judges every write. A rule that covers more than it did
-loosens: a new rule, an added kind, program, host, domain, prefix or network, a
-lifted restriction (program account, port, protocol, direction, hosts, domains),
-a wider tenancy, a higher `max_hosts`, an exception removed, a later or no
-expiry. It is authorized on the same request and audited; removing a rule,
-narrowing one or ending it sooner tightens and applies at once. A changed name
-or reason matches nothing and tightens. Past `expires_at` a rule vouches for
+Every write applies at once, is audited and runs the floor drill (below). Past `expires_at` a rule vouches for
 nothing and the next save drops it. Rules that lapse within
 `policy_expiry_warn_days` (hub setting, default 30, 1 to 89), or lapsed in the
 last week, make the health findings' `ominull.detection.expiring` medium (a
@@ -397,13 +387,12 @@ resolver bypass. A case it cannot match is skipped (a port sweep under a rule
 for one port, a lateral sweep under a public or too small range or inside a
 container network, the sweeps for a program the code exempts), and so is the
 burst, which a rule may cover by design.
-A loosening tuning save or rule is drilled before it is applied: the
-floor cases the proposed policy would blind that the saved one does not (a case
-that raises today and that the proposed policy no longer builds, such as the
-resolver bypass of a removed agent runtime, counts). The authority's audit
-statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...",
+Every tuning save or rule change is drilled: the floor cases the new policy
+blinds that the old one did not (a case that raised before and that the new
+policy no longer builds, such as the resolver bypass of a removed agent runtime,
+counts). The audit statement opens with them ("BLINDS 2 FLOOR CASES: lateral sweep, ...",
 shortened to the count when the change leaves no room) or with "floor drill:
-blinds no floor case (the 10 MB burst yields to expected rules)". The drill does not block the save: the authority signs it and the
+blinds no floor case (the 10 MB burst yields to expected rules)". The drill does not block the save: the
 audit and the detection-policy note show what it blinds. Retirement
 reaches no floor rule the drill runs, so its statement carries
 no drill.
@@ -578,13 +567,9 @@ Detection thresholds, exemptions and vendor lists are tuning data on the hub
 API), so changing one needs no release at all.
 
 An agent update is authorized on the first request (no rule, no tap). The
-authority checks the payload and the release evidence: every agent package's
-release statement should verify under the release key the authority pins (or
-under a routine key that key listed), and a rollout of a routine-key release to
-more than one endpoint must name canaries (otherwise it is refused). Evidence the
-authority cannot verify is still signed, because agents verify the package
-signature themselves before installing; the audit summary then says "release
-signature not verified by the authority". The audit row is `ACTION_AUTHORIZED`.
+hub signs it; agents verify the package signature themselves before installing.
+A rollout of a routine-key release to more than one endpoint must name canaries
+(otherwise it is refused). The audit row is `ACTION_AUTHORIZED`.
 
 Official protocol and provider references:
 

@@ -21,12 +21,12 @@ import (
 
 	hubauth "ominull/hub/pkg/auth"
 	"ominull/hub/pkg/evidence"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
 )
 
-func setupTestServerWithResponse(t *testing.T) (*Server, *storage.Store, *responseauth.Authority, func()) {
+func setupTestServerWithResponse(t *testing.T) (*Server, *storage.Store, *grants.Signer, func()) {
 	t.Helper()
 	tempDir, err := os.MkdirTemp("", "ominull-srv-resp-test-*")
 	if err != nil {
@@ -42,14 +42,12 @@ func setupTestServerWithResponse(t *testing.T) (*Server, *storage.Store, *respon
 	srv := newTestServer(t, store, "test-admin-key-12345", tempDir, "http://localhost:9999", "1.8.2")
 	srv.SetResponseEnabled(true)
 
-	authDir := tempDir + "/auth"
-	auth, err := responseauth.NewAuthority(responseauth.Config{StateDir: authDir})
+	auth, err := grants.Open(grants.Config{StateDir: tempDir + "/auth"})
 	if err != nil {
-		t.Fatalf("NewAuthority failed: %v", err)
+		t.Fatalf("grants.Open failed: %v", err)
 	}
 
-	// Use in-process client for testing
-	srv.SetResponseAuth(responseauth.NewInProcessClient(auth))
+	srv.SetResponseAuth(grants.NewClient(auth))
 	useTestAuthority(srv, auth)
 
 	cleanup := func() {
@@ -66,7 +64,7 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 
 	tenantID := "default"
 	endpointID := "ep-linux-1"
-	opID := "admin"
+	_ = store.UpsertEndpoint(storage.Endpoint{ID: endpointID, Hostname: endpointID, OS: "linux", TenantID: tenantID})
 
 	// 1. Initialize tenant response key
 	pubKey, keyID, err := auth.GetOrCreateTenantKey(tenantID)
@@ -75,22 +73,7 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 	}
 	_ = keyID
 
-	// 2. Enroll TOTP and unlock session
-	secret, err := auth.EnrollTOTP(tenantID, opID)
-	if err != nil {
-		t.Fatalf("EnrollTOTP failed: %v", err)
-	}
-
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	now := time.Now()
-	code, _ := responseauth.GenerateTOTPCode(secret, now)
-
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-test-sess", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
-	}
-
-	// 3. Construct action proof and create response job via API
+	// 3. Create the response job via API
 	payload := response.ForensicCollectionPayload{
 		Profile:        "diagnostic",
 		MaxBytes:       5242880,
@@ -101,26 +84,12 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 		t.Fatalf("ComputeActionDigest failed: %v", err)
 	}
 
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindForensicCollect,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       now.Unix(),
-		Nonce:           "9988776655443322",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
 	createBody, _ := json.Marshal(map[string]interface{}{
 		"endpoint_id":     endpointID,
 		"kind":            response.ActionKindForensicCollect,
 		"payload_json":    `{"profile":"diagnostic","max_bytes":5242880,"timeout_seconds":60}`,
 		"idempotency_key": "idemp-test-01",
-		"session_id":      session.SessionID,
 		"action_digest":   actionDigest,
-		"proof":           proof,
 	})
 
 	handler := srv.Handler()
@@ -271,20 +240,16 @@ func TestServer_ResponseJobFlow(t *testing.T) {
 
 func TestResponseJobs_DigestRecomputationAndHeaderStripping(t *testing.T) {
 	t.Parallel()
-	srv, _, auth, cleanup := setupTestServerWithResponse(t)
+	srv, store, auth, cleanup := setupTestServerWithResponse(t)
 	defer cleanup()
 
 	handler := srv.Handler()
 	tenantID := "default"
 	endpointID := "ep-sec-test"
-	opID := "admin"
+	_ = store.UpsertEndpoint(storage.Endpoint{ID: endpointID, Hostname: endpointID, OS: "linux", TenantID: tenantID})
 
 	// 1. Setup tenant key and session
 	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, _ := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-sec-test", hex.EncodeToString(browserPub), code)
 
 	// Valid payload and digest
 	payload := response.ForensicCollectionPayload{
@@ -296,25 +261,12 @@ func TestResponseJobs_DigestRecomputationAndHeaderStripping(t *testing.T) {
 	payloadBytes, _ := json.Marshal(payload)
 
 	// 2. Digest Mismatch: Client sends forged digest not matching payload
-	proofValid := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindForensicCollect,
-		ActionDigest:    realDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "sec-nonce-1",
-	}
-	sigValid := ed25519.Sign(browserPriv, proofValid.CanonicalBytes())
-	proofValid.Signature = hex.EncodeToString(sigValid)
 
 	forgedBody, _ := json.Marshal(map[string]interface{}{
 		"endpoint_id":   endpointID,
 		"kind":          response.ActionKindForensicCollect,
 		"payload_json":  string(payloadBytes),
-		"session_id":    session.SessionID,
 		"action_digest": "badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbad0", // forged!
-		"proof":         proofValid,
 	})
 
 	consoleToken, err := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: "admin"}, "test-admin-key-12345", 12*time.Hour)
@@ -333,25 +285,12 @@ func TestResponseJobs_DigestRecomputationAndHeaderStripping(t *testing.T) {
 	}
 
 	// 3. Header Stripping: Client supplies forged X-Operator-ID header
-	proofValid2 := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindForensicCollect,
-		ActionDigest:    realDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "sec-nonce-2",
-	}
-	sigValid2 := ed25519.Sign(browserPriv, proofValid2.CanonicalBytes())
-	proofValid2.Signature = hex.EncodeToString(sigValid2)
 
 	validBody, _ := json.Marshal(map[string]interface{}{
 		"endpoint_id":   endpointID,
 		"kind":          response.ActionKindForensicCollect,
 		"payload_json":  string(payloadBytes),
-		"session_id":    session.SessionID,
 		"action_digest": realDigest,
-		"proof":         proofValid2,
 	})
 
 	reqStrip := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(validBody))
@@ -382,27 +321,11 @@ func TestServer_WindowsDiagnosticForensicFlow(t *testing.T) {
 
 	tenantID := "default"
 	endpointID := "win-desktop-01"
-	opID := "admin"
 
 	// 1. Initialize tenant response key
 	_, _, err := auth.GetOrCreateTenantKey(tenantID)
 	if err != nil {
 		t.Fatalf("GetOrCreateTenantKey failed: %v", err)
-	}
-
-	// 2. Unlock response session
-	secret, err := auth.EnrollTOTP(tenantID, opID)
-	if err != nil {
-		t.Fatalf("EnrollTOTP failed: %v", err)
-	}
-
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	now := time.Now()
-	code, _ := responseauth.GenerateTOTPCode(secret, now)
-
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "win-test-sess", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
 	}
 
 	// 3. Windows endpoint generates dedicated Ed25519 evidence keypair
@@ -448,18 +371,6 @@ func TestServer_WindowsDiagnosticForensicFlow(t *testing.T) {
 		t.Fatalf("ComputeActionDigest failed: %v", err)
 	}
 
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindForensicCollect,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       now.Unix(),
-		Nonce:           "win-proof-nonce-1",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
 	consoleToken, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: "admin"}, "test-admin-key-12345", 12*time.Hour)
 
 	createBody, _ := json.Marshal(map[string]interface{}{
@@ -467,9 +378,7 @@ func TestServer_WindowsDiagnosticForensicFlow(t *testing.T) {
 		"kind":            response.ActionKindForensicCollect,
 		"payload_json":    `{"profile":"diagnostic","max_bytes":5242880,"timeout_seconds":60}`,
 		"idempotency_key": "win-idemp-01",
-		"session_id":      session.SessionID,
 		"action_digest":   actionDigest,
-		"proof":           proof,
 	})
 
 	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(createBody))
@@ -625,27 +534,11 @@ func TestServer_LiveVolatileForensicFlow(t *testing.T) {
 
 	tenantID := "default"
 	endpointID := "linux-srv-01"
-	opID := "admin"
 
 	// 1. Initialize tenant response key
 	_, _, err := auth.GetOrCreateTenantKey(tenantID)
 	if err != nil {
 		t.Fatalf("GetOrCreateTenantKey failed: %v", err)
-	}
-
-	// 2. Unlock response session
-	secret, err := auth.EnrollTOTP(tenantID, opID)
-	if err != nil {
-		t.Fatalf("EnrollTOTP failed: %v", err)
-	}
-
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	now := time.Now()
-	code, _ := responseauth.GenerateTOTPCode(secret, now)
-
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "volatile-test-sess", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
 	}
 
 	// 3. Endpoint generates dedicated Ed25519 evidence keypair
@@ -691,18 +584,6 @@ func TestServer_LiveVolatileForensicFlow(t *testing.T) {
 		t.Fatalf("ComputeActionDigest failed: %v", err)
 	}
 
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindForensicCollect,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       now.Unix(),
-		Nonce:           "volatile-proof-nonce-1",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
 	consoleToken, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: "admin"}, "test-admin-key-12345", 12*time.Hour)
 
 	createBody, _ := json.Marshal(map[string]interface{}{
@@ -710,9 +591,7 @@ func TestServer_LiveVolatileForensicFlow(t *testing.T) {
 		"kind":            response.ActionKindForensicCollect,
 		"payload_json":    `{"profile":"live_volatile","max_bytes":5242880,"timeout_seconds":60}`,
 		"idempotency_key": "test-idemp-1",
-		"session_id":      session.SessionID,
 		"action_digest":   actionDigest,
-		"proof":           proof,
 	})
 
 	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(createBody))
@@ -937,27 +816,11 @@ func TestServer_IRStandardForensicFlow(t *testing.T) {
 
 	tenantID := "default"
 	endpointID := "linux-srv-02"
-	opID := "admin"
 
 	// 1. Initialize tenant response key
 	_, _, err := auth.GetOrCreateTenantKey(tenantID)
 	if err != nil {
 		t.Fatalf("GetOrCreateTenantKey failed: %v", err)
-	}
-
-	// 2. Unlock response session
-	secret, err := auth.EnrollTOTP(tenantID, opID)
-	if err != nil {
-		t.Fatalf("EnrollTOTP failed: %v", err)
-	}
-
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	now := time.Now()
-	code, _ := responseauth.GenerateTOTPCode(secret, now)
-
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "ir-test-sess", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
 	}
 
 	// 3. Endpoint generates dedicated Ed25519 evidence keypair
@@ -1003,18 +866,6 @@ func TestServer_IRStandardForensicFlow(t *testing.T) {
 		t.Fatalf("ComputeActionDigest failed: %v", err)
 	}
 
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindForensicCollect,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       now.Unix(),
-		Nonce:           "ir-proof-nonce-1",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
 	consoleToken, _ := hubauth.GenerateJWT(hubauth.Claims{Username: "admin", Role: "admin"}, "test-admin-key-12345", 12*time.Hour)
 
 	createBody, _ := json.Marshal(map[string]interface{}{
@@ -1022,9 +873,7 @@ func TestServer_IRStandardForensicFlow(t *testing.T) {
 		"kind":            response.ActionKindForensicCollect,
 		"payload_json":    `{"profile":"ir_standard","max_bytes":10485760,"timeout_seconds":120}`,
 		"idempotency_key": "test-idemp-2",
-		"session_id":      session.SessionID,
 		"action_digest":   actionDigest,
-		"proof":           proof,
 	})
 
 	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/response/jobs", bytes.NewReader(createBody))
@@ -1270,5 +1119,49 @@ func TestServer_IRStandardForensicFlow(t *testing.T) {
 	}
 	if len(archiveFiles[filepath.Join(bundleID, "receipt.json")]) == 0 {
 		t.Fatalf("expected receipt.json in archive")
+	}
+}
+
+// Signing routes a console session reaches are for admins: an analyst gets no
+// root script or collection, and this route signs forensic collection only.
+func TestServer_ResponseRoutesRefuseAnalystsAndOtherKinds(t *testing.T) {
+	t.Parallel()
+	srv, store, _, cleanup := setupTestServerWithResponse(t)
+	defer cleanup()
+	_ = store.UpsertEndpoint(storage.Endpoint{ID: "ep-a", Hostname: "a", OS: "linux", TenantID: "default"})
+	handler := srv.Handler()
+
+	post := func(role, path string, body map[string]interface{}) *httptest.ResponseRecorder {
+		t.Helper()
+		token, err := hubauth.GenerateJWT(hubauth.Claims{Username: "person", Role: role, TenantID: "default"}, "test-admin-key-12345", time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+		req.AddCookie(&http.Cookie{Name: "ominull_console", Value: token})
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	script := map[string]interface{}{"endpoint_id": "ep-a", "kind": response.ActionKindScriptExec, "payload_json": `{"source":"id"}`}
+	collect := map[string]interface{}{"endpoint_id": "ep-a", "kind": response.ActionKindForensicCollect, "payload_json": `{"profile":"diagnostic","max_bytes":5242880,"timeout_seconds":60}`}
+	for name, w := range map[string]*httptest.ResponseRecorder{
+		"analyst script job":   post(hubauth.RoleAnalyst, "/api/v1/response/jobs", script),
+		"analyst collection":   post(hubauth.RoleAnalyst, "/api/v1/response/jobs", collect),
+		"analyst script run":   post(hubauth.RoleAnalyst, "/api/v1/scripts/run", map[string]interface{}{"script_id": "s", "version": 1, "endpoint_id": "ep-a"}),
+		"analyst new script":   post(hubauth.RoleAnalyst, "/api/v1/scripts", map[string]interface{}{"name": "x.sh", "interpreter": "/bin/sh", "source": "id\n"}),
+		"analyst new schedule": post(hubauth.RoleAnalyst, "/api/v1/scripts/schedules", map[string]interface{}{"script_id": "s", "version": 1}),
+	} {
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s: got %d, want 403: %s", name, w.Code, w.Body.String())
+		}
+	}
+	if w := post(hubauth.RoleAdmin, "/api/v1/response/jobs", script); w.Code != http.StatusBadRequest {
+		t.Errorf("a script job on the collection route: got %d, want 400: %s", w.Code, w.Body.String())
+	}
+	if w := post(hubauth.RoleAdmin, "/api/v1/response/jobs", collect); w.Code != http.StatusCreated {
+		t.Errorf("an admin's collection: got %d, want 201: %s", w.Code, w.Body.String())
 	}
 }

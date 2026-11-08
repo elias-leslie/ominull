@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 	"ominull/hub/pkg/storage"
 )
@@ -106,7 +106,7 @@ func TestPackageRunsAreAuthorized(t *testing.T) {
 		Grant   response.EndpointGrant `json:"grant"`
 		Payload string                 `json:"payload"`
 	}
-	if err := json.Unmarshal([]byte(job.RequestJSON), &req); err != nil || req.Grant.ActionDigest != responseauth.ItemDigest(req.Payload) {
+	if err := json.Unmarshal([]byte(job.RequestJSON), &req); err != nil || req.Grant.ActionDigest != grants.ItemDigest(req.Payload) {
 		t.Fatalf("the job's grant must bind its own payload: %v %+v", err, req.Grant)
 	}
 
@@ -133,14 +133,14 @@ func TestPackageRunsAreAuthorized(t *testing.T) {
 }
 
 // refusingAuthority answers every authorization with a refusal.
-type refusingAuthority struct{ responseauth.Client }
+type refusingAuthority struct{ grants.Client }
 
-func (refusingAuthority) Authorize(context.Context, *responseauth.AuthorizeInput) (*responseauth.Authorization, error) {
+func (refusingAuthority) Authorize(context.Context, *grants.AuthorizeInput) (*grants.Authorization, error) {
 	return nil, errors.New("not today")
 }
 
 // The schedule runs effective settings: enabling a package runs it at once;
-// changed settings run signed with the new setting; a run the authority
+// changed settings run signed with the new setting; a run the hub
 // cannot sign shows as a block with its reason and is tried again; a category
 // switch turns a package off.
 func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
@@ -228,21 +228,21 @@ func TestMaintenanceScheduleRunsEffectiveSettings(t *testing.T) {
 	}
 	later := now.Add(25 * time.Hour)
 	online(later)
-	// The authority refuses the run for a pass: it is blocked with the
+	// The hub refuses the run for a pass: it is blocked with the
 	// reason, shows on the board, and nothing is dispatched.
-	srv.SetResponseAuth(refusingAuthority{Client: responseauth.NewInProcessClient(owner.auth)})
+	srv.SetResponseAuth(refusingAuthority{Client: grants.NewClient(owner.auth)})
 	srv.runMaintenanceSchedules(later)
 	blocks := srv.maintBlocks.list()
-	if countJobs() != 1 || len(blocks) != 1 || !strings.Contains(blocks[0].Reason, "the authority did not sign this run: not today") {
-		t.Fatalf("a run the authority cannot sign should block with its reason: %d jobs %+v", countJobs(), blocks)
+	if countJobs() != 1 || len(blocks) != 1 || !strings.Contains(blocks[0].Reason, "the hub did not sign this run: not today") {
+		t.Fatalf("a run the hub cannot sign should block with its reason: %d jobs %+v", countJobs(), blocks)
 	}
 	findings, err := srv.maintenanceFindings(later)
 	if err != nil || len(findings) != 2 || findings[1].SeverityID != ocsfSevMedium {
 		t.Fatalf("a blocked run should show on the board: %v %+v", err, findings)
 	}
-	// The authority is back: the next pass signs and dispatches at once, with
+	// The hub is back: the next pass signs and dispatches at once, with
 	// the changed setting, and the block is gone.
-	srv.SetResponseAuth(responseauth.NewInProcessClient(owner.auth))
+	srv.SetResponseAuth(grants.NewClient(owner.auth))
 	online(later.Add(2 * time.Minute))
 	srv.runMaintenanceSchedules(later.Add(2 * time.Minute))
 	if n := countJobs(); n != 2 {

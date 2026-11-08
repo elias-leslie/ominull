@@ -27,18 +27,16 @@ func pemOf(t *testing.T, k *ecdsa.PrivateKey) string {
 
 // The pinned release key lists the routine keys; agents get the list in the
 // heartbeat; a release signed with a routine key rolls out canaries first
-// (the authority signs a staged one at once), and retiring it halts the rollout, drops its queued updates and refuses to
+// (the hub signs a staged one at once), and retiring it halts the rollout, drops its queued updates and refuses to
 // roll it again.
 func TestRoutineKeysSignedReleaseRollsStaged(t *testing.T) {
 	s, db := setupTestServer(t)
 	defer db.Close()
-	auth := authorityOf(t, s).auth
 	rel, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	routine, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	s.trust.mu.Lock()
 	s.trust.releasePub = []byte(pemOf(t, rel))
 	s.trust.mu.Unlock()
-	auth.SetReleaseKey([]byte(pemOf(t, rel)))
 	call := func(method, path, body string) (int, map[string]any) {
 		t.Helper()
 		r := httptest.NewRequest(method, path, strings.NewReader(body))

@@ -48,17 +48,20 @@ PUBLISHED = "artifact.json"
 RECIPIENT = re.compile(r"age1[0-9a-z]{58}")
 
 # Selected by prefix, so a key added later under these trees is covered too.
-SECRET_PREFIXES = ("var/lib/ominull-response-authority/", "etc/ominull/", "var/lib/ominull/evidence/")
+# The retired signer's state still holds private keys until it is removed.
+SECRET_PREFIXES = ("var/lib/ominull/grants/", "var/lib/ominull-response-authority/", "etc/ominull/", "var/lib/ominull/evidence/")
 SECRET_FILES = {"var/lib/ominull/evidence.key"}
 KEY_FILE_DIR = "opt/ominull/bin/certs/"
 
 BULK_REQUIRED = {"var/lib/ominull/ominull.db", "opt/ominull/bin/certs/ca.crt", "opt/ominull/bin/certs/server.crt"}
 SECRET_REQUIRED = {"var/lib/ominull/evidence.key", "var/lib/ominull/evidence/receipt.key",
-                   "var/lib/ominull-response-authority/authority.db",
-                   "var/lib/ominull-response-authority/secret.key",
+                   "var/lib/ominull/grants/keys/default.key",
+                   "var/lib/ominull/grants/keys/default#auto-isolate.key",
+                   "var/lib/ominull/grants/keys/default#policy.key",
+                   "var/lib/ominull/grants/trust_epochs.json",
                    "opt/ominull/bin/certs/ca.key", "opt/ominull/bin/certs/server.key",
-                   "etc/ominull/hub.env", "etc/ominull/response-authority.env", "etc/ominull/admin.key"}
-OPTIONAL_WAL = {"var/lib/ominull/ominull.db-wal", "var/lib/ominull-response-authority/authority.db-wal"}
+                   "etc/ominull/hub.env", "etc/ominull/admin.key"}
+OPTIONAL_WAL = {"var/lib/ominull/ominull.db-wal"}
 
 
 class Refused(Exception):
@@ -190,7 +193,7 @@ def scan(archive):
     with tarfile.open(archive, "r:") as tar:
         for member in tar:
             path = member_path(member.name)
-            # A name like var/lib/ominull/../ominull-response-authority/x would
+            # A name like var/lib/ominull/x/../grants/y would
             # slip past the prefix test, so only canonical names are accepted.
             need(path == "" or (posixpath.normpath(path) == path and not path.startswith(("/", "../"))
                                 and path != ".."), "member name is not canonical: " + member.name)

@@ -216,7 +216,7 @@ func TestOneOffScript(t *testing.T) {
 	}
 	if !strings.Contains(words[0], "Run a one-off script") || !strings.Contains(words[0], `One-off script "list processes"`) ||
 		!strings.Contains(words[0], "2 lines of PowerShell") || !strings.Contains(words[0], "Why: find what holds the uninstaller") {
-		t.Fatalf("the authority's words: %s", words[0])
+		t.Fatalf("the hub's words: %s", words[0])
 	}
 	job, _ := srv.responseStore.GetJob("default", run.Jobs[0].JobID)
 	p, ok := scriptJobPayload(job)

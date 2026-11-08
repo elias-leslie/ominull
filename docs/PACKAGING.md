@@ -58,7 +58,7 @@ pinned release key (`GET /api/v1/trust/routine-keys`). It verifies every
 signature against that routine key and writes the signed list to
 `dist/routine-keys.json`. Such a release
 rolls out canaries first (`OMINULL_ROUTINE_CANARIES`, default the lab VM), and
-the hub and the authority refuse a routine-signed rollout without canaries.
+the hub refuses a routine-signed rollout without canaries.
 Agents from 1.8.89 accept routine keys for agent packages only.
 
 Inside the owner's work session:

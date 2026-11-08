@@ -24,11 +24,10 @@ func limitsCall(srv *Server, method, body string) *httptest.ResponseRecorder {
 }
 
 type limitsView struct {
-	Limits     terminalLimitsJSON `json:"limits"`
-	Defaults   terminalLimitsJSON `json:"defaults"`
-	Saved      bool               `json:"saved"`
-	Changed    bool               `json:"changed"`
-	ApprovalID string             `json:"approval_id"`
+	Limits   terminalLimitsJSON `json:"limits"`
+	Defaults terminalLimitsJSON `json:"defaults"`
+	Saved    bool               `json:"saved"`
+	Changed  bool               `json:"changed"`
 }
 
 func mustLimits(t *testing.T, w *httptest.ResponseRecorder) limitsView {
@@ -111,7 +110,7 @@ func TestLoweringTerminalLimitsAppliesAtOnce(t *testing.T) {
 		t.Fatal("the manager kept the old session length")
 	}
 	notes := limitNotes(t, store)
-	if len(notes) != 1 || !strings.Contains(notes[0].Details, "lowered: Remote shell: sessions run up to 2 hours (was 4 hours); 4 open in all (was 8)") {
+	if len(notes) != 1 || !strings.Contains(notes[0].Details, "changed: Remote shell: sessions run up to 2 hours (was 4 hours); 4 open in all (was 8)") {
 		t.Fatalf("notes = %+v", notes)
 	}
 	// A restart applies the startup flags, then the saved limits over them.
@@ -124,38 +123,9 @@ func TestLoweringTerminalLimitsAppliesAtOnce(t *testing.T) {
 	if v.Defaults.MaxDurationSeconds != 3*3600 || v.Defaults.IdleTimeoutSeconds != 1200 {
 		t.Fatalf("startup defaults = %+v", v.Defaults)
 	}
-	// Saving the same values again changes nothing and signs nothing.
+	// Saving the same values again changes nothing.
 	if v := mustLimits(t, limitsCall(srv, http.MethodPut, `{"max_duration_seconds":7200}`)); v.Changed {
 		t.Fatal("an unchanged save counted as a change")
-	}
-}
-
-// Raising a limit is signed at once and audited in plain words: the first
-// request applies it, with the authorization id and what changed.
-func TestRaisingTerminalLimitsIsAuthorizedAtOnce(t *testing.T) {
-	t.Parallel()
-	srv, store, _, cleanup := setupTestServerWithResponse(t)
-	defer cleanup()
-	body := `{"max_duration_seconds":21600,"max_per_endpoint":2}`
-	v := mustLimits(t, limitsCall(srv, http.MethodPut, body))
-	if v.ApprovalID == "" || v.Limits.MaxDurationSeconds != 21600 || srv.terminalMgr.MaxDuration() != 6*time.Hour {
-		t.Fatalf("raise = %+v", v)
-	}
-	if !authorizedAuditHas(t, store, terminalLimitsTarget, v.ApprovalID, "Remote shell: sessions run up to 6 hours (was 4 hours); 2 open per endpoint (was 3)") {
-		t.Fatalf("no ACTION_AUTHORIZED row for the raise: %+v", authorizedAudit(t, store))
-	}
-	notes := limitNotes(t, store)
-	if len(notes) != 1 || !strings.Contains(notes[0].Details, "raised") || !strings.Contains(notes[0].Details, v.ApprovalID) {
-		t.Fatalf("notes = %+v", notes)
-	}
-	// Going back to the startup defaults shortens sessions but allows a third
-	// per endpoint again: a change with any raise is signed too.
-	v = mustLimits(t, limitsCall(srv, http.MethodPut, `{"reset":true}`))
-	if v.ApprovalID == "" || v.Saved || v.Limits != limitsJSON(terminal.DefaultLimits()) {
-		t.Fatalf("reset = %+v", v)
-	}
-	if got := len(authorizedAudit(t, store)); got != 2 {
-		t.Fatalf("authorizations = %d, want 2", got)
 	}
 }
 

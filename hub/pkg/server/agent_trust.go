@@ -1,6 +1,6 @@
 package server
 
-// Agent trust, hub side. The hub carries the response authority's signed
+// Agent trust, hub side. The hub carries signed
 // statements to agents and no longer decides what an agent does to itself:
 //
 //   - the three public keys an agent pins (response, auto-isolate, policy),
@@ -32,8 +32,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
 )
 
@@ -62,6 +62,13 @@ type agentTrustCache struct {
 }
 
 func trustBundleSettingKey(tenantID string) string { return "trust_bundle:" + tenantID }
+
+// HasSignedTrustBundle says the owner signed a bundle for the tenant, so agents
+// may pin its keys. A setting that cannot be read counts as signed.
+func HasSignedTrustBundle(store *storage.Store, tenantID string) bool {
+	raw, err := store.GetSetting(trustBundleSettingKey(tenantID))
+	return err != nil || raw != ""
+}
 
 // storedBundle is the owner's signature over a tenant's trust statement.
 type storedBundle struct {
@@ -113,12 +120,12 @@ func (s *Server) trustKeys(ctx context.Context, tenantID string) *response.Trust
 	}
 	k.TenantID = tenantID
 	// A stored signature is used only while it still covers these exact keys
-	// at the authority's current epoch.
+	// at the hub's current epoch.
 	if b, ok := s.loadBundle(tenantID); ok {
 		if b.Epoch == k.Epoch && s.verifyTrustBundle(k, b.Signature) == nil {
 			k.BundleSig = b.Signature
 		} else {
-			log.Printf("[!] the trust bundle signature for tenant %q no longer matches the authority's keys; sign it again", tenantID)
+			log.Printf("[!] the trust bundle signature for tenant %q no longer matches the hub's keys; sign it again", tenantID)
 		}
 	}
 	c.mu.Lock()
@@ -145,8 +152,8 @@ func (s *Server) verifyTrustBundle(k *response.TrustKeys, sigB64 string) error {
 	return response.VerifyReleaseSignature(s.releasePublicKey(), []byte(response.TrustBundleStatement(k)), der)
 }
 
-// endpointManifest returns the endpoint's manifest, asking the authority on a
-// cache miss. profile "" keeps whatever the authority holds; a narrower
+// endpointManifest returns the endpoint's manifest, asking the hub on a
+// cache miss. profile "" keeps whatever the hub holds; a narrower
 // profile than the current one is signed without an approval.
 func (s *Server) endpointManifest(ctx context.Context, tenantID, endpointID, profile string, refresh bool) *response.CapabilityManifest {
 	if s.responseAuth == nil {
@@ -160,7 +167,7 @@ func (s *Server) endpointManifest(ctx context.Context, tenantID, endpointID, pro
 	if ok && !refresh && m.MatchesProfile() && (profile == "" || !response.ProfileNarrows(m.Profile, profile)) {
 		return m
 	}
-	m, err := s.responseAuth.EndpointManifest(ctx, &responseauth.ManifestRequest{TenantID: tenantID, EndpointID: endpointID, Profile: profile})
+	m, err := s.responseAuth.EndpointManifest(ctx, &grants.ManifestRequest{TenantID: tenantID, EndpointID: endpointID, Profile: profile})
 	if err != nil {
 		log.Printf("[!] capability manifest for %s unavailable: %v", endpointID, err)
 		return nil
@@ -178,7 +185,7 @@ func knownProfile(p string) bool {
 
 // monitorOnlyClamp is the profile a monitor-only host is held to: monitor,
 // unless its manifest is already a profile that adds no isolation
-// (monitor-scripts, which the authority signed), which then stands.
+// (monitor-scripts, which the hub signed), which then stands.
 func (s *Server) monitorOnlyClamp(endpointID, reported string) string {
 	s.trust.mu.Lock()
 	s.trust.init()
@@ -274,8 +281,7 @@ func (s *Server) addTrustControl(ctx context.Context, resp map[string]interface{
 // ------------------------------------------------------------- trust bundle
 
 // handleTrustStatement shows what the release key has to sign for a tenant's
-// agents to pin its authority keys. The owner compares it with the statement
-// read on the authority's own host before signing (sign-trust-bundle.sh).
+// agents to pin its keys (sign-trust-bundle.sh).
 func (s *Server) handleTrustStatement(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -291,10 +297,9 @@ func (s *Server) handleTrustStatement(w http.ResponseWriter, r *http.Request) {
 	}
 	k := s.freshTrustKeys(r.Context(), tenantID)
 	if k == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "the response authority has no keys for this tenant")
+		writeJSONError(w, http.StatusServiceUnavailable, "the hub has no keys for this tenant")
 		return
 	}
-	// The epoch is the authority's; the hub never chooses it.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"tenant_id": tenantID, "epoch": k.Epoch, "statement": response.TrustBundleStatement(k), "signed": k.BundleSig != "",
 	})
@@ -302,7 +307,7 @@ func (s *Server) handleTrustStatement(w http.ResponseWriter, r *http.Request) {
 
 // handleTrustBundle stores the release key's signature over a tenant's trust
 // statement. Anyone holding an admin key may post one; only a signature by
-// the release key is kept, and only for the keys the authority holds now.
+// the release key is kept, and only for the keys the hub holds now.
 func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -329,11 +334,11 @@ func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
 
 	k := s.freshTrustKeys(r.Context(), req.TenantID)
 	if k == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "the response authority has no keys for this tenant")
+		writeJSONError(w, http.StatusServiceUnavailable, "the hub has no keys for this tenant")
 		return
 	}
 	if req.Epoch != k.Epoch {
-		writeJSONError(w, http.StatusConflict, fmt.Sprintf("the authority's trust epoch is %d, not %d", k.Epoch, req.Epoch))
+		writeJSONError(w, http.StatusConflict, fmt.Sprintf("the hub's trust epoch is %d, not %d", k.Epoch, req.Epoch))
 		return
 	}
 	if err := s.verifyTrustBundle(k, strings.TrimSpace(req.Signature)); err != nil {
@@ -571,7 +576,7 @@ func (s *Server) keepApprovalGrants(route string, kind response.ActionKind, payl
 	return ids, nil
 }
 
-// signDetectorIsolation asks the authority for the detector's narrow,
+// signDetectorIsolation asks the hub for the detector's narrow,
 // rate-limited isolation grant. Without one a grant-verifying agent stays
 // connected: the hub's record says isolated, the agent's report says not,
 // and the fleet trust view shows the difference.
@@ -587,11 +592,11 @@ func (s *Server) signDetectorIsolation(endpointID, reason string) {
 		log.Printf("[!] detector isolation of %s: %v", endpointID, err)
 		baselines = nil
 	}
-	g, err := s.responseAuth.SignAutoIsolation(ctx, &responseauth.AutoIsolateRequest{TenantID: endpointTenant(ep), EndpointID: endpointID, Reason: reason, Baselines: baselines})
+	g, err := s.responseAuth.SignAutoIsolation(ctx, &grants.AutoIsolateRequest{TenantID: endpointTenant(ep), EndpointID: endpointID, Reason: reason, Baselines: baselines})
 	if err != nil {
 		_ = s.store.RecordAudit(storage.AuditEntry{
 			ID: uuid.New().String(), Username: "detector", Action: "AUTO_ISOLATE_UNSIGNED", Resource: endpointID,
-			Details: "the response authority did not sign the detector's isolation (" + err.Error() + "); agents from " +
+			Details: "the hub did not sign the detector's isolation (" + err.Error() + "); agents from " +
 				grantVerifyingAgentVersion + " stay connected until an owner isolates", Timestamp: time.Now().UTC(),
 		})
 		return
@@ -689,7 +694,7 @@ func decodeCapabilityRequest(w http.ResponseWriter, body []byte) (capabilityRequ
 	return req, true
 }
 
-// resolveCapabilities describes a manifest change for the authority.
+// resolveCapabilities describes a manifest change for the hub.
 func (s *Server) resolveCapabilities(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	if r.Header.Get("X-Role") != "admin" {
 		writeJSONError(w, http.StatusForbidden, "admin role required")
@@ -705,7 +710,7 @@ func (s *Server) resolveCapabilities(w http.ResponseWriter, r *http.Request, bod
 		Targets: []string{req.EndpointID}}, true
 }
 
-// handleEndpointCapabilities runs after the authority authorized it: it has
+// handleEndpointCapabilities runs after the hub authorized it: it has
 // already signed the new manifest.
 func (s *Server) handleEndpointCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -727,7 +732,7 @@ func (s *Server) handleEndpointCapabilities(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusNotFound, "no such endpoint")
 		return
 	}
-	// The authority signed the new manifest when the approval was consumed.
+	// The hub signed the new manifest when the approval was consumed.
 	// The hub's monitor-only setting is lifted only through allow-isolation (at
 	// its revision), so while it stands it narrows the manifest straight back.
 	m := s.endpointManifest(r.Context(), endpointTenant(ep), req.EndpointID, "", true)
@@ -746,7 +751,7 @@ func (s *Server) handleEndpointCapabilities(w http.ResponseWriter, r *http.Reque
 }
 
 // afterProfileChange keeps the manifest in step with the hub's monitor-only
-// verdict: narrowing is signed at once; a raise was signed by the authority
+// verdict: narrowing is signed at once; a raise was signed by the hub
 // when the authorization was granted and only needs re-reading.
 func (s *Server) afterProfileChange(ctx context.Context, endpointID string) {
 	ep, err := s.store.GetEndpoint(endpointID)

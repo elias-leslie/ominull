@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ominull/hub/pkg/configuration"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/server"
 	"ominull/hub/pkg/setup"
 	"ominull/hub/pkg/storage"
@@ -192,6 +193,25 @@ func main() {
 
 	srv := server.New(store, resolvedAdminKey, absBinDir, *hubURL, resolvedAgentVersion)
 	srv.SetBuild(version)
+	grantStateDir := os.Getenv("OMINULL_GRANT_STATE_DIR")
+	if grantStateDir == "" {
+		grantStateDir = filepath.Join(filepath.Dir(*dbPath), "grants")
+	}
+	// After a state restore, raise the epoch floor above what agents have seen.
+	var epochFloor int64
+	if v := strings.TrimSpace(os.Getenv("OMINULL_GRANT_TRUST_EPOCH_FLOOR")); v != "" {
+		if epochFloor, err = strconv.ParseInt(v, 10, 64); err != nil || epochFloor < 0 {
+			log.Fatalf("[-] OMINULL_GRANT_TRUST_EPOCH_FLOOR %q is not a whole number", v)
+		}
+	}
+	// A hub that cannot sign does not start: otherwise detector isolations and
+	// scheduled runs stop with one log line. A failed deploy swaps back on this.
+	signer, err := grants.Open(grants.Config{StateDir: grantStateDir, TrustEpochFloor: epochFloor, RequireKeys: server.HasSignedTrustBundle(store, "default")})
+	if err != nil {
+		log.Fatalf("[-] Grant signer: %v", err)
+	}
+	srv.SetResponseAuth(grants.NewClient(signer))
+	log.Printf("[+] Grant signer: %s", grantStateDir)
 	if version != "" {
 		log.Printf("[*] Hub build %s, offering agent %s", version, resolvedAgentVersion)
 	}

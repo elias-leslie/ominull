@@ -1,4 +1,4 @@
-package responseauth
+package grants
 
 import (
 	"bytes"
@@ -14,12 +14,11 @@ import (
 	"ominull/hub/pkg/response"
 )
 
-// The authority words what it signs; the hub does not. The hub
-// sends a typed payload (the route it will run, the canonical body and the
-// targets, or the terminal's own action payload); the authority works out the
-// action name and the summary from that payload alone, so a compromised hub
-// cannot show "Release isolation" over a payload that isolates. The hub's own
-// action and summary text are ignored.
+// The action name and summary come from the typed payload alone (the route it
+// will run, the canonical body and the targets, or the terminal's own action
+// payload), so the audit cannot show "Release isolation" over a payload that
+// isolates through a handler's mistake. Any action or summary text the caller
+// passes is ignored.
 
 type routedPayload struct {
 	Route   string          `json:"route"`
@@ -106,7 +105,7 @@ func listTargets(t []string) string {
 	return strings.Join(t[:show], ", ") + fmt.Sprintf(" and %d more", len(t)-show)
 }
 
-// maxTerminalSessionSeconds is the longest session length the authority will
+// maxTerminalSessionSeconds is the longest session length the hub will
 // show; the hub's own bound is the same (terminal.LimitBounds).
 const maxTerminalSessionSeconds = 24 * 60 * 60
 
@@ -217,10 +216,6 @@ func describeScreen(payload []byte, targets []string, requester string, seconds 
 		claim := AgentClaim(label)
 		who = strings.ToUpper(claim[:1]) + claim[1:] + " (admin key)"
 	}
-	if IsStewardRequester(requester) {
-		// The steward key is its own credential, not a self-declared label.
-		agent, who = true, "Nightshift's steward (steward key)"
-	}
 	var action, summary string
 	switch {
 	case p.Mode == response.ScreenModeControl && agent:
@@ -281,9 +276,6 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 		return describeScreen(payload, targets, requester, 0, false, "")
 	}
 
-	if kind == ActionKindDetection {
-		return describeDetectionPolicy(payload, targets)
-	}
 	if kind == response.ActionKindScriptExec {
 		return describePackageRun(payload, targets)
 	}
@@ -307,7 +299,7 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 	}
 	spec, ok := approvalRoutes[p.Route]
 	if !ok {
-		return "", "", fmt.Errorf("route %q is not an authority-signed action", cleanText(p.Route, 80))
+		return "", "", fmt.Errorf("route %q is not a signed action", cleanText(p.Route, 80))
 	}
 	if spec.kind != kind {
 		return "", "", fmt.Errorf("route %s does not match kind %s", p.Route, kind)
@@ -439,197 +431,7 @@ func describeApproval(kind response.ActionKind, payload []byte, targets []string
 	}
 }
 
-// detectionPolicyPayload is a loosening of the hub's detection policy: the
-// policy as it is saved now and as the change would save it. The digest binds
-// both, so a change approved against one saved policy cannot be spent once
-// that policy has changed.
-type detectionPolicyPayload struct {
-	Policy string          `json:"policy"`
-	Op     string          `json:"op"`
-	Before json.RawMessage `json:"before"`
-	After  json.RawMessage `json:"after"`
-	// Drill, when present, is the hub's floor drill run against the policy
-	// the change would save: the floor cases it would blind.
-	Drill *[]string `json:"drill"`
-}
-
-var detectionPolicyKeys = map[string]bool{"policy": true, "op": true, "before": true, "after": true, "drill": true}
-
-// drillLead is the floor drill's verdict, which opens the owner's statement:
-// the full form names the first two cases the change would blind, the short
-// form only counts them. The short form is used when the change itself leaves
-// no room for the full one; the change is never cut for it. The 10 MB burst
-// is not drilled under expected rules, which it yields to by design, so the
-// clean verdict says so.
-func drillLead(drill *[]string) (full, short string) {
-	if drill == nil {
-		return "", ""
-	}
-	cases := *drill
-	switch {
-	case len(cases) == 0:
-		return "floor drill: blinds no floor case (the 10 MB burst yields to expected rules)", "floor drill: blinds no floor case"
-	case len(cases) == 1 && cases[0] == "the drill could not run":
-		return "floor drill could not run: what this blinds is unknown", "floor drill could not run"
-	}
-	short = fmt.Sprintf("BLINDS %d FLOOR CASE", len(cases))
-	if len(cases) != 1 {
-		short += "S"
-	}
-	const show = 2
-	names := make([]string, 0, show)
-	for i, c := range cases {
-		if i == show {
-			break
-		}
-		names = append(names, cleanText(c, 72))
-	}
-	full = short + ": " + strings.Join(names, ", ")
-	if len(cases) > show {
-		full += fmt.Sprintf(" and %d more", len(cases)-show)
-	}
-	return full, short
-}
-
-// detectionPolicyOps names each change the hub can ask for, by policy.
-var detectionPolicyOps = map[string]map[string]string{
-	"detection_tuning": {
-		"save":          "Loosen detection tuning",
-		"reset":         "Restore shipped detection tuning",
-		"mark_expected": "Mark a finding expected",
-		"rule_save":     "Save an expected rule",
-	},
-	// The silence floor itself cannot be switched off, but each host's
-	// presence decides when its going quiet is reported, and a retired host
-	// is not watched at all.
-	"endpoint_watch": {
-		"presence": "Expect a host to go quiet",
-		"retire":   "Retire a host",
-	},
-	// A self-service enrolment window lets machines on its networks fetch an
-	// agent install with no credential until it expires or is used up.
-	// Closing one only tightens and asks nobody.
-	"enrolment_window": {
-		"open": "Open LAN self-enrolment",
-	},
-	// The hub's remote shell limits: session length, idle timeout and how
-	// many sessions may be open. Lowering them only tightens and asks nobody.
-	"terminal_limits": {
-		"raise": "Raise remote shell limits",
-	},
-	// Whether a screen session first asks the person at the keyboard, fleet
-	// wide or for one machine. Turning it on only tightens and asks nobody.
-	"screen_ask_first": {
-		"off": "Stop asking before screen sessions",
-	},
-	// Remote terminal and screen switched off on one machine. Switching it
-	// off only tightens and asks nobody.
-	"remote_access": {
-		"on": "Allow remote terminal and screen again",
-	},
-	// The software removal catalog: which programs a removal package may
-	// uninstall and how. Deleting an entry only tightens and asks nobody.
-	"software_catalog": {
-		"add":    "Add to the software removal catalog",
-		"change": "Change a software removal catalog entry",
-	},
-}
-
-// describeDetectionPolicy shows the owner the change field by field, worked
-// out from the before and after the digest covers.
-func describeDetectionPolicy(payload []byte, targets []string) (string, string, error) {
-	var top map[string]json.RawMessage
-	if err := decodeJSON(payload, &top); err != nil {
-		return "", "", errors.New("detection policy payload must carry policy, op, before and after")
-	}
-	for k := range top {
-		if !detectionPolicyKeys[k] {
-			return "", "", fmt.Errorf("detection policy payload carries an unknown member %q", cleanText(k, 40))
-		}
-	}
-	var p detectionPolicyPayload
-	if err := decodeJSON(payload, &p); err != nil {
-		return "", "", errors.New("detection policy payload must carry policy, op, before and after")
-	}
-	action, ok := detectionPolicyOps[p.Policy][p.Op]
-	if !ok {
-		return "", "", fmt.Errorf("%q %q is not a detection policy change", cleanText(p.Policy, 40), cleanText(p.Op, 40))
-	}
-	if p.Drill != nil && len(*p.Drill) > 256 {
-		return "", "", errors.New("detection policy drill lists more cases than a drill runs")
-	}
-	lead, leadShort := drillLead(p.Drill)
-	var before, after map[string]interface{}
-	if err := decodeJSON(p.After, &after); err != nil || after == nil {
-		return "", "", errors.New("detection policy payload must carry the policy after the change")
-	}
-	if b := bytes.TrimSpace(p.Before); len(b) > 0 && string(b) != "null" {
-		if err := decodeJSON(b, &before); err != nil || before == nil {
-			return "", "", errors.New("detection policy before must be an object or null")
-		}
-	}
-	if len(targets) != 1 {
-		return "", "", errors.New("a detection policy change names exactly one target")
-	}
-	if p.Policy == "detection_tuning" {
-		if targets[0] != "detection:tuning" || before == nil {
-			return "", "", errors.New("a tuning change targets detection:tuning and carries the saved tuning")
-		}
-		parts := policyDiff(before, after, func(string) bool { return true })
-		if len(parts) == 0 {
-			return "", "", errors.New("this tuning change changes nothing")
-		}
-		summary, err := fitLead(lead, leadShort, parts, nil)
-		return action, summary, err
-	}
-	if p.Policy == "endpoint_watch" {
-		// How closely the silence floor watches one host: before is the host
-		// as watched now, after as the change would leave it.
-		if !strings.HasPrefix(targets[0], "endpoint:") || before == nil || before["endpoint_id"] != targets[0][len("endpoint:"):] || after["endpoint_id"] != before["endpoint_id"] {
-			return "", "", errors.New("a watch change targets endpoint:<id> and carries the host as watched now")
-		}
-		parts := policyDiff(before, after, func(k string) bool { return !policyLabels[k] })
-		if len(parts) == 0 {
-			return "", "", errors.New("this watch change changes nothing")
-		}
-		host := "host " + policyValue(after["endpoint_id"])
-		if name, _ := after["hostname"].(string); name != "" && name != after["endpoint_id"] {
-			host += " (" + name + ")"
-		}
-		var labels []string
-		if reason, _ := after["reason"].(string); reason != "" {
-			labels = append(labels, "reason "+reason)
-		}
-		summary, err := fitParts(append([]string{host}, parts...), labels)
-		return action, summary, err
-	}
-	if p.Policy == "enrolment_window" {
-		return describeEnrolmentWindow(action, before, after, targets[0])
-	}
-	if p.Policy == "terminal_limits" {
-		if targets[0] != "terminal:limits" || before == nil {
-			return "", "", errors.New("a remote shell limits change targets terminal:limits and carries the limits in force")
-		}
-		summary, err := TerminalLimitsWording(before, after)
-		return action, summary, err
-	}
-	if p.Policy == "screen_ask_first" {
-		summary, err := ScreenAskFirstWording(targets[0], before, after)
-		return action, summary, err
-	}
-	if p.Policy == "remote_access" {
-		summary, err := RemoteAccessWording(targets[0], before, after)
-		return action, summary, err
-	}
-	if p.Policy == "software_catalog" {
-		summary, err := SoftwareCatalogWording(targets[0], before, after)
-		return action, summary, err
-	}
-	return "", "", errors.New("not a detection policy change")
-}
-
-// policyLabels are the fields that name or explain a policy entry without
-// changing what it matches.
+// policyLabels are the fields that name or explain a policy entry.
 var policyLabels = map[string]bool{"name": true, "reason": true}
 
 func sortedKeys(m map[string]interface{}) []string {
@@ -780,64 +582,6 @@ func fitParts(parts, labels []string) (string, error) {
 	return out, nil
 }
 
-// describeEnrolmentWindow shows a self-service enrolment window as the hub
-// would open it: which networks, for how long, how many installs, whether a
-// passcode is asked. The digest binds exactly these fields.
-func describeEnrolmentWindow(action string, before, after map[string]interface{}, target string) (string, string, error) {
-	hours, _ := after["hours"].(float64)
-	uses, _ := after["max_uses"].(float64)
-	passcode, okPass := after["passcode"].(bool)
-	raw, _ := after["cidrs"].([]interface{})
-	cidrs := make([]string, 0, len(raw))
-	for _, c := range raw {
-		if v, ok := c.(string); ok && v != "" {
-			cidrs = append(cidrs, v)
-		}
-	}
-	switch {
-	case before != nil:
-		return "", "", errors.New("opening an enrolment window carries no saved window")
-	case target != "enrolment:window":
-		return "", "", errors.New("an enrolment window targets enrolment:window")
-	case len(cidrs) == 0 || len(cidrs) != len(raw):
-		return "", "", errors.New("an enrolment window names its networks")
-	case hours <= 0 || hours > 168:
-		return "", "", errors.New("an enrolment window lasts more than 0 and at most 168 hours")
-	case uses < 0 || uses != float64(int(uses)) || !okPass:
-		return "", "", errors.New("an enrolment window carries max_uses and passcode")
-	}
-	for k := range after {
-		switch k {
-		case "label", "cidrs", "hours", "max_uses", "passcode", "tenant_id", "location_id", "role":
-		default:
-			return "", "", fmt.Errorf("enrolment window carries an unknown member %q", cleanText(k, 40))
-		}
-	}
-	budget := "no limit on installs"
-	if uses > 0 {
-		budget = fmt.Sprintf("at most %d installs", int(uses))
-	}
-	pass := "no passcode"
-	if passcode {
-		pass = "passcode required"
-	}
-	parts := []string{
-		"unauthenticated agent installs from " + strings.Join(cidrs, ", "),
-		fmt.Sprintf("for %s hours", strconv.FormatFloat(hours, 'f', -1, 64)), budget, pass,
-	}
-	for _, k := range []string{"tenant_id", "location_id", "role"} {
-		if v, _ := after[k].(string); v != "" {
-			parts = append(parts, k+" "+v)
-		}
-	}
-	var labels []string
-	if v, _ := after["label"].(string); v != "" {
-		labels = append(labels, "label "+v)
-	}
-	summary, err := fitParts(parts, labels)
-	return action, summary, err
-}
-
 // terminalLimitFields are the remote shell limits in the order the owner reads
 // them: the largest sane value, how a value is said, and the phrase around it.
 var terminalLimitFields = []struct {
@@ -854,7 +598,7 @@ var terminalLimitFields = []struct {
 
 // TerminalLimitsWording says what a change to the remote shell limits does,
 // one part per changed limit: "Remote shell: sessions run up to 4 hours (was
-// 1 hour)". The hub uses it for its audit row; the authority for the owner.
+// 1 hour)". The hub uses it for its audit row.
 func TerminalLimitsWording(before, after map[string]interface{}) (string, error) {
 	for _, m := range []map[string]interface{}{before, after} {
 		if len(m) != len(terminalLimitFields) {
@@ -922,8 +666,7 @@ func SoftwareCatalogWording(target string, before, after map[string]interface{})
 // does. before and after are {"scope", "ask_first"} plus an optional "host"
 // label: scope "fleet" (target screen:ask_first) is the default for machines
 // without their own setting, any other scope is one endpoint (target
-// screen:ask_first:<id>). The hub uses it for its audit row; the authority
-// for the owner.
+// screen:ask_first:<id>). The hub uses it for its audit row.
 func ScreenAskFirstWording(target string, before, after map[string]interface{}) (string, error) {
 	var scope string
 	var vals [2]bool
@@ -967,7 +710,7 @@ func ScreenAskFirstWording(target string, before, after map[string]interface{}) 
 // RemoteAccessWording says what a change to a machine's remote access
 // setting does. before and after are {"endpoint", "off"} plus an optional
 // "host" label; the target is remote_access:<endpoint>. The hub uses it for
-// its audit row; the authority for the owner.
+// its audit row; the hub for the owner.
 func RemoteAccessWording(target string, before, after map[string]interface{}) (string, error) {
 	var ep string
 	var vals [2]bool

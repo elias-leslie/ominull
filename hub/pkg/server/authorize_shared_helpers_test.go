@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/response"
 	"ominull/hub/pkg/storage"
 )
 
@@ -51,7 +51,7 @@ func seedOwnerSignedRelease(t *testing.T, dir, version string, key *ecdsa.Privat
 	for _, name := range []string{agentPackageName(version, "deb"), agentPackageName(version, "windows-native")} {
 		seedSignedRelease(t, dir, name)
 		sum := sha256.Sum256([]byte("package-bytes-for-" + name))
-		digest := sha256.Sum256([]byte(responseauth.ReleaseStatement(name, version, hex.EncodeToString(sum[:]))))
+		digest := sha256.Sum256([]byte(response.ReleaseStatement(name, version, hex.EncodeToString(sum[:]))))
 		sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
 		if err != nil {
 			t.Fatal(err)

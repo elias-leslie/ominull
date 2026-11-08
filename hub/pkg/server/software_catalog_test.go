@@ -23,10 +23,9 @@ func catalogCall(srv *Server, method, path, body string) *httptest.ResponseRecor
 }
 
 type catalogResp struct {
-	Entries    scripts.Catalog `json:"entries"`
-	Saved      bool            `json:"saved"`
-	Changed    bool            `json:"changed"`
-	ApprovalID string          `json:"approval_id"`
+	Entries scripts.Catalog `json:"entries"`
+	Saved   bool            `json:"saved"`
+	Changed bool            `json:"changed"`
 }
 
 func mustCatalog(t *testing.T, w *httptest.ResponseRecorder) catalogResp {
@@ -53,30 +52,26 @@ func TestSoftwareCatalogChanges(t *testing.T) {
 	}
 	add := `{"entry":{"id":"bloat-tool","name":"Bloat Tool","kind":"program","match":"Bloat Tool*","category":"adware","method":"registry","flag":"/S","risk":"safe"}}`
 	v = mustCatalog(t, catalogCall(srv, http.MethodPut, path, add))
-	if !v.Saved || !v.Changed || v.ApprovalID == "" || v.Entries.Find("bloat-tool") == nil {
+	if !v.Saved || !v.Changed || v.Entries.Find("bloat-tool") == nil {
 		t.Fatalf("first request: %+v", v)
 	}
-	if !authorizedAuditHas(t, store, "Software removal catalog: add Bloat Tool (adware; matches 'Bloat Tool*'; the program's own uninstaller /S)", v.ApprovalID) {
-		t.Fatalf("no ACTION_AUTHORIZED row for the added entry: %+v", authorizedAudit(t, store))
+	if !catalogAuditHas(t, store, "Software removal catalog: add Bloat Tool (adware; matches 'Bloat Tool*'; the program's own uninstaller /S)") {
+		t.Fatal("no audit row for the added entry")
 	}
-	// Renaming is not a loosening; widening the match is signed at once too.
-	if v := mustCatalog(t, catalogCall(srv, http.MethodPut, path, strings.Replace(add, `"Bloat Tool",`, `"Bloat Tool Suite",`, 1))); v.Entries.Find("bloat-tool").Name != "Bloat Tool Suite" || v.ApprovalID != "" {
-		t.Fatalf("a rename did not apply plainly: %+v", v)
+	// A rename and a wider match apply the same way.
+	if v := mustCatalog(t, catalogCall(srv, http.MethodPut, path, strings.Replace(add, `"Bloat Tool",`, `"Bloat Tool Suite",`, 1))); v.Entries.Find("bloat-tool").Name != "Bloat Tool Suite" {
+		t.Fatalf("a rename did not apply: %+v", v)
 	}
 	wide := strings.Replace(strings.Replace(add, `"Bloat Tool",`, `"Bloat Tool Suite",`, 1), `"Bloat Tool*"`, `"Bloat*"`, 1)
 	v = mustCatalog(t, catalogCall(srv, http.MethodPut, path, wide))
-	if v.Entries.Find("bloat-tool").Match != "Bloat*" || !authorizedAuditHas(t, store, "match Bloat Tool* -> Bloat*") {
+	if v.Entries.Find("bloat-tool").Match != "Bloat*" || !catalogAuditHas(t, store, "match Bloat Tool* -> Bloat*") {
 		t.Fatalf("widened match: %+v", v)
 	}
-	// Invalid entries are refused before anything is signed.
-	n := len(authorizedAudit(t, store))
+	// Invalid entries are refused.
 	if w := catalogCall(srv, http.MethodPut, path, strings.Replace(add, `"Bloat Tool*"`, `"**"`, 1)); w.Code != http.StatusBadRequest {
 		t.Fatalf("a match-everything entry: %d", w.Code)
 	}
-	if got := len(authorizedAudit(t, store)); got != n {
-		t.Fatalf("a refused entry was authorized: %d -> %d rows", n, got)
-	}
-	// Deleting tightens.
+	// Deleting applies.
 	if v := mustCatalog(t, catalogCall(srv, http.MethodDelete, path+"?id=xsplit", "")); v.Entries.Find("xsplit") != nil {
 		t.Fatal("delete did not apply")
 	}
@@ -124,4 +119,18 @@ func TestSoftwareRemovalRunCarriesTheCatalog(t *testing.T) {
 	if !authorizedAuditHas(t, store, "windows-software-removal (enforce)") {
 		t.Fatalf("enforce authorization: %+v", authorizedAudit(t, store))
 	}
+}
+
+func catalogAuditHas(t *testing.T, store *storage.Store, part string) bool {
+	t.Helper()
+	logs, err := store.ListAuditLogs("", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range logs {
+		if strings.Contains(l.Details, part) {
+			return true
+		}
+	}
+	return false
 }

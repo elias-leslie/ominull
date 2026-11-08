@@ -2,9 +2,6 @@ package server
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,7 +12,6 @@ import (
 
 	hubauth "ominull/hub/pkg/auth"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 	"ominull/hub/pkg/storage"
 )
@@ -64,15 +60,8 @@ func TestServer_ScriptsAPI(t *testing.T) {
 
 	// 2. Setup response session
 	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	browserPub, browserPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-script-sess", hex.EncodeToString(browserPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
-	}
 
-	// 3. Dispatch Script Run with signed ActionProof
+	// 3. Dispatch Script Run
 	actionPayload := response.ScriptExecPayload{
 		ScriptID:       createResp.Script.ID,
 		ScriptVersion:  1,
@@ -84,25 +73,11 @@ func TestServer_ScriptsAPI(t *testing.T) {
 	}
 	actionDigest, _ := response.ComputeActionDigest(actionPayload)
 
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindScriptExec,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "1122334455aabbcc",
-	}
-	sig := ed25519.Sign(browserPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
 	runBody, _ := json.Marshal(map[string]interface{}{
 		"script_id":     createResp.Script.ID,
 		"version":       1,
 		"endpoint_id":   endpointID,
-		"session_id":    session.SessionID,
 		"action_digest": actionDigest,
-		"proof":         proof,
 	})
 
 	// Gated: static API key must be rejected with 403 Forbidden
@@ -239,13 +214,6 @@ func TestServer_Scripts_TenantIsolation(t *testing.T) {
 
 	// 6. Tenant B attempts to execute Tenant A's script -> 404
 	_, _, _ = auth.GetOrCreateTenantKey(tenantB)
-	secretB, _ := auth.EnrollTOTP(tenantB, opB)
-	bPubB, bPrivB, _ := ed25519.GenerateKey(rand.Reader)
-	codeB, _ := responseauth.GenerateTOTPCode(secretB, time.Now())
-	sessionB, err := auth.UnlockSessionWithTOTP(tenantB, opB, "browser-b-sess", hex.EncodeToString(bPubB), codeB)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP for tenant B failed: %v", err)
-	}
 
 	actionPayload := response.ScriptExecPayload{
 		ScriptID:       scriptID,
@@ -258,25 +226,11 @@ func TestServer_Scripts_TenantIsolation(t *testing.T) {
 	}
 	actionDigest, _ := response.ComputeActionDigest(actionPayload)
 
-	proofB := &responseauth.ActionProof{
-		SessionID:       sessionB.SessionID,
-		TenantID:        tenantB,
-		ActionKind:      response.ActionKindScriptExec,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{epB},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "aabbccddeeff0011",
-	}
-	sigB := ed25519.Sign(bPrivB, proofB.CanonicalBytes())
-	proofB.Signature = hex.EncodeToString(sigB)
-
 	runBodyB, _ := json.Marshal(map[string]interface{}{
 		"script_id":     scriptID,
 		"version":       1,
 		"endpoint_id":   epB,
-		"session_id":    sessionB.SessionID,
 		"action_digest": actionDigest,
-		"proof":         proofB,
 	})
 	reqRunB := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/run", bytes.NewReader(runBodyB))
 	reqRunB.Header.Set("Authorization", "Bearer "+jwtB)
@@ -355,13 +309,6 @@ func TestServer_Scripts_ParameterValidation(t *testing.T) {
 
 	// Setup operator session
 	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	bPub, bPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-param-sess", hex.EncodeToString(bPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
-	}
 
 	jwtToken, _ := hubauth.GenerateJWT(hubauth.Claims{Username: opID, Role: hubauth.RoleAdmin, TenantID: tenantID}, "test-admin-key-12345", time.Hour)
 
@@ -428,26 +375,12 @@ func TestServer_Scripts_ParameterValidation(t *testing.T) {
 			}
 			actionDigest, _ := response.ComputeActionDigest(actionPayload)
 
-			proof := &responseauth.ActionProof{
-				SessionID:       session.SessionID,
-				TenantID:        tenantID,
-				ActionKind:      response.ActionKindScriptExec,
-				ActionDigest:    actionDigest,
-				TargetEndpoints: []string{endpointID},
-				Timestamp:       time.Now().Unix(),
-				Nonce:           fmt.Sprintf("nonce-%d", time.Now().UnixNano()),
-			}
-			sig := ed25519.Sign(bPriv, proof.CanonicalBytes())
-			proof.Signature = hex.EncodeToString(sig)
-
 			runBody, _ := json.Marshal(map[string]interface{}{
 				"script_id":     scriptID,
 				"version":       1,
 				"endpoint_id":   endpointID,
 				"parameters":    tc.params,
-				"session_id":    session.SessionID,
 				"action_digest": actionDigest,
-				"proof":         proof,
 			})
 
 			reqRun := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/run", bytes.NewReader(runBody))
@@ -562,10 +495,6 @@ func TestServer_Scripts_RetirementAndConstraints(t *testing.T) {
 
 	// 6. Run retired script -> 400 Bad Request
 	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	bPub, bPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, _ := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-retire-sess", hex.EncodeToString(bPub), code)
 
 	actionPayload := response.ScriptExecPayload{
 		ScriptID:       scriptID,
@@ -578,25 +507,11 @@ func TestServer_Scripts_RetirementAndConstraints(t *testing.T) {
 	}
 	actionDigest, _ := response.ComputeActionDigest(actionPayload)
 
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindScriptExec,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "retired-nonce-1",
-	}
-	sig := ed25519.Sign(bPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
-
 	runBody, _ := json.Marshal(map[string]interface{}{
 		"script_id":     scriptID,
 		"version":       1,
 		"endpoint_id":   endpointID,
-		"session_id":    session.SessionID,
 		"action_digest": actionDigest,
-		"proof":         proof,
 	})
 	reqRun := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/run", bytes.NewReader(runBody))
 	reqRun.Header.Set("Authorization", "Bearer "+jwtToken)
@@ -748,13 +663,6 @@ func TestServer_Scripts_DigestAndSchedules(t *testing.T) {
 
 	// 3b. Setup Response Authority Session for Console Operator
 	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	bPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, err := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-sched-sess", hex.EncodeToString(bPub), code)
-	if err != nil {
-		t.Fatalf("UnlockSessionWithTOTP failed: %v", err)
-	}
 
 	schedWithSessionBody, _ := json.Marshal(map[string]interface{}{
 		"script_id":        scriptID,
@@ -766,7 +674,6 @@ func TestServer_Scripts_DigestAndSchedules(t *testing.T) {
 		"max_runs":         30,
 		"timeout_seconds":  45,
 		"max_output_bytes": 2048,
-		"session_id":       session.SessionID,
 	})
 	reqSched := httptest.NewRequest(http.MethodPost, "/api/v1/scripts/schedules", bytes.NewReader(schedWithSessionBody))
 	reqSched.Header.Set("Authorization", "Bearer "+jwtToken)
@@ -879,10 +786,6 @@ func TestServer_ResponseJobs_SingleLookup(t *testing.T) {
 
 	// Create a response session
 	_, _, _ = auth.GetOrCreateTenantKey(tenantID)
-	secret, _ := auth.EnrollTOTP(tenantID, opID)
-	bPub, bPriv, _ := ed25519.GenerateKey(rand.Reader)
-	code, _ := responseauth.GenerateTOTPCode(secret, time.Now())
-	session, _ := auth.UnlockSessionWithTOTP(tenantID, opID, "browser-job-sess", hex.EncodeToString(bPub), code)
 
 	// Dispatch a script exec job
 	actionPayload := response.ScriptExecPayload{
@@ -895,25 +798,12 @@ func TestServer_ResponseJobs_SingleLookup(t *testing.T) {
 		MaxOutputBytes: 1048576,
 	}
 	actionDigest, _ := response.ComputeActionDigest(actionPayload)
-	proof := &responseauth.ActionProof{
-		SessionID:       session.SessionID,
-		TenantID:        tenantID,
-		ActionKind:      response.ActionKindScriptExec,
-		ActionDigest:    actionDigest,
-		TargetEndpoints: []string{endpointID},
-		Timestamp:       time.Now().Unix(),
-		Nonce:           "job-nonce-12345678",
-	}
-	sig := ed25519.Sign(bPriv, proof.CanonicalBytes())
-	proof.Signature = hex.EncodeToString(sig)
 
 	runBody, _ := json.Marshal(map[string]interface{}{
 		"script_id":        createResp.Script.ID,
 		"version":          1,
 		"endpoint_id":      endpointID,
-		"session_id":       session.SessionID,
 		"action_digest":    actionDigest,
-		"proof":            proof,
 		"timeout_seconds":  60,
 		"max_output_bytes": 1048576,
 	})

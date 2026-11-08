@@ -28,10 +28,6 @@ const (
 	ActionKindMeshQuarantine  ActionKind = "mesh_quarantine"
 	ActionKindAutoIsolate     ActionKind = "auto_isolate"
 	ActionKindCapability      ActionKind = "capability_change"
-	// ActionKindDetectionPolicy is an authority-signed loosening of the hub's
-	// own detection policy (tuning, expected rules). The hub applies it; no agent
-	// ever receives a grant of this kind.
-	ActionKindDetectionPolicy ActionKind = "detection_policy"
 )
 
 // AutoIsolateRoute is the route field of the detector's isolation payload.
@@ -213,7 +209,7 @@ type TrustKeys struct {
 	TenantID       string `json:"tenant_id"`
 	// Epoch orders bundles: agents never pin one older than any they pinned
 	// (or than their build's floor), so a bundle for retired keys cannot be
-	// replayed after a rotation. Raised whenever the authority's keys change.
+	// replayed after a rotation. Raised whenever the hub's keys change.
 	Epoch     int64  `json:"epoch"`
 	BundleSig string `json:"bundle_sig,omitempty"` // base64 DER ECDSA P-256 / SHA-256
 }
@@ -320,7 +316,7 @@ func (r *AgentTrustReport) HostKey(signerKeyID string) *HostKeyReport {
 }
 
 // IsolationBaseline binds the exceptions an isolation leaves open (DNS, DHCP,
-// NTP, custom) into the payload the authority signs, for the endpoints named.
+// NTP, custom) into the payload the hub signs, for the endpoints named.
 // Agents use only these while isolated, never the heartbeat's copy. Field
 // order is alphabetical so the struct encodes canonically.
 type IsolationBaseline struct {

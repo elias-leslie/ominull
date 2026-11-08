@@ -26,9 +26,9 @@ import (
 	"ominull/hub/pkg/bootstrap"
 	"ominull/hub/pkg/detector"
 	"ominull/hub/pkg/evidence"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/pki"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scanner"
 	"ominull/hub/pkg/scripts"
 	"ominull/hub/pkg/storage"
@@ -78,8 +78,8 @@ type Server struct {
 	throttle *authThrottle
 	// responseStore coordinates durable response jobs and offers
 	responseStore *response.Store
-	// responseAuth communicates with the Response Authority daemon
-	responseAuth responseauth.Client
+	// responseAuth signs what agents act on; nil refuses those actions.
+	responseAuth grants.Client
 	// maintBlocks is why scheduled package runs could not run (health findings).
 	maintBlocks maintenanceBlocks
 	// jobWake wakes ominullctl maint wait long-polls on job events.
@@ -108,7 +108,7 @@ type Server struct {
 	// responseEnabled toggles the unreleased response, evidence, script, terminal,
 	// and vulnerability mutation routes. Off by default; all unreleased routes fail closed.
 	responseEnabled bool
-	// trust caches the authority's public keys and manifests and the agents'
+	// trust caches the hub's public keys and manifests and the agents'
 	// trust reports; see agent_trust.go.
 	trust agentTrustCache
 	// topology holds the rendered graph briefly; see responsecache.go.
@@ -412,11 +412,6 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		log.Printf("[-] Warning: Failed to initialize vuln store: %v", err)
 	}
 
-	authSocket := os.Getenv("OMINULL_AUTH_SOCKET")
-	if authSocket == "" {
-		authSocket = "/run/ominull-response-authority/authority.sock"
-	}
-
 	responseEnabled := false
 	if v := os.Getenv("OMINULL_ENABLE_UNRELEASED_RESPONSE"); v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
 		responseEnabled = true
@@ -433,7 +428,6 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 		agentVersion:    agentVersion,
 		throttle:        newAuthThrottle(),
 		responseStore:   respStore,
-		responseAuth:    responseauth.NewUDSClient(authSocket),
 		evidenceStore:   evidStore,
 		terminalMgr:     terminal.NewManager(store.DB(), evidStore, terminal.DefaultMaxDuration, terminal.DefaultIdleTimeout),
 		scriptsStore:    scriptsStore,
@@ -462,7 +456,7 @@ func New(store *storage.Store, adminKey, binaryDir, hubURL, agentVersion string)
 			Details: reason, Timestamp: time.Now().UTC(),
 		})
 		// Agents that verify grants act only on the detector's own narrow key.
-		// Off the detector's path: the authority call must not slow ingestion.
+		// Off the detector's path: the hub call must not slow ingestion.
 		go s.signDetectorIsolation(endpointID, reason)
 		return nil
 	})
@@ -494,8 +488,8 @@ func (s *Server) responseGate(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// SetResponseAuth allows injecting a custom or in-process Response Authority client.
-func (s *Server) SetResponseAuth(client responseauth.Client) {
+// SetResponseAuth installs the grant signer.
+func (s *Server) SetResponseAuth(client grants.Client) {
 	s.responseAuth = client
 }
 
@@ -743,7 +737,6 @@ func (s *Server) Start(addr string) error {
 	go s.maintenanceScheduleLoop()
 	go s.sessionJobsLoop()
 	go s.aicoPushLoop()
-	go s.stewardSessionLoop()
 	if s.stopEvidenceRetention == nil {
 		s.stopEvidenceRetention = make(chan struct{})
 		s.startEvidenceRetention(evidencePruneInterval, s.stopEvidenceRetention)
@@ -1185,20 +1178,6 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				// exclusions). Without a label it stays "admin".
 				if label, ok := agentLabel(r); ok && label != "" {
 					r.Header.Set("X-Username", adminAgentName(label))
-				}
-				proceed(w, r)
-				return
-			}
-			if s.stewardKeyMatches(key) {
-				// The steward's own key: its own role and name, and only
-				// the routes in stewardRoutes (steward.go).
-				s.throttle.succeed(addr)
-				r.Header.Set("X-Role", "steward")
-				r.Header.Set("X-Username", stewardUsername)
-				r.Header.Set("X-Auth-Method", stewardAuthMethod)
-				if !stewardAllowed(r) {
-					writeJSONError(w, http.StatusForbidden, "the steward key reaches only maintenance runs, escalation, its own approvals and the screen for a stuck run")
-					return
 				}
 				proceed(w, r)
 				return
@@ -2096,13 +2075,6 @@ func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
 	after.Reason = strings.TrimSpace(req.Reason)
 	change := policyChange{policy: "endpoint_watch", op: "retire", target: "endpoint:" + ep.ID,
 		before: before, after: after, wording: "retired " + ep.ID}
-	if before.Status != "retired" {
-		change.loosens = []string{"retire"}
-	}
-	approvalID, ok := s.policyAuthorized(w, r, change)
-	if !ok {
-		return
-	}
 	if err := s.store.RetireEndpoint(req.EndpointID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2114,7 +2086,7 @@ func (s *Server) handleRetireEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "ENDPOINT_RETIRED", req.EndpointID, details)
 	if before.Status != "retired" {
-		s.notePolicyChange(r, change, approvalID)
+		s.notePolicyChange(r, change)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "retired", "endpoint_id": req.EndpointID})
@@ -3643,8 +3615,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/operators", s.authMiddleware(requireAdmin(s.handleOperators)))
 	mux.HandleFunc("/api/v1/operators/remove", s.authMiddleware(requireAdmin(s.handleOperatorRemove)))
 	mux.HandleFunc("/api/v1/endpoints", s.authMiddleware(s.handleEndpoints))
-	// Host-authority courier: /api/v1/endpoints/{id}/jobs/signed[/reserve] (signed_jobs.go).
-	mux.HandleFunc("/api/v1/endpoints/", s.authMiddleware(requireAdmin(s.handleEndpointSubroutes)))
 	mux.HandleFunc("/api/v1/endpoints/retire", s.authMiddleware(requireAdmin(s.handleRetireEndpoint)))
 	mux.HandleFunc("/api/v1/endpoints/cert-renewal", s.authMiddleware(requireAdmin(s.handleAgentCertRenewal)))
 	mux.HandleFunc("/api/v1/endpoints/monitor-only", s.authMiddleware(requireAdmin(s.handleMonitorOnly)))
@@ -3674,7 +3644,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/baseline/propose", s.authMiddleware(s.handleBaselinePropose))
 
 	// Isolation changes, agent updates, mesh quarantines, terminals and
-	// screens, package runs: the response authority checks and signs the grants
+	// screens, package runs: the hub checks and signs the grants
 	// before the handler runs (action_authorize.go). Nobody is asked.
 	mux.HandleFunc("/api/v1/endpoints/isolate", s.authMiddleware(s.authorized(s.resolveIsolate, s.handleIsolate)))
 	mux.HandleFunc("/api/v1/endpoints/unisolate", s.authMiddleware(s.authorized(s.resolveUnisolate, s.handleUnisolate)))
@@ -3745,10 +3715,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/response/jobs/ack", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseAck)))
 	mux.HandleFunc("/api/v1/response/jobs/result", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseResult)))
 	mux.HandleFunc("/api/v1/response/jobs/progress", s.deviceOrLegacyMiddleware(s.responseGate(s.handleResponseProgress)))
-	mux.HandleFunc("/api/v1/response/auth/totp/enroll", s.authMiddleware(s.responseGate(s.handleResponseAuthTOTPEnroll)))
-	mux.HandleFunc("/api/v1/response/auth/unlock", s.authMiddleware(s.responseGate(s.handleResponseAuthUnlock)))
-	mux.HandleFunc("/api/v1/response/auth/lock", s.authMiddleware(s.responseGate(s.handleResponseAuthLock)))
-	mux.HandleFunc("/api/v1/response/auth/status", s.authMiddleware(s.responseGate(s.handleResponseAuthStatus)))
 
 	// 11. Encrypted Evidence Storage & Export API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/evidence/bundles", s.authMiddleware(s.responseGate(s.handleEvidenceBundles)))
@@ -3781,7 +3747,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/screen/sessions/watch", s.authMiddleware(s.responseGate(s.handleScreenWatch)))
 	// The viewer's only credential is the launch code itself.
 	mux.HandleFunc("/api/v1/screen/launch/redeem", s.responseGate(s.handleScreenLaunchRedeem))
-	mux.HandleFunc("/api/v1/integrations/steward/key", s.authMiddleware(s.handleStewardKey))
 	mux.HandleFunc("/api/v1/screen/settings", s.authMiddleware(s.responseGate(s.handleScreenSettings)))
 	mux.HandleFunc("/api/v1/remote-access/settings", s.authMiddleware(s.responseGate(s.handleRemoteAccess)))
 

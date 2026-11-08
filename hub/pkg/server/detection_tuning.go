@@ -102,17 +102,8 @@ func (s *Server) handleDetectionTuning(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// applyTuning saves a judged tuning change: at once when it only tightens,
-// after the authorization when it loosens. The caller holds policyMu.
+// applyTuning saves a tuning change. The caller holds policyMu.
 func (s *Server) applyTuning(w http.ResponseWriter, r *http.Request, c policyChange, action string) {
-	c, ok := s.tightenFirst(w, r, c)
-	if !ok {
-		return
-	}
-	approvalID, ok := s.policyAuthorized(w, r, c)
-	if !ok {
-		return
-	}
 	saved, err := s.store.SaveDetectionTuning(c.after.(storage.DetectionTuning), operatorName(r))
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -130,7 +121,7 @@ func (s *Server) applyTuning(w http.ResponseWriter, r *http.Request, c policyCha
 	s.refreshDomainFeedsIfChanged(c.before, saved)
 	s.audit(r, action, "detection", c.wording+"; credential "+credentialOf(r)+" (unverified)")
 	if c.changed() {
-		s.notePolicyChange(r, c, approvalID)
+		s.notePolicyChange(r, c)
 	}
 	s.writeTuning(w, saved)
 }

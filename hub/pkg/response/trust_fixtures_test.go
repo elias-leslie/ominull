@@ -205,7 +205,7 @@ func buildTrustFixtures(t *testing.T) []byte {
 	meshOff := routed("/api/v1/mesh/unquarantine", map[string]interface{}{"target_ip": "10.0.0.66"}, []string{"mesh:10.0.0.66"})
 	upd := routed("/api/v1/agents/update", map[string]interface{}{"endpoint_ids": []string{ep}, "version": "9.9.9"}, []string{ep})
 
-	// Payloads two JSON readers could read differently. The authority's
+	// Payloads two JSON readers could read differently. The hub's
 	// strictPayload refuses these before an owner ever sees them; the agent
 	// must refuse them too.
 	dupRoute := []byte(`{"body":{"endpoint_id":"` + ep + `"},"route":"/api/v1/endpoints/isolate","route":"/api/v1/endpoints/unisolate","targets":["` + ep + `"]}`)

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/screen"
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/terminal"
@@ -62,7 +62,7 @@ func screenSummary(sess *terminal.TerminalSession) map[string]interface{} {
 
 func screenRoleCanOpen(r *http.Request) bool {
 	role := r.Header.Get("X-Role")
-	return role == "admin" || role == "operator" || (role == "steward" && isSteward(r))
+	return role == "admin" || role == "operator"
 }
 
 // screenSessionLength is how long a session has run, for the audit.
@@ -75,7 +75,7 @@ func screenSessionLength(sess *terminal.TerminalSession, now time.Time) string {
 }
 
 // handleScreenSessions lists and shows screen sessions (GET), opens one
-// with the authority's authorization (POST, behind authorized/resolveScreen) and
+// with the hub's authorization (POST, behind authorized/resolveScreen) and
 // ends one (DELETE ?id=).
 func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 	if s.terminalMgr == nil {
@@ -142,9 +142,6 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d := s.terminalDuration(req.MaxDurationSeconds)
-		if isSteward(r) && req.ResolvedSeconds > 0 {
-			d = time.Duration(req.ResolvedSeconds) * time.Second
-		}
 		sess, err := screen.CreateSession(s.terminalMgr, tenantID, req.EndpointID, operatorID, mode, grant, d)
 		if err != nil {
 			writeJSONError(w, http.StatusConflict, "failed to create screen session: "+err.Error())
@@ -162,9 +159,7 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 		// ..."), so an admin-key agent's self-declared label is named there
 		// too. The agent strips quotes and keeps at most 64 characters.
 		who := operatorID
-		if isSteward(r) {
-			who = "Nightshift's steward (steward key), for a stuck maintenance run"
-		} else if r.Header.Get("X-Auth-Method") == "api-key" {
+		if r.Header.Get("X-Auth-Method") == "api-key" {
 			who = "an agent (admin key)"
 			if label, _ := agentLabel(r); label != "" {
 				who = "agent \"" + label + "\" (admin key)"
@@ -175,9 +170,6 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 			offer["unattended"] = true
 		}
 		askFirst := s.screenAskFirst(req.EndpointID)
-		if isSteward(r) && req.ResolvedAskFirst != nil {
-			askFirst = *req.ResolvedAskFirst
-		}
 		if askFirst {
 			offer["ask_first"] = true
 		}
@@ -199,17 +191,13 @@ func (s *Server) handleScreenSessions(w http.ResponseWriter, r *http.Request) {
 			"Opened a %s screen session on %s for %s under grant %s, up to %s%s",
 			mode, req.EndpointID, s.screenCaller(r), grant.GrantID, d.Round(time.Minute), unattended))
 		screenCreds.SetControlMinter(sess.SessionID, screenAgentName(r))
-		if isSteward(r) {
-			bindStewardSession(sess.SessionID, stewardBinding{Tenant: tenantID, Endpoint: req.EndpointID, Run: req.StewardRun})
-			s.audit(r, "STEWARD_SCREEN_OPENED", sess.SessionID, fmt.Sprintf("The steward took the screen on %s for maintenance run %s (%s, up to %s)", req.EndpointID, req.StewardRun, mode, d.Round(time.Minute)))
-		}
 		out := screenSummary(sess)
 		// An agent (ominullctl, admin key) gets the operator's one-use token
 		// once, here, and hands it to the viewer on stdin; it never reaches a
 		// URL. The console gets no token at all: it asks /launch for a
 		// one-use launch code instead, so a page never holds a credential
 		// that drives the screen.
-		if r.Header.Get("X-Auth-Method") == "api-key" || isSteward(r) {
+		if r.Header.Get("X-Auth-Method") == "api-key" {
 			out["connect_token"] = sess.OperatorToken
 		}
 		writeJSON(w, http.StatusCreated, out)
@@ -421,9 +409,6 @@ var screenCreds = screen.NewCredentials()
 // A self-declared X-Ominull-Agent label is named as a claim:
 // `admin (agent calling itself "claude-ops", admin key)`.
 func screenAgentName(r *http.Request) string {
-	if isSteward(r) {
-		return "steward (Nightshift's steward, steward key)"
-	}
 	if r.Header.Get("X-Auth-Method") != "api-key" {
 		return ""
 	}
@@ -690,12 +675,6 @@ type screenOpenRequest struct {
 	// keyboard to allow it (a machine that asks the person first declines
 	// otherwise). It is audited and digested.
 	Unattended bool `json:"unattended"`
-	// The steward's request for a stuck run (steward.go): the run.
-	StewardRun string `json:"steward_run,omitempty"`
-	// Set by resolveScreen in the body it hands on, never by the caller:
-	// the steward session's length and ask-first as signed.
-	ResolvedSeconds  int64 `json:"resolved_seconds,omitempty"`
-	ResolvedAskFirst *bool `json:"resolved_ask_first,omitempty"`
 }
 
 func (q screenOpenRequest) mode(w http.ResponseWriter) (string, bool) {
@@ -769,7 +748,7 @@ func (s *Server) screenTrustRefusal(ctx context.Context, ep *storage.Endpoint) s
 	return ""
 }
 
-// resolveScreen describes a screen request for the authority. The
+// resolveScreen describes a screen request for the hub. The
 // digested payload is exactly what the agent rebuilds and checks:
 // {"mode":"control"}, {"mode":"view"}, plus "unattended":true when asked
 // and then "ask_first":true when the endpoint's screen.ask_first is on (key
@@ -791,23 +770,8 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 	if !ok || !s.screenCapable(w, r, req.EndpointID, mode) {
 		return nil, false
 	}
-	if !isSteward(r) && req.StewardRun != "" {
-		writeJSONError(w, http.StatusBadRequest, "steward_run is the steward's")
-		return nil, false
-	}
-	req.ResolvedSeconds, req.ResolvedAskFirst = 0, nil
 	d := s.terminalDuration(req.MaxDurationSeconds)
 	askFirst := s.screenAskFirst(req.EndpointID)
-	var handOn []byte
-	if isSteward(r) {
-		sd, sa, ok := s.stewardScreenPlan(w, r, &req)
-		if !ok {
-			return nil, false
-		}
-		d, askFirst = sd, sa
-		req.ResolvedSeconds, req.ResolvedAskFirst = int64(d/time.Second), &askFirst
-		handOn, _ = json.Marshal(req)
-	}
 	payload, err := json.Marshal(response.ScreenSessionPayload{Mode: mode, Unattended: req.Unattended, AskFirst: askFirst})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -818,16 +782,10 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 	if mode == response.ScreenModeView {
 		action, summary = "Watch screen", "Watch the screen on "+label+" (no control), up to "+span+", for "+operator
 	}
-	if isSteward(r) {
-		summary = "Nightshift's steward (steward key) will see and control the screen on " + label + ", up to " + span
-		if mode == response.ScreenModeView {
-			summary = "Nightshift's steward (steward key) will see the screen on " + label + ", up to " + span
-		}
-		summary += "; to unstick maintenance run " + req.StewardRun
-	} else if r.Header.Get("X-Auth-Method") == "api-key" {
-		// The authority words it the same way from the requester.
+	if r.Header.Get("X-Auth-Method") == "api-key" {
+		// grants words it the same way from the requester.
 		agent, _ := agentLabel(r)
-		claim := responseauth.AgentClaim(agent)
+		claim := grants.AgentClaim(agent)
 		who := strings.ToUpper(claim[:1]) + claim[1:] + " (admin key)"
 		summary = who + " will see and control the screen on " + label + ", up to " + span
 		if mode == response.ScreenModeView {
@@ -845,8 +803,7 @@ func (s *Server) resolveScreen(w http.ResponseWriter, r *http.Request, body []by
 	return &actionPlan{
 		Kind: response.ActionKindScreenSession, Action: action, Summary: summary,
 		Targets: []string{req.EndpointID}, Payload: payload, SessionSeconds: int64(d / time.Second),
-		AskFirst: askFirst, Body: handOn,
-		StewardRun: req.StewardRun,
+		AskFirst: askFirst,
 	}, true
 }
 

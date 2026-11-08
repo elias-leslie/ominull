@@ -4,9 +4,8 @@ package server
 // session may run, when an idle one ends, and how many may be open per
 // endpoint and per tenant. The hub's startup flags (--terminal-max-duration
 // and friends) are the defaults; limits saved here win and survive restarts
-// (one row in the settings table). Lowering a limit applies at once. Raising
-// one is authorized by the response authority through the same hub-policy
-// path a detection loosening uses and is recorded in the audit. Sessions
+// (one row in the settings table). A change applies at once and is recorded in
+// the audit. Sessions
 // already open keep the limits they started with.
 
 import (
@@ -16,7 +15,7 @@ import (
 	"net/http"
 	"time"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/terminal"
 )
 
@@ -213,19 +212,10 @@ func (s *Server) putTerminalLimits(w http.ResponseWriter, r *http.Request) {
 	wording := ""
 	if after != before {
 		var err error
-		if wording, err = responseauth.TerminalLimitsWording(limitsMap(limitsJSON(before)), limitsMap(limitsJSON(after))); err != nil {
+		if wording, err = grants.TerminalLimitsWording(limitsMap(limitsJSON(before)), limitsMap(limitsJSON(after))); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "the change could not be described: "+err.Error())
 			return
 		}
-	}
-	c := policyChange{
-		policy: "terminal_limits", op: "raise", target: terminalLimitsTarget,
-		before: limitsJSON(before), after: limitsJSON(after),
-		loosens: limitRaises(before, after), wording: wording, subject: "remote shell limits",
-	}
-	approvalID, ok := s.policyAuthorized(w, r, c)
-	if !ok {
-		return
 	}
 	value := ""
 	if !req.Reset {
@@ -237,12 +227,9 @@ func (s *Server) putTerminalLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.terminalMgr.SetLimits(after)
-	how := "lowered"
-	if approvalID != "" {
-		how = "raised, authorization " + approvalID
-	}
+	how := "changed"
 	if req.Reset {
-		how += ", back to the startup defaults"
+		how = "reset to the startup defaults"
 	}
 	if wording == "" {
 		wording = "unchanged values"
@@ -250,8 +237,5 @@ func (s *Server) putTerminalLimits(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, terminalLimitsAudit, terminalLimitsTarget, how+": "+wording+"; credential "+credentialOf(r)+" (unverified)")
 	view := s.terminalLimitsView()
 	view["changed"] = true
-	if approvalID != "" {
-		view["approval_id"] = approvalID
-	}
 	writeJSON(w, http.StatusOK, view)
 }

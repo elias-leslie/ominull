@@ -21,9 +21,7 @@ import (
 // The expected rules are data in the tuning row. This file is their API: list,
 // save one, delete one, and "mark as expected" on a finding, which writes the
 // narrowest rule that would have made that finding expected. None needs a
-// release. A write that covers more than before goes through the response
-// authority like any loosening (policyAuthorized); deleting a rule or
-// narrowing it only tightens and asks nobody.
+// release. Every write applies at once with an audit row and a floor drill.
 
 // vendorRangesOwned refuses a rule whose maker prefix has an end the hub's
 // network attribution places on a shared CDN or rented compute: any site can
@@ -262,10 +260,6 @@ func (s *Server) handleMarkExpected(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	change := tuningChange("mark_expected", before, after)
-	approvalID, ok := s.policyAuthorized(w, r, change)
-	if !ok {
-		return
-	}
 	if _, err := s.store.SaveDetectionTuning(after, operatorName(r)); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -273,7 +267,7 @@ func (s *Server) handleMarkExpected(w http.ResponseWriter, r *http.Request) {
 	if s.detector != nil {
 		s.detector.InvalidateTuning()
 	}
-	s.notePolicyChange(r, change, approvalID)
+	s.notePolicyChange(r, change)
 	if err := s.acknowledgeFinding(r, finding.ID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return

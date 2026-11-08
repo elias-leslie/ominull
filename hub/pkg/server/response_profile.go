@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/storage"
 )
 
@@ -151,7 +151,7 @@ func (s *Server) resolveAllowIsolation(w http.ResponseWriter, r *http.Request, b
 			"error": "name the setting's current revision", "response_profile_rev": ep.ResponseProfileRev})
 		return nil, false
 	}
-	return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Allow host isolation",
+	return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Allow host isolation",
 		Summary: "Let " + s.endpointLabels([]string{req.EndpointID}) + " be isolated at host level again", Targets: []string{req.EndpointID}}, true
 }
 

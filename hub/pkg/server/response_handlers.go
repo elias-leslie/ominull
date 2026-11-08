@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 )
 
 // handleResponseJobs handles listing and creating response jobs.
@@ -70,18 +70,20 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost {
 		if r.Header.Get("X-Auth-Method") == "api-key" {
-			writeJSONError(w, http.StatusForbidden, "static API keys cannot launch response actions; an active console response session is required")
+			writeJSONError(w, http.StatusForbidden, "static API keys cannot launch response actions; sign in to the console")
+			return
+		}
+		if r.Header.Get("X-Role") != "admin" {
+			writeJSONError(w, http.StatusForbidden, "admin role required")
 			return
 		}
 
 		var req struct {
-			EndpointID     string                    `json:"endpoint_id"`
-			Kind           response.ActionKind       `json:"kind"`
-			PayloadJSON    string                    `json:"payload_json"`
-			IdempotencyKey string                    `json:"idempotency_key"`
-			SessionID      string                    `json:"session_id"`
-			ActionDigest   string                    `json:"action_digest"`
-			Proof          *responseauth.ActionProof `json:"proof"`
+			EndpointID     string              `json:"endpoint_id"`
+			Kind           response.ActionKind `json:"kind"`
+			PayloadJSON    string              `json:"payload_json"`
+			IdempotencyKey string              `json:"idempotency_key"`
+			ActionDigest   string              `json:"action_digest"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -91,6 +93,15 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 
 		if req.EndpointID == "" || req.Kind == "" || req.PayloadJSON == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing endpoint_id, kind, or payload_json")
+			return
+		}
+		// Scripts go through /api/v1/scripts/run, terminals and screens through
+		// their own routes, each of which reads what it signs.
+		if req.Kind != response.ActionKindForensicCollect {
+			writeJSONError(w, http.StatusBadRequest, "this route takes forensic collection only")
+			return
+		}
+		if !s.endpointInScope(w, r, req.EndpointID) {
 			return
 		}
 
@@ -105,30 +116,22 @@ func (s *Server) handleResponseJobs(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("action digest mismatch: client supplied %s but recomputed payload digest is %s", req.ActionDigest, computedDigestHex))
 			return
 		}
-		if req.Proof != nil && req.Proof.ActionDigest != "" && !strings.EqualFold(req.Proof.ActionDigest, computedDigestHex) {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("proof action digest mismatch: proof binds to %s but recomputed payload digest is %s", req.Proof.ActionDigest, computedDigestHex))
-			return
-		}
 
 		if s.responseAuth == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
+			writeJSONError(w, http.StatusServiceUnavailable, "the grant signer is not available")
 			return
 		}
 
-		// Request grant signing from Response Authority
-		grant, err := s.responseAuth.SignGrant(r.Context(), &responseauth.SignGrantRequest{
-			TenantID:      tenantID,
-			OperatorID:    operatorID,
-			SessionID:     req.SessionID,
-			EndpointID:    req.EndpointID,
-			ActionKind:    req.Kind,
-			ActionDigest:  computedDigestHex,
-			ActionPayload: json.RawMessage(req.PayloadJSON),
-			TTLSeconds:    300,
-			Proof:         req.Proof,
+		grant, err := s.responseAuth.SignGrant(r.Context(), &grants.SignGrantRequest{
+			TenantID:     tenantID,
+			OperatorID:   operatorID,
+			EndpointID:   req.EndpointID,
+			ActionKind:   req.Kind,
+			ActionDigest: computedDigestHex,
+			TTLSeconds:   300,
 		})
 		if err != nil {
-			writeJSONError(w, http.StatusForbidden, "response authority denied grant: "+err.Error())
+			writeJSONError(w, http.StatusForbidden, "the grant was not signed: "+err.Error())
 			return
 		}
 
@@ -285,141 +288,4 @@ func (s *Server) handleResponseResult(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// handleResponseAuthTOTPEnroll handles enrolling a TOTP secret.
-func (s *Server) handleResponseAuthTOTPEnroll(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	tenantID := s.tenantFromRequest(r)
-	if tenantID == "" {
-		tenantID = "default"
-	}
-	operatorID := s.operatorFromRequest(r)
-	var req struct {
-		OperatorID string `json:"operator_id"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if req.OperatorID != "" && r.Header.Get("X-Role") == "admin" {
-		operatorID = req.OperatorID
-	}
-
-	if s.responseAuth == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
-		return
-	}
-
-	secret, err := s.responseAuth.EnrollTOTP(r.Context(), tenantID, operatorID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to enroll totp: "+err.Error())
-		return
-	}
-
-	label := operatorID
-	if tenantID != "" && tenantID != "default" {
-		label = fmt.Sprintf("%s (%s)", operatorID, tenantID)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"secret":      secret,
-		"otpauth_url": fmt.Sprintf("otpauth://totp/Ominull:%s?secret=%s&issuer=Ominull", label, secret),
-	})
-}
-
-// handleResponseAuthUnlock handles unlocking a response session.
-func (s *Server) handleResponseAuthUnlock(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	tenantID := s.tenantFromRequest(r)
-	if tenantID == "" {
-		tenantID = "default"
-	}
-	var req struct {
-		OperatorID       string `json:"operator_id"`
-		BrowserSessionID string `json:"browser_session_id"`
-		BrowserPublicKey string `json:"browser_public_key"`
-		TOTPCode         string `json:"totp_code"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request json: "+err.Error())
-		return
-	}
-	if req.OperatorID == "" {
-		req.OperatorID = "admin"
-	}
-
-	if s.responseAuth == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
-		return
-	}
-
-	session, err := s.responseAuth.UnlockSession(r.Context(), tenantID, req.OperatorID, req.BrowserSessionID, req.BrowserPublicKey, req.TOTPCode)
-	if err != nil {
-		writeJSONError(w, http.StatusUnauthorized, "unlock failed: "+err.Error())
-		return
-	}
-
-	s.audit(r, "RESPONSE_SESSION_UNLOCKED", session.SessionID, fmt.Sprintf("Unlocked response session for operator %s tenant %s", req.OperatorID, tenantID))
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(session)
-}
-
-// handleResponseAuthLock handles locking an active response session.
-func (s *Server) handleResponseAuthLock(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var req struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
-		writeJSONError(w, http.StatusBadRequest, "missing session_id")
-		return
-	}
-
-	if s.responseAuth == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
-		return
-	}
-
-	if err := s.responseAuth.LockSession(r.Context(), req.SessionID); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "lock failed: "+err.Error())
-		return
-	}
-
-	s.audit(r, "RESPONSE_SESSION_LOCKED", req.SessionID, fmt.Sprintf("Locked response session %s", req.SessionID))
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"locked": true})
-}
-
-// handleResponseAuthStatus handles querying status of response authority.
-func (s *Server) handleResponseAuthStatus(w http.ResponseWriter, r *http.Request) {
-	tenantID := s.tenantFromRequest(r)
-	if tenantID == "" {
-		tenantID = "default"
-	}
-	if s.responseAuth == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
-		return
-	}
-
-	status, err := s.responseAuth.Status(r.Context(), tenantID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to get authority status: "+err.Error())
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(status)
 }

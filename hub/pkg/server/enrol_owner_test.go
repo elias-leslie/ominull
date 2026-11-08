@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Opening an enrolment window is a loosening the authority signs at once: the
+// Opening an enrolment window applies at once: the
 // first request opens exactly the window asked for and the audit says it was
 // authorized; closing one needs no authorization.
 func TestOpeningAnEnrolmentWindowIsAuthorizedAtOnce(t *testing.T) {
@@ -39,12 +39,12 @@ func TestOpeningAnEnrolmentWindowIsAuthorizedAtOnce(t *testing.T) {
 	logs, _ := store.ListAuditLogs("", 50)
 	authorized := false
 	for _, l := range logs {
-		if l.Action == "ACTION_AUTHORIZED" && strings.Contains(l.Details, "10.0.0.0/24") {
+		if l.Action == "ENROLMENT_WINDOW_OPENED" && strings.Contains(l.Details, "10.0.0.0/24") {
 			authorized = true
 		}
 	}
 	if !authorized {
-		t.Fatalf("opening the window left no ACTION_AUTHORIZED row: %+v", logs)
+		t.Fatalf("opening the window left no audit row: %+v", logs)
 	}
 
 	del := httptest.NewRequest(http.MethodDelete, "/api/v1/enrolment/windows?id="+out.Window.ID, nil)

@@ -3,12 +3,12 @@ package server
 // Remote access off: GET/PUT /api/v1/remote-access/settings[?endpoint_id=].
 // A per-machine setting, kept as data in one settings row, that switches off
 // every remote terminal and remote screen session on that machine, whoever
-// asks (owner, agent or steward). Meant for the machines that must never be
+// asks (owner or agent). Meant for the machines that must never be
 // driven remotely; the hub knows them only from this setting, never from a
 // hostname.
 //
 // Switching it on applies at once and closes the machine's open sessions.
-// Switching it off loosens safety, so the authority authorizes it and the audit records it.
+// Switching it back on applies at once too; the audit records both.
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/grants"
 )
 
 const (
@@ -150,17 +150,9 @@ func (s *Server) putRemoteAccess(w http.ResponseWriter, r *http.Request, endpoin
 	if host := s.endpointLabels([]string{endpointID}); host != "" && host != endpointID {
 		a["host"] = host
 	}
-	wording, err := responseauth.RemoteAccessWording(target, b, a)
+	wording, err := grants.RemoteAccessWording(target, b, a)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "the change could not be described: "+err.Error())
-		return
-	}
-	c := policyChange{policy: "remote_access", op: "on", target: target, subject: "remote access", before: b, after: a, wording: wording}
-	if !now {
-		c.loosens = []string{"remote terminal and screen switched off"}
-	}
-	approvalID, ok := s.policyAuthorized(w, r, c)
-	if !ok {
 		return
 	}
 	after := remoteAccessSettings{Off: map[string]bool{}}
@@ -186,18 +178,15 @@ func (s *Server) putRemoteAccess(w http.ResponseWriter, r *http.Request, endpoin
 	if now {
 		closed = s.closeRemoteSessions(endpointID)
 	}
-	how := "switched off"
-	if approvalID != "" {
-		how = "switched back on, authorization " + approvalID
+	how := "switched back on"
+	if now {
+		how = "switched off"
 	}
 	s.audit(r, remoteAccessAudit, target, how+": "+wording+"; credential "+credentialOf(r)+" (unverified)")
 	view := s.remoteAccessView(after, endpointID)
 	view["changed"] = true
 	if now {
 		view["sessions_closed"] = closed
-	}
-	if approvalID != "" {
-		view["approval_id"] = approvalID
 	}
 	writeJSON(w, http.StatusOK, view)
 }

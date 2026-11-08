@@ -44,24 +44,14 @@ func auditRowsOf(t *testing.T, store *storage.Store, action string) []storage.Au
 	return out
 }
 
-// authorityWords returns how the response authority put each action it
-// signed in its own audit (action and summary), oldest first.
+// authorityWords returns how each signed action was put in the audit, with
+// the words worked out from its payload, oldest first.
 func authorityWords(t *testing.T, srv *Server) []string {
 	t.Helper()
-	rows, err := authorityOf(t, srv).auth.GetAuditLog("default", 500)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []string
-	for _, r := range rows {
-		if r.EventType == "action_authorized" {
-			out = append(out, r.Details)
-		}
-	}
-	if len(out) > 1 && rows[0].Timestamp.After(rows[len(rows)-1].Timestamp) {
-		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-			out[i], out[j] = out[j], out[i]
-		}
+	rows := auditRowsOf(t, srv.store, "ACTION_AUTHORIZED")
+	out := make([]string, 0, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		out = append(out, rows[i].Details)
 	}
 	return out
 }

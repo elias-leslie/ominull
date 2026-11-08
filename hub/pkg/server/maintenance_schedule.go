@@ -8,9 +8,9 @@ package server
 // catches up the next time it is online. Hosts with the same settings share
 // one run.
 //
-// Each due run goes to the response authority like a hand-made one: the
+// Each due run goes to the hub like a hand-made one: the
 // authority checks it and signs the grants now, for hosts online now, and the
-// run is dispatched at once. Nobody is asked; a run the authority will not
+// run is dispatched at once. Nobody is asked; a run the hub will not
 // sign shows up as a schedule block (Aico push, console) with its
 // reason, and is tried again on the next pass.
 //
@@ -30,8 +30,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 	"ominull/hub/pkg/storage"
 )
@@ -43,7 +43,7 @@ const (
 	maintenanceRetry = time.Hour
 	// endpointOnline matches the endpoints list: seen within 30 s.
 	endpointOnline        = 30 * time.Second
-	maintenanceMaxTargets = 50 // the authority's limit for one authorization
+	maintenanceMaxTargets = 50 // the hub's limit for one authorization
 	schedulerName         = "maintenance schedule"
 )
 
@@ -241,7 +241,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 			if err != nil {
 				return err
 			}
-			dg := responseauth.ItemDigest(raw)
+			dg := grants.ItemDigest(raw)
 			g := groups[dg]
 			if g == nil {
 				label := d.Header.Name + " (" + params["mode"] + ")"
@@ -257,7 +257,7 @@ func (s *Server) runTenantMaintenance(tenant string, eps []*storage.Endpoint, no
 		for dg, g := range groups {
 			g.Targets = sortedTargets(g.Targets)
 			// One run per payload, whatever hosts are due. A run covers at
-			// most the authority's target limit; the rest wait for the next
+			// most the hub's target limit; the rest wait for the next
 			// pass.
 			if len(g.Targets) > maintenanceMaxTargets {
 				g.Targets = g.Targets[:maintenanceMaxTargets]
@@ -278,17 +278,17 @@ func (s *Server) runScheduledPackage(key string, run *scheduledRun, now time.Tim
 		b.set(key, scheduleBlock{Package: run.Label, Endpoints: run.Targets, Reason: reason, Since: now})
 	}
 	if s.responseAuth == nil {
-		block("the response authority is not available")
+		block("the grant signer is not available")
 		return
 	}
 	run.Payload = packageRunPayload(run.Items, run.Targets)
 	run.Since = now
-	au, err := s.responseAuth.Authorize(ctx, &responseauth.AuthorizeInput{
+	au, err := s.responseAuth.Authorize(ctx, &grants.AuthorizeInput{
 		TenantID: run.Tenant, Requester: schedulerName, Kind: response.ActionKindScriptExec,
 		Targets: run.Targets, Payload: run.Payload,
 	})
 	if err != nil {
-		block("the authority did not sign this run: " + err.Error())
+		block("the hub did not sign this run: " + err.Error())
 		return
 	}
 	run.ID = au.ID

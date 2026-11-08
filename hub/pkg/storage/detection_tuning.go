@@ -361,8 +361,7 @@ func (s *Store) SaveDetectionTuning(t DetectionTuning, by string) (DetectionTuni
 }
 
 // PrepareDetectionTuning normalises and checks a draft without saving it, so a
-// replay, and the authority signing a loosening, judge exactly what a save would
-// store.
+// replay and the floor drill judge exactly what a save would store.
 func PrepareDetectionTuning(t DetectionTuning) (DetectionTuning, error) {
 	t = t.normalised()
 	for i, raw := range t.ContainerCIDRs {

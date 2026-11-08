@@ -305,32 +305,12 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cidrs, err := storage.ParseCIDRs(req.CIDRs)
-	if err != nil {
+	if _, err := storage.ParseCIDRs(req.CIDRs); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Opening a window lets machines on those networks enrol themselves with
-	// no credential, so the authority authorizes it and the audit records it. Closing one
-	// needs nobody. The local first-run setup session (before the authority
-	// exists) is the one exception.
-	approvalID := ""
-	if _, setup := s.setupCSRF(r); !setup {
-		after := map[string]interface{}{
-			"label": strings.TrimSpace(req.Label), "cidrs": cidrs, "hours": req.Hours,
-			"max_uses": max(req.MaxUses, 0), "passcode": strings.TrimSpace(req.Passcode) != "",
-			"tenant_id": strings.TrimSpace(req.TenantID), "location_id": strings.TrimSpace(req.LocationID),
-			"role": strings.TrimSpace(req.Role),
-		}
-		change := policyChange{policy: "enrolment_window", op: "open", target: "enrolment:window",
-			after: after, loosens: []string{"enrolment_window"},
-			wording: fmt.Sprintf("opened self-service enrolment for %s for %g hours", strings.Join(cidrs, ", "), req.Hours)}
-		var ok bool
-		if approvalID, ok = s.policyAuthorized(w, r, change); !ok {
-			return
-		}
-	}
-
+	// no credential, so the audit records it, with who opened it.
 	window, err := s.store.CreateEnrolmentWindow(storage.EnrolmentWindow{
 		Label: req.Label, CIDRs: req.CIDRs, TenantID: req.TenantID,
 		LocationID: req.LocationID, Role: req.Role, MaxUses: req.MaxUses,
@@ -347,8 +327,8 @@ func (s *Server) createEnrolmentWindow(w http.ResponseWriter, r *http.Request) {
 		budget = fmt.Sprintf("at most %d", window.MaxUses)
 	}
 	approved := "local first-run setup"
-	if approvalID != "" {
-		approved = "authorization " + approvalID
+	if _, setup := s.setupCSRF(r); !setup {
+		approved = "credential " + credentialOf(r) + " (unverified)"
 	}
 	s.audit(r, "ENROLMENT_WINDOW_OPENED", window.ID,
 		fmt.Sprintf("Opened self-service enrolment for %s until %s (%s enrolments, passcode: %v) under %s",

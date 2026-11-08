@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Brings the hub's package library in step with the released packages, then
-# checks every synced digest is in hub/pkg/responseauth/released_packages.json.
+# checks every synced digest is in hub/pkg/grants/released_packages.json.
 # A library left at an older version makes every run of that package read
 # "not a released package" (1.8.83, windows-reboot).
 # Needs OMINULL_HUB_URL, OMINULL_ADMIN_KEY and OMINULL_HUB_CA; CTL names the
@@ -17,7 +17,7 @@ for dir in windows linux; do
         scripts sync "${ROOT_DIR}/packages/${dir}" >>"${out}"
     echo >>"${out}"
 done
-python3 -I - "${out}" "${ROOT_DIR}/hub/pkg/responseauth/released_packages.json" <<'PY'
+python3 -I - "${out}" "${ROOT_DIR}/hub/pkg/grants/released_packages.json" <<'PY'
 import json, sys
 released = json.load(open(sys.argv[2]))
 bad = []

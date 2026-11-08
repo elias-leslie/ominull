@@ -1,6 +1,6 @@
 package server
 
-// Escalation: a steward (or an operator) that cannot settle a run hands it to
+// Escalation: an agent (or an operator) that cannot settle a run hands it to
 // the owner. POST /api/v1/maintenance/escalate {"job_id","reason"} (admin)
 // puts the run on the owner's decisions card, and in Nightshift's inbox, as
 // one item (group job:<id>, answer handled). Answering it closes it like any

@@ -1,4 +1,4 @@
-package responseauth_test
+package grants_test
 
 import (
 	"crypto/ed25519"
@@ -14,32 +14,32 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 )
 
-func newTestAuthority(t *testing.T) *responseauth.Authority {
+func newTestAuthority(t *testing.T) *grants.Signer {
 	t.Helper()
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "keys"), 0o700)
-	auth, err := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir}, responseauth.NewMemoryStore())
+	auth, err := grants.Open(grants.Config{StateDir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return auth
 }
 
-func isolateRequest() *responseauth.AuthorizeInput { return isolateRequestFor("ep-1") }
+func isolateRequest() *grants.AuthorizeInput { return isolateRequestFor("ep-1") }
 
 // isolateRequestFor builds the payload the hub sends: route, body, targets.
-func isolateRequestFor(targets ...string) *responseauth.AuthorizeInput {
+func isolateRequestFor(targets ...string) *grants.AuthorizeInput {
 	route, body := "/api/v1/endpoints/isolate-bulk", map[string]interface{}{"scope": "ids", "ids": targets}
 	if len(targets) == 1 {
 		route, body = "/api/v1/endpoints/isolate", map[string]interface{}{"endpoint_id": targets[0]}
 	}
 	payload, _ := json.Marshal(map[string]interface{}{"route": route, "body": body, "targets": targets})
-	return &responseauth.AuthorizeInput{
-		TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation,
+	return &grants.AuthorizeInput{
+		TenantID: "default", Requester: "admin", Kind: grants.ActionKindIsolation,
 		Targets: targets, Payload: payload,
 	}
 }
@@ -64,7 +64,7 @@ func TestAuthorizeSignsGrantsAtOnce(t *testing.T) {
 		t.Fatalf("want a grant per target, got %d", len(au.Grants))
 	}
 	for _, g := range au.Grants {
-		if g.ActionKind != responseauth.ActionKindIsolation || g.OperatorID != "admin" || g.ActionDigest != digestOf(in.Payload) {
+		if g.ActionKind != grants.ActionKindIsolation || g.OperatorID != "admin" || g.ActionDigest != digestOf(in.Payload) {
 			t.Fatalf("grant not bound to the request: %+v", g)
 		}
 		if g.ResponseSessionID != "approval:"+au.ID {
@@ -77,8 +77,7 @@ func TestAuthorizeSignsGrantsAtOnce(t *testing.T) {
 	}
 }
 
-// The authority words the action from the payload; what the hub says about it
-// is ignored.
+// The action is worded from the payload; text the caller passes is ignored.
 func TestAuthorizeWordsComeFromThePayload(t *testing.T) {
 	auth := newTestAuthority(t)
 	au, err := auth.Authorize(isolateRequestFor("ep-1"))
@@ -88,7 +87,7 @@ func TestAuthorizeWordsComeFromThePayload(t *testing.T) {
 	if au.Action != "Isolate host" || !strings.Contains(au.Summary, "ep-1") {
 		t.Fatalf("words: %q / %q", au.Action, au.Summary)
 	}
-	term := &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindTerminalSession,
+	term := &grants.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindTerminalSession,
 		Targets: []string{"ep-1"}, Payload: json.RawMessage(`{"program":"/bin/bash"}`)}
 	au, err = auth.Authorize(term)
 	if err != nil || au.Action != "Open terminal" || !strings.Contains(au.Summary, "/bin/bash on ep-1") || len(au.Grants) != 1 {
@@ -96,13 +95,13 @@ func TestAuthorizeWordsComeFromThePayload(t *testing.T) {
 	}
 }
 
-// An action the authority cannot read is refused with the reason, and nothing
+// An action the hub cannot read is refused with the reason, and nothing
 // is signed.
 func TestAuthorizeRefusesWhatItCannotRead(t *testing.T) {
 	auth := newTestAuthority(t)
-	refused := map[string]*responseauth.AuthorizeInput{}
+	refused := map[string]*grants.AuthorizeInput{}
 	r := isolateRequestFor("ep-1")
-	r.Kind = responseauth.ActionKindMesh
+	r.Kind = grants.ActionKindMesh
 	refused["kind differs from route"] = r
 	r = isolateRequestFor("ep-1")
 	r.Payload = json.RawMessage(`{"route":"/api/v1/endpoints/delete","body":{},"targets":["ep-1"]}`)
@@ -114,7 +113,7 @@ func TestAuthorizeRefusesWhatItCannotRead(t *testing.T) {
 	r.Targets = []string{"ep-2"}
 	refused["payload targets differ"] = r
 	r = isolateRequestFor("ep-1")
-	r.Kind = responseauth.ActionKindAgentUpdate
+	r.Kind = grants.ActionKindAgentUpdate
 	r.Payload = json.RawMessage(`{"route":"/api/v1/agents/update","body":{"all":true},"targets":["ep-1"]}`)
 	refused["update without version"] = r
 	r = isolateRequestFor("ep-1")
@@ -137,12 +136,12 @@ func TestAuthorizeRefusesWhatItCannotRead(t *testing.T) {
 			t.Fatalf("%s: signed", name)
 		}
 	}
-	if _, err := auth.Authorize(&responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindTerminalSession,
+	if _, err := auth.Authorize(&grants.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindTerminalSession,
 		Targets: []string{"ep-1"}, Payload: json.RawMessage(`{"program":"/bin/bash"}`), SessionSeconds: 0}); err != nil {
 		t.Fatalf("a plain terminal is signed: %v", err)
 	}
-	if _, err := auth.Authorize(&responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindTerminalSession,
-		Targets: []string{"ep-1", "ep-2"}, Payload: json.RawMessage(`{"program":"/bin/bash"}`)}); !errors.Is(err, responseauth.ErrNotAuthorized) {
+	if _, err := auth.Authorize(&grants.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindTerminalSession,
+		Targets: []string{"ep-1", "ep-2"}, Payload: json.RawMessage(`{"program":"/bin/bash"}`)}); !errors.Is(err, grants.ErrNotAuthorized) {
 		t.Fatalf("a terminal on two endpoints: %v", err)
 	}
 }
@@ -150,7 +149,7 @@ func TestAuthorizeRefusesWhatItCannotRead(t *testing.T) {
 // The direct sign-grant route stays closed for kinds that go through Authorize.
 func TestTerminalGrantNeedsAnAuthorization(t *testing.T) {
 	auth := newTestAuthority(t)
-	_, err := auth.SignGrant(&responseauth.SignGrantRequest{TenantID: "default", ActionKind: response.ActionKindTerminalSession, Proof: &responseauth.ActionProof{}})
+	_, err := auth.SignGrant(&grants.SignGrantRequest{TenantID: "default", ActionKind: response.ActionKindTerminalSession})
 	if err == nil {
 		t.Fatal("terminal grant signed without an authorization")
 	}
@@ -186,30 +185,15 @@ func TestAuthorizeUnderConcurrency(t *testing.T) {
 	}
 }
 
-// A detection-policy authorization signs no grant: the hub applies the change
-// itself.
-func TestDetectionPolicyAuthorizationSignsNoGrants(t *testing.T) {
-	auth := newTestAuthority(t)
-	payload := []byte(`{"after":{"beacon_enabled":false},"before":{"beacon_enabled":true},"op":"save","policy":"detection_tuning"}`)
-	au, err := auth.Authorize(&responseauth.AuthorizeInput{TenantID: "default", Requester: "admin (api-key)", Kind: responseauth.ActionKindDetection,
-		Targets: []string{"detection:tuning"}, Payload: payload})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if au.Summary != "beacon_enabled true -> false" || len(au.Grants) != 0 {
-		t.Fatalf("summary %q grants %d", au.Summary, len(au.Grants))
-	}
-}
-
 // An agent's self-declared label is accepted only from an admin-key requester,
 // and only in the plain form; session length and ask-first reach the words.
 func TestAuthorizeAgentLabelSessionAndAskFirst(t *testing.T) {
 	auth := newTestAuthority(t)
-	if _, err := auth.Authorize(&responseauth.AuthorizeInput{TenantID: "default", Requester: "alice (console)",
+	if _, err := auth.Authorize(&grants.AuthorizeInput{TenantID: "default", Requester: "alice (console)",
 		Kind: response.ActionKindTerminalSession, Targets: []string{"ep-1"}, Payload: []byte(`{"program":"/bin/bash"}`), AgentLabel: "claude-ops"}); err == nil {
 		t.Fatal("an agent label without the admin key was accepted")
 	}
-	if _, err := auth.Authorize(&responseauth.AuthorizeInput{TenantID: "default", Requester: "admin (api-key)",
+	if _, err := auth.Authorize(&grants.AuthorizeInput{TenantID: "default", Requester: "admin (api-key)",
 		Kind: response.ActionKindTerminalSession, Targets: []string{"ep-1"}, Payload: []byte(`{"program":"/bin/bash"}`), AgentLabel: `a"b`}); err == nil {
 		t.Fatal("an agent label with a quote was accepted")
 	}
@@ -223,7 +207,7 @@ func TestAuthorizeAgentLabelSessionAndAskFirst(t *testing.T) {
 		{"screen", response.ActionKindScreenSession, `{"mode":"control","ask_first":true}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			au, err := auth.Authorize(&responseauth.AuthorizeInput{TenantID: "default", Requester: "admin (api-key)", Kind: tc.kind,
+			au, err := auth.Authorize(&grants.AuthorizeInput{TenantID: "default", Requester: "admin (api-key)", Kind: tc.kind,
 				Targets: []string{"ep-1"}, Payload: []byte(tc.payload), SessionSeconds: 1800, AskFirst: tc.askF, AgentLabel: "claude-ops"})
 			if err != nil {
 				t.Fatal(err)
@@ -232,25 +216,6 @@ func TestAuthorizeAgentLabelSessionAndAskFirst(t *testing.T) {
 				t.Fatalf("summary %q grants %d", au.Summary, len(au.Grants))
 			}
 		})
-	}
-}
-
-// Only the steward's screen request names a maintenance run.
-func TestAuthorizeStewardRunOnlyForTheSteward(t *testing.T) {
-	auth := newTestAuthority(t)
-	screen := func(requester, run string) *responseauth.AuthorizeInput {
-		return &responseauth.AuthorizeInput{TenantID: "default", Requester: requester, Kind: response.ActionKindScreenSession,
-			Targets: []string{"ep-1"}, Payload: []byte(`{"mode":"control","ask_first":true}`), SessionSeconds: 1800, AskFirst: true, StewardRun: run}
-	}
-	if _, err := auth.Authorize(screen("admin (api-key)", "run-1")); err == nil {
-		t.Fatal("a steward run on an ordinary screen request was signed")
-	}
-	au, err := auth.Authorize(screen("steward (steward-key)", "run-1"))
-	if err != nil || !strings.Contains(au.Summary, "maintenance run run-1") {
-		t.Fatalf("steward screen: %+v %v", au, err)
-	}
-	if _, err := auth.Authorize(screen("steward (steward-key)", "bad run\n")); err == nil {
-		t.Fatal("an unprintable run id was signed")
 	}
 }
 

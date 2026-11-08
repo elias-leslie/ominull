@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/storage"
 )
 
@@ -28,7 +28,7 @@ func auditCount(t *testing.T, store *storage.Store, action string) int {
 	return auditCounts(t, store)[action]
 }
 
-// A former ask path: the isolation is signed by the authority and runs on the
+// A former ask path: the isolation is signed by the hub and runs on the
 // first request. Nothing answers 202, nothing is left pending, and the audit
 // says authorized, not "approval requested".
 func TestIsolationIsAuthorizedOnTheFirstRequest(t *testing.T) {
@@ -62,7 +62,7 @@ func TestIsolationIsAuthorizedOnTheFirstRequest(t *testing.T) {
 	}
 }
 
-// The handler runs under the id of the authorization the authority just made;
+// The handler runs under the id of the authorization the hub just made;
 // a caller's own X-Approval-ID is dropped, and the grants reach the handler.
 func TestAuthorizedHandlerSeesTheAuthorityNotTheCaller(t *testing.T) {
 	t.Parallel()
@@ -71,7 +71,7 @@ func TestAuthorizedHandlerSeesTheAuthorityNotTheCaller(t *testing.T) {
 	var gotID string
 	var granted int
 	h := srv.authorized(func(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
-		return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate host", Summary: "x", Targets: []string{"ep-1"},
+		return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Isolate host", Summary: "x", Targets: []string{"ep-1"},
 			Payload: []byte(`{"body":{"endpoint_id":"ep-1"},"route":"/api/v1/endpoints/isolate","targets":["ep-1"]}`)}, true
 	}, func(w http.ResponseWriter, r *http.Request) {
 		gotID = r.Header.Get(approvalHeader)
@@ -87,7 +87,7 @@ func TestAuthorizedHandlerSeesTheAuthorityNotTheCaller(t *testing.T) {
 	}
 }
 
-// What the authority will not sign is refused with its reason, audited, and
+// What the hub will not sign is refused with its reason, audited, and
 // the handler never runs.
 func TestAuthorityRefusalStopsTheAction(t *testing.T) {
 	t.Parallel()
@@ -95,12 +95,12 @@ func TestAuthorityRefusalStopsTheAction(t *testing.T) {
 	defer store.Close()
 	ran := false
 	h := srv.authorized(func(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
-		return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate host", Summary: "x", Targets: []string{"ep-1"},
+		return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Isolate host", Summary: "x", Targets: []string{"ep-1"},
 			Payload: []byte(`{"route":"/api/v1/endpoints/delete","body":{},"targets":["ep-1"]}`)}, true
 	}, func(w http.ResponseWriter, r *http.Request) { ran = true })
 	w := httptest.NewRecorder()
 	h(w, httptest.NewRequest("POST", "/x", strings.NewReader(`{}`)))
-	if ran || w.Code < 400 || !strings.Contains(w.Body.String(), "did not sign") {
+	if ran || w.Code < 400 || !strings.Contains(w.Body.String(), "not signed") {
 		t.Fatalf("ran=%v status %d %s", ran, w.Code, w.Body.String())
 	}
 	if actions := auditCounts(t, store); actions["ACTION_REFUSED"] != 1 {
@@ -108,7 +108,7 @@ func TestAuthorityRefusalStopsTheAction(t *testing.T) {
 	}
 }
 
-// Without the authority nothing is signed and nothing runs.
+// Without the hub nothing is signed and nothing runs.
 func TestNoAuthorityMeansNoAction(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)

@@ -3,10 +3,8 @@ package server
 // The software removal catalog: GET/PUT/DELETE /api/v1/maintenance/catalog.
 // One settings row holds the catalog (scripts.Catalog); a hub that never
 // saved one uses the seed shipped with it. Adding or changing an entry widens
-// what a removal package may uninstall, so the authority authorizes it
-// through the same hub-policy path as a detection loosening (the
-// authority writes the statement from the entry itself); a change to name or
-// note only, and deleting an entry, go straight through. Every run of a
+// what a removal package may uninstall, so the audit
+// names the entry. Every run of a
 // package with a catalog parameter carries the catalog as it is at that
 // moment, so the run's own approval covers the exact entries it uses.
 
@@ -18,7 +16,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/scripts"
 )
 
@@ -164,32 +162,22 @@ func (s *Server) handleSoftwareCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	wording := "name or note of " + e.ID
 	if len(loosens) > 0 {
-		if wording, err = responseauth.SoftwareCatalogWording("catalog:"+e.ID, beforeMap, catalogEntryMap(e)); err != nil {
+		if wording, err = grants.SoftwareCatalogWording("catalog:"+e.ID, beforeMap, catalogEntryMap(e)); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
 	c := policyChange{policy: "software_catalog", op: op, target: "catalog:" + e.ID, after: e,
-		loosens: loosens, wording: wording, subject: "the software removal catalog"}
+		wording: wording}
 	if before != nil {
 		c.before = *before
-	}
-	approvalID, ok := s.policyAuthorized(w, r, c)
-	if !ok {
-		return
 	}
 	if !s.saveCatalog(w, next) {
 		return
 	}
-	if approvalID != "" {
-		how += ", authorization " + approvalID
-	}
 	s.audit(r, softwareCatalogAudit, "catalog:"+e.ID, how+": "+wording+"; credential "+credentialOf(r)+" (unverified)")
 	view := s.catalogView()
 	view["changed"] = true
-	if approvalID != "" {
-		view["approval_id"] = approvalID
-	}
 	writeJSON(w, http.StatusOK, view)
 }
 

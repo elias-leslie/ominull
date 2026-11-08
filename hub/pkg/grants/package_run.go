@@ -1,12 +1,12 @@
-package responseauth
+package grants
 
 // Maintenance package runs (kind script_exec).
 //
 // The hub asks with a PackageRunPayload: the exact script payloads the agents
 // will receive (each item is the JSON string an agent digests), the named
-// endpoints, and the route. The authority reads everything from those bytes,
+// endpoints, and the route. The hub reads everything from those bytes,
 // and the hub cannot vouch for a package: a script counts as a package only
-// when its source digest is one this authority was released with
+// when its source digest is one this hub was released with
 // (released_packages.json, generated from packages/windows and checked against
 // it by the tests). Its header (line 1 of that released source) then declares
 // its category, risk and typed parameters; a run must carry mode and exactly
@@ -16,7 +16,7 @@ package responseauth
 //
 // Each item must be exactly the bytes json.Marshal makes of it (field order,
 // no duplicates or stray members), so an agent's field search and this parse
-// cannot read different values. The authority signs one grant per endpoint and
+// cannot read different values. The hub signs one grant per endpoint and
 // item, each bound to that item's own digest.
 
 import (
@@ -91,7 +91,7 @@ func ReleasedPackages() map[string]string {
 var reservedParams = map[string]bool{"script_id": true, "script_version": true, "script_digest": true, "interpreter": true,
 	"source": true, "parameters": true, "timeout_seconds": true, "max_output_bytes": true}
 
-// PackageRunPayload is what the authority signs for a script_exec run.
+// PackageRunPayload is what the hub signs for a script_exec run.
 type PackageRunPayload struct {
 	Route   string   `json:"route"`
 	Items   []string `json:"items"` // each the exact ScriptExecPayload JSON an agent receives
@@ -134,7 +134,7 @@ type PlaybookRun struct {
 	WindowSeconds int64  `json:"window_seconds"`
 }
 
-// PackageItem is one script payload of a run as the authority read it.
+// PackageItem is one script payload of a run as the hub read it.
 type PackageItem struct {
 	Raw    string
 	Digest string // sha256 of Raw: the grant's action digest
@@ -160,7 +160,7 @@ func ItemDigest(raw string) string {
 }
 
 // plainKeys requires one JSON value whose object keys are all lower case and
-// unique within their object, so the agent and the authority cannot read
+// unique within their object, so the agent and the hub cannot read
 // different members out of the same bytes.
 func plainKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -537,7 +537,7 @@ func (it PackageItem) shortLabel() string {
 
 // signPackageGrants signs a package run: one grant per endpoint and script
 // payload, each bound to that payload's own digest.
-func (a *Authority) signPackageGrants(au *authorized, now time.Time) ([]*response.EndpointGrant, error) {
+func (a *Signer) signPackageGrants(au *authorized, now time.Time) ([]*response.EndpointGrant, error) {
 	targets := au.Targets
 	items, pb, err := parsePackageRunPayload(au.Payload, targets)
 	if err != nil {

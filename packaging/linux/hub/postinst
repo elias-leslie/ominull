@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-for directory in /etc/ominull /var/lib/ominull /var/lib/ominull/packages /var/lib/ominull/backups /opt/ominull/bin/certs /var/lib/ominull-response-authority /run/ominull-response-authority; do
+for directory in /etc/ominull /var/lib/ominull /var/lib/ominull/grants /var/lib/ominull/packages /var/lib/ominull/backups /opt/ominull/bin/certs; do
     [ -L "${directory}" ] && { echo "ominull: refusing symlinked package directory ${directory}" >&2; exit 1; }
     [ -e "${directory}" ] && [ ! -d "${directory}" ] && { echo "ominull: package path ${directory} is not a directory" >&2; exit 1; }
 done
@@ -24,30 +24,6 @@ if ! grep -q '^ominull:' /etc/passwd 2>/dev/null; then
     fi
 fi
 
-# 2. Create separate unprivileged system group and user for response authority
-if ! grep -q '^ominull-authority:' /etc/group 2>/dev/null; then
-    if command -v groupadd >/dev/null 2>&1; then
-        groupadd -r ominull-authority 2>/dev/null || true
-    fi
-    if ! grep -q '^ominull-authority:' /etc/group 2>/dev/null; then
-        echo "ominull-authority:x:997:" >> /etc/group 2>/dev/null || true
-    fi
-fi
-if ! grep -q '^ominull-authority:' /etc/passwd 2>/dev/null; then
-    if command -v useradd >/dev/null 2>&1; then
-        useradd -r -g ominull-authority -d /var/lib/ominull-response-authority -s /usr/sbin/nologin -c "Ominull Response Authority" ominull-authority 2>/dev/null || true
-    fi
-    if ! grep -q '^ominull-authority:' /etc/passwd 2>/dev/null; then
-        echo "ominull-authority:x:997:997:Ominull Response Authority:/var/lib/ominull-response-authority:/usr/sbin/nologin" >> /etc/passwd 2>/dev/null || true
-    fi
-fi
-
-# Add ominull user to ominull-authority group so hub can connect to response authority Unix socket
-if command -v usermod >/dev/null 2>&1; then
-    usermod -a -G ominull-authority ominull 2>/dev/null || true
-elif command -v adduser >/dev/null 2>&1; then
-    adduser ominull ominull-authority 2>/dev/null || true
-fi
 
 # 3. Directory layout and permissions
 install -d -m 0750 /etc/ominull
@@ -62,15 +38,10 @@ if [ -d /opt/ominull/bin/certs ]; then
     chmod 0700 /opt/ominull/bin/certs
 fi
 
-# Authority state (unreadable by hub process)
-install -d -m 0700 /var/lib/ominull-response-authority
-chown -R ominull-authority:ominull-authority /var/lib/ominull-response-authority 2>/dev/null || true
-chmod 0700 /var/lib/ominull-response-authority
-
-# Authority socket directory (group traversal for ominull-authority group members)
-install -d -m 0750 /run/ominull-response-authority
-chown ominull-authority:ominull-authority /run/ominull-response-authority 2>/dev/null || true
-chmod 0750 /run/ominull-response-authority
+# Grant signing keys, epochs and manifests.
+install -d -m 0700 /var/lib/ominull/grants
+chown -R ominull:ominull /var/lib/ominull/grants 2>/dev/null || true
+chmod 0700 /var/lib/ominull/grants
 
 # 4. Configuration files
 # hub.env and admin.key are root:ominull 0640: the hub reads them and cannot
@@ -110,20 +81,6 @@ OMINULL_ENV
 fi
 chown root:ominull /etc/ominull/hub.env 2>/dev/null || true
 chmod 0640 /etc/ominull/hub.env
-
-if [ ! -s /etc/ominull/response-authority.env ]; then
-    umask 077
-    cat > /etc/ominull/response-authority.env <<'OMINULL_AUTH_ENV'
-# Managed by Ominull installer and response authority service.
-OMINULL_AUTH_SOCKET=/run/ominull-response-authority/authority.sock
-OMINULL_AUTH_STATE_DIR=/var/lib/ominull-response-authority
-OMINULL_AUTH_PARTITION=portable-local
-OMINULL_AUTH_ENV
-    chown ominull-authority:ominull-authority /etc/ominull/response-authority.env 2>/dev/null || true
-    chmod 0600 /etc/ominull/response-authority.env
-fi
-chown ominull-authority:ominull-authority /etc/ominull/response-authority.env 2>/dev/null || true
-chmod 0600 /etc/ominull/response-authority.env
 
 # Migrate legacy admin key if present
 if grep -q '^OMINULL_ADMIN_KEY=' /etc/ominull/hub.env; then
@@ -174,7 +131,5 @@ fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
     systemctl enable ominull-hub.service
-    systemctl enable ominull-response-authority.service
-    systemctl try-restart ominull-response-authority.service || systemctl start ominull-response-authority.service || true
     systemctl try-restart ominull-hub.service || systemctl start ominull-hub.service || true
 fi

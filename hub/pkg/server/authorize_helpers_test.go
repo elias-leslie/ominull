@@ -10,35 +10,35 @@ import (
 	"sync"
 	"testing"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/storage"
 )
 
 type testAuthority struct {
-	auth *responseauth.Authority
+	auth *grants.Signer
 }
 
 var testAuthorities sync.Map // *Server -> *testAuthority
 
-// installTestAuthority gives a test hub an in-process response authority.
+// installTestAuthority gives a test hub a grant signer.
 func installTestAuthority(t testing.TB, srv *Server, dir string) *testAuthority {
 	t.Helper()
 	authDir := filepath.Join(dir, "authority")
 	if err := os.MkdirAll(filepath.Join(authDir, "keys"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	auth, err := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: authDir}, responseauth.NewMemoryStore())
+	auth, err := grants.Open(grants.Config{StateDir: authDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.SetResponseAuth(responseauth.NewInProcessClient(auth))
+	srv.SetResponseAuth(grants.NewClient(auth))
 	a := &testAuthority{auth: auth}
 	testAuthorities.Store(srv, a)
 	return a
 }
 
 // useTestAuthority registers an authority a test built itself.
-func useTestAuthority(srv *Server, auth *responseauth.Authority) *testAuthority {
+func useTestAuthority(srv *Server, auth *grants.Signer) *testAuthority {
 	a := &testAuthority{auth: auth}
 	testAuthorities.Store(srv, a)
 	return a

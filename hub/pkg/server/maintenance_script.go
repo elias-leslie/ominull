@@ -12,13 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 )
 
 // One-off scripts: an agent or the operator submits a script (PowerShell,
-// bash or sh) to run once on named machines. It is a real run: the authority signs
+// bash or sh) to run once on named machines. It is a real run: the hub signs
 // a grant bound to the exact script, the agent runs it under the same
 // supervisor, result contract and audit as a package, and the run record keeps
 // the script text (the job's signed payload) with its name, reason and
@@ -48,7 +48,7 @@ var oneOffInterpreters = map[string]struct {
 }
 
 func isOneOffScript(scriptID string) bool {
-	return strings.HasPrefix(scriptID, responseauth.OneOffPrefix)
+	return strings.HasPrefix(scriptID, grants.OneOffPrefix)
 }
 
 type oneOffRequest struct {
@@ -117,15 +117,15 @@ func (s *Server) oneOffPlan(tenantID string, body []byte) (*oneOffRequest, strin
 	sum := sha256.Sum256([]byte(req.Source))
 	digest := hex.EncodeToString(sum[:])
 	raw, err := json.Marshal(response.ScriptExecPayload{
-		ScriptID: responseauth.OneOffID(digest), ScriptVersion: 1, ScriptDigest: digest, Interpreter: shell.path,
+		ScriptID: grants.OneOffID(digest), ScriptVersion: 1, ScriptDigest: digest, Interpreter: shell.path,
 		Source: req.Source, TimeoutSeconds: req.TimeoutSeconds, MaxOutputBytes: oneOffMaxOutput,
 	})
 	if err != nil {
 		return nil, "", nil, err
 	}
-	payload, _ := json.Marshal(responseauth.PackageRunPayload{
-		Route: responseauth.OneOffScriptRoute, Items: []string{string(raw)}, Targets: req.EndpointIDs,
-		OneOff: &responseauth.OneOffScript{Name: req.Name, Reason: req.Reason},
+	payload, _ := json.Marshal(grants.PackageRunPayload{
+		Route: grants.OneOffScriptRoute, Items: []string{string(raw)}, Targets: req.EndpointIDs,
+		OneOff: &grants.OneOffScript{Name: req.Name, Reason: req.Reason},
 	})
 	return &req, string(raw), payload, nil
 }
@@ -152,7 +152,7 @@ func (s *Server) resolveOneOffScript(w http.ResponseWriter, r *http.Request, bod
 	}, true
 }
 
-// handleOneOffScript runs once the authority has authorized it: one job per machine.
+// handleOneOffScript runs once the hub has authorized it: one job per machine.
 func (s *Server) handleOneOffScript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -179,7 +179,7 @@ func (s *Server) handleOneOffScript(w http.ResponseWriter, r *http.Request) {
 		requestedBy = "operator"
 	}
 	runID := r.Header.Get(approvalHeader)
-	digest := responseauth.ItemDigest(raw)
+	digest := itemDigest(raw)
 	var p response.ScriptExecPayload
 	_ = json.Unmarshal([]byte(raw), &p)
 	rec := oneOffRun{RunID: runID, Tenant: tenantID, Name: req.Name, Reason: req.Reason, Shell: req.Shell, Digest: p.ScriptDigest,
@@ -201,7 +201,7 @@ func (s *Server) handleOneOffScript(w http.ResponseWriter, r *http.Request) {
 		}
 		jobs = append(jobs, packageRunJob{JobID: job.ID, EndpointID: g.EndpointID, Package: req.Name, Version: 1})
 		rec.Jobs = append(rec.Jobs, job.ID)
-		s.audit(r, "SCRIPT_RUN_DISPATCHED", job.ID, fmt.Sprintf("Dispatched one-off script %q (sha256 %s, %s) to %s authorized by the response authority: %s",
+		s.audit(r, "SCRIPT_RUN_DISPATCHED", job.ID, fmt.Sprintf("Dispatched one-off script %q (sha256 %s, %s) to %s authorized by the hub: %s",
 			req.Name, p.ScriptDigest[:12], req.Shell, g.EndpointID, req.Reason))
 	}
 	if err := s.saveOneOffRun(rec); err != nil {
@@ -381,3 +381,6 @@ func (s *Server) handleOneOffScriptRoute() http.HandlerFunc {
 		run(w, r)
 	}
 }
+
+// itemDigest is grants.ItemDigest for code holding a list called grants.
+func itemDigest(raw string) string { return grants.ItemDigest(raw) }

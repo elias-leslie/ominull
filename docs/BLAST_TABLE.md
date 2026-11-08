@@ -1,7 +1,7 @@
 # Blast table: how far each action reaches
 
 A reference for how much each admin action can change. Since 2026-10-24 OmniNull
-does not ask the owner about any of them: the response authority authorizes every
+does not ask the owner about any of them: the hub signs every
 action on the first request (docs/RESPONSE_THREAT_MODEL_AND_TRUSTED_ORIGIN.md
 section 2.4), so no class below needs a tap, an ask or an approval row. The code
 that computed and signed `{class, verdict, why}` into each ask
@@ -10,7 +10,7 @@ guide for reviewing audit rows and for choosing which actions deserve a lock
 level or a host authority. Verdicts: **safe** changes nothing that matters,
 **undoable** can be put back, **dangerous** cannot easily be, **core** changes
 what the hub itself is allowed to do (trust, locks, capabilities, access limits,
-self-enrolment) or is something the authority cannot read, so it is refused.
+self-enrolment) or is something the hub cannot read, so it is refused.
 Packages are the ones in `packages/` (header line 1 gives risk and the careful
 params). No hostnames or addresses appear here.
 
@@ -73,7 +73,6 @@ authority refuses.
 |---|---|---|---|
 | Agent update, release signed with the release key | agent_update | undoable | agents can be rolled back (retire, then roll forward); staged rollouts hold the rest until canaries are healthy |
 | Agent update, release signed with a routine key | agent_update | undoable | same; a rollout to more than one endpoint without named canaries is refused |
-| Agent update whose release the authority cannot verify | agent_update | dangerous | signed anyway (agents check the package signature themselves); the audit says "release signature not verified by the authority" |
 | Terminal session | remote | dangerous (lab machine: undoable) | a person's machine |
 | Remote screen session | remote | dangerous (lab machine: undoable) | a person's machine |
 | Isolate a machine | isolation | undoable | the hub can release it |
@@ -85,13 +84,13 @@ authority refuses.
 | Detection policy: software catalog | capability | undoable | saving the old list undoes it |
 | Detection policy with a drill that blinds a floor case | detection | dangerous | the floor case or its drill could not run; the audit statement lists them, the save is not blocked |
 | Any other detection policy change | detection | undoable | saving the previous policy undoes it |
-| Detection change the authority cannot read | detection | **core** | refused (invalid or oversized payload) |
-| Unreadable package run | package | **core** | refused (the authority signs only what it can read) |
+| Detection change the hub cannot read | detection | **core** | refused (invalid or oversized payload) |
+| Unreadable package run | package | **core** | refused (the hub signs only what it can read) |
 | Anything not classed | other | dangerous | default |
 
 ## 3. Scripts that are not released packages
 
-Authorized on the first request, like the rest. The authority signs for at most 50 targets per request.
+Authorized on the first request, like the rest. The hub signs for at most 50 targets per request.
 
 | Action | Class | Verdict |
 |---|---|---|

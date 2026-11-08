@@ -41,9 +41,9 @@ POLICY: RuntimePolicy = {"rule_version": 1, "prefixes": ["docs/", "dist/", "scri
 REQUEST_KEYS = {"contract_version", "operation", "challenge", "task_id", "project",
                 "accepted_source_commit", "acceptance_id"}
 CONFIG_KEYS = {"schema_version", "target_id", "ssh_alias", "lxc_id", "hub_base_url",
-               "admin_key_file", "hub_package", "local_binary", "local_authority_binary"}
+               "admin_key_file", "hub_package", "local_binary"}
 CHECK_IDS = ("production_binary", "production_health", "production_routes")
-BINARIES = {"hub": "ominull-hub", "authority": "ominull-response-authority"}
+BINARIES = {"hub": "ominull-hub"}
 SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
@@ -172,8 +172,7 @@ def load_config(root, *, require_deployment_inputs=True):
     require(Path(config["admin_key_file"]).is_absolute(), "config_key_path")
     if require_deployment_inputs:
         regular_file(Path(config["admin_key_file"]), private=True)
-    expected = {"local_binary": "build/ominull-hub",
-                "local_authority_binary": "build/ominull-response-authority"}
+    expected = {"local_binary": "build/ominull-hub"}
     for field, value in expected.items():
         require(config[field] == value, "config_binary_path")
         if require_deployment_inputs:
@@ -325,7 +324,7 @@ def package_evidence(root, config, accepted, directory):
             with source, member_path.open("wb") as output:
                 for chunk in iter(lambda: source.read(1024 * 1024), b""):
                     output.write(chunk)
-            local_field = "local_binary" if role == "hub" else "local_authority_binary"
+            local_field = "local_binary"
             local_path = regular_file(root / config[local_field])
             member_digest = sha256_file(member_path)
             require(sha256_file(local_path) == member_digest, "local_package_binary_mismatch")
@@ -333,8 +332,6 @@ def package_evidence(root, config, accepted, directory):
             binary_evidence[role] = {"name": name, "local_path": config[local_field],
                 "package_member": "opt/ominull/bin/" + name,
                 "local_sha256": member_digest, "package_sha256": member_digest, **info}
-    require(binary_evidence["hub"]["source_commit"] == binary_evidence["authority"]["source_commit"],
-            "binary_source_disagreement")
     return {"package": {"identity": package.name, "version": version,
                 "sha256": digest, "signature_sha256": sha256_file(signature),
                 "digest_metadata_sha256": sha256_file(digest_file),

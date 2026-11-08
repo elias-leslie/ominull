@@ -94,7 +94,7 @@ func TestServer_ScreenSessionFlow(t *testing.T) {
 		return resp, m
 	}
 
-	// Refusals before the authority is asked to sign anything.
+	// Refusals before the hub is asked to sign anything.
 	for _, tc := range []struct{ body, want string }{
 		{`{"endpoint_id":"linux-noscr"}`, "reports no screen capability"},
 		{`{"endpoint_id":"win-watch","mode":"control"}`, "view-only session"},
@@ -531,14 +531,13 @@ func TestServer_ScreenAskFirst(t *testing.T) {
 		t.Fatalf("offer %v", offer)
 	}
 
-	// Turning it off loosens, so the authority signs it; it applies in the
-	// same request and the audit row says it was loosened.
+	// Turning it off applies at once and leaves an audit row.
 	code, m := call(http.MethodPut, "/api/v1/screen/settings?endpoint_id=win-ask", `{"ask_first":false}`)
 	if code != http.StatusOK || m["changed"] != true || srv.screenAskFirst("win-ask") {
 		t.Fatalf("off: %d %v", code, m)
 	}
-	if !screenAuditHas(t, store, "SCREEN_SETTINGS_CHANGED", "loosened") || !screenAuditHas(t, store, "ACTION_AUTHORIZED", "win-ask") {
-		t.Fatal("turning ask-first off left no signed, loosened audit rows")
+	if !screenAuditHas(t, store, "SCREEN_SETTINGS_CHANGED", "win-ask") {
+		t.Fatal("turning ask-first off left no audit row")
 	}
 
 	// The fleet default: on at once, covers machines without their own
@@ -663,7 +662,7 @@ func TestServer_ScreenAgentLabel(t *testing.T) {
 	}
 }
 
-// TestServer_ScreenTrustPreflight: the authority is never asked to sign a session the
+// TestServer_ScreenTrustPreflight: the hub is never asked to sign a session the
 // endpoint's agent would drop without a word (the first live test: a manifest
 // signed before screen joined the respond profile).
 func TestServer_ScreenTrustPreflight(t *testing.T) {

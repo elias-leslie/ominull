@@ -12,10 +12,7 @@ package server
 // endpoint's join type (agents do not report it), so it cannot recommend it
 // per machine; the owner turns it on for the machines that need it.
 //
-// Turning ask-first on applies at once. Turning it off (or dropping an
-// override so a machine follows a fleet default that is off) loosens safety,
-// so the authority authorizes it and the audit records it, as raising the
-// remote shell limits does.
+// Any change applies at once and the audit records it.
 
 import (
 	"encoding/json"
@@ -26,7 +23,7 @@ import (
 	"strings"
 	"sync"
 
-	"ominull/hub/pkg/responseauth"
+	"ominull/hub/pkg/grants"
 )
 
 const (
@@ -196,7 +193,6 @@ func (s *Server) putScreenSettings(w http.ResponseWriter, r *http.Request, endpo
 		return
 	}
 	wording := "no change in effect (" + scope + " setting rewritten)"
-	c := policyChange{policy: "screen_ask_first", op: "off", target: target, subject: "screen safety"}
 	if was != now {
 		host := ""
 		if endpointID != "" {
@@ -207,18 +203,10 @@ func (s *Server) putScreenSettings(w http.ResponseWriter, r *http.Request, endpo
 		if host != "" && host != endpointID {
 			a["host"] = host
 		}
-		if wording, err = responseauth.ScreenAskFirstWording(target, b, a); err != nil {
+		if wording, err = grants.ScreenAskFirstWording(target, b, a); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "the change could not be described: "+err.Error())
 			return
 		}
-		c.before, c.after, c.wording = b, a, wording
-		if was && !now {
-			c.loosens = []string{"asking the person at the keyboard first"}
-		}
-	}
-	approvalID, ok := s.policyAuthorized(w, r, c)
-	if !ok {
-		return
 	}
 	raw, _ := json.Marshal(after)
 	if after.Default == nil && len(after.Endpoints) == 0 {
@@ -228,19 +216,16 @@ func (s *Server) putScreenSettings(w http.ResponseWriter, r *http.Request, endpo
 		writeJSONError(w, http.StatusInternalServerError, "the screen settings could not be saved: "+err.Error())
 		return
 	}
-	how := "tightened"
+	how := "turned off"
 	switch {
-	case approvalID != "":
-		how = "loosened, authorization " + approvalID
 	case was == now:
 		how = "rewritten"
+	case now:
+		how = "turned on"
 	}
 	s.audit(r, screenSettingsAudit, target, how+": "+wording+"; credential "+credentialOf(r)+" (unverified)")
 	view := s.screenSettingsView(after, endpointID)
 	view["changed"] = true
-	if approvalID != "" {
-		view["approval_id"] = approvalID
-	}
 	writeJSON(w, http.StatusOK, view)
 }
 

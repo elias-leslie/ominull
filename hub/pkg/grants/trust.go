@@ -1,14 +1,12 @@
-package responseauth
+package grants
 
-// Agent trust, authority side: the two narrow keys next to the tenant
+// Agent trust, signing side: the two narrow keys next to the tenant
 // response key, the detector's rate-limited isolation grants, and capability
 // manifests. Agents pin all three public keys and verify everything here
-// themselves (agent/include/agent_trust.h), so code running on the hub can
-// carry these statements but cannot make them.
+// themselves (agent/include/agent_trust.h).
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -166,7 +164,7 @@ func validTenant(t string) bool {
 	return t != "" && !strings.ContainsAny(t, "#/\\\x00")
 }
 
-func (a *Authority) slotKey(tenantID, slot string) (ed25519.PrivateKey, string, error) {
+func (a *Signer) slotKey(tenantID, slot string) (ed25519.PrivateKey, string, error) {
 	if !validTenant(tenantID) {
 		return nil, "", errors.New("invalid tenant ID")
 	}
@@ -185,10 +183,10 @@ func (a *Authority) slotKey(tenantID, slot string) (ed25519.PrivateKey, string, 
 	return priv, hex.EncodeToString(fp[:]), nil
 }
 
-// trustEpochs is the authority's own record of each tenant's trust bundle
+// trustEpochs is the hub's own record of each tenant's trust bundle
 // epoch: it moves up by one whenever the tenant's three public keys change,
-// and nothing outside the authority sets it, so a hub cannot make the owner
-// sign an old or an exhausted epoch.
+// and only the signer sets it, so the owner is never asked to sign an old
+// or an exhausted epoch.
 type trustEpochs struct {
 	mu    sync.Mutex
 	path  string
@@ -257,21 +255,15 @@ func (e *trustEpochs) epochFor(tenantID string, k *response.TrustKeys) (int64, e
 }
 
 // hasTenantKey reports whether the tenant already has an active response key.
-func (a *Authority) hasTenantKey(tenantID string) bool {
+func (a *Signer) hasTenantKey(tenantID string) bool {
 	a.mu.RLock()
+	defer a.mu.RUnlock()
 	_, ok := a.tenantKeys[tenantID]
-	a.mu.RUnlock()
-	if ok {
-		return true
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	rec, err := a.store.GetTenantKey(ctx, tenantID)
-	return err == nil && rec != nil && rec.Status == "active"
+	return ok
 }
 
 // TrustKeys returns the three public keys an agent of this tenant pins.
-func (a *Authority) TrustKeys(tenantID string) (*response.TrustKeys, error) {
+func (a *Signer) TrustKeys(tenantID string) (*response.TrustKeys, error) {
 	if !validTenant(tenantID) {
 		return nil, errors.New("invalid tenant ID")
 	}
@@ -317,9 +309,9 @@ type autoIsolateBook struct {
 
 // SignAutoIsolation signs the detector's isolation of one endpoint with the
 // auto-isolation key. The grant can only isolate (agents refuse it for
-// anything else), lives ten minutes, and the authority rations it: at most
+// anything else), lives ten minutes, and the hub rations it: at most
 // six per tenant per hour and one per endpoint per ten minutes, each audited.
-func (a *Authority) SignAutoIsolation(req *AutoIsolateRequest) (*response.EnforcementGrant, error) {
+func (a *Signer) SignAutoIsolation(req *AutoIsolateRequest) (*response.EnforcementGrant, error) {
 	if req == nil || !validTenant(req.TenantID) {
 		return nil, errors.New("invalid tenant ID")
 	}
@@ -416,21 +408,29 @@ type manifestBook struct {
 	items map[string]*response.CapabilityManifest // tenant \x00 endpoint
 }
 
-func newManifestBook(stateDir string) *manifestBook {
+// newManifestBook loads the manifests. A file it cannot read is an error, not
+// an empty book: starting over at seq 1 would have agents drop every manifest.
+func newManifestBook(stateDir string) (*manifestBook, error) {
 	b := &manifestBook{items: map[string]*response.CapabilityManifest{}}
 	if stateDir == "" {
-		return b
+		return b, nil
 	}
 	b.path = filepath.Join(stateDir, "manifests.json")
-	if raw, err := os.ReadFile(b.path); err == nil {
-		var list []*response.CapabilityManifest
-		if json.Unmarshal(raw, &list) == nil {
-			for _, m := range list {
-				b.items[m.TenantID+"\x00"+m.EndpointID] = m
-			}
-		}
+	raw, err := os.ReadFile(b.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return b, nil
 	}
-	return b
+	if err != nil {
+		return nil, fmt.Errorf("read the capability manifests: %w", err)
+	}
+	var list []*response.CapabilityManifest
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("the capability manifests in %s are corrupt: %w", b.path, err)
+	}
+	for _, m := range list {
+		b.items[m.TenantID+"\x00"+m.EndpointID] = m
+	}
+	return b, nil
 }
 
 func (b *manifestBook) saveLocked() error {
@@ -448,11 +448,7 @@ func (b *manifestBook) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := b.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, b.path)
+	return writeDurable(b.path, raw)
 }
 
 // ManifestRequest asks for an endpoint's manifest.
@@ -467,7 +463,7 @@ type ManifestRequest struct {
 // pins what the endpoint already does, and engagement (hub-pushed scripts)
 // is set through the capabilities route. Any later change goes through that
 // route too (capability_change).
-func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.CapabilityManifest, error) {
+func (a *Signer) EndpointManifest(req *ManifestRequest) (*response.CapabilityManifest, error) {
 	if req == nil || !validTenant(req.TenantID) {
 		return nil, errors.New("invalid tenant ID")
 	}
@@ -487,7 +483,7 @@ func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.Capability
 			if err != nil {
 				return nil, err
 			}
-			a.auditAction(req.TenantID, "authority", "manifest_resigned", string(response.ActionKindCapability), ep, "", "success",
+			a.auditAction(req.TenantID, "hub", "manifest_resigned", string(response.ActionKindCapability), ep, "", "success",
 				fmt.Sprintf("profile %s under the current policy key, seq %d", n.Profile, n.Seq))
 			m = n
 		}
@@ -499,7 +495,7 @@ func (a *Authority) EndpointManifest(req *ManifestRequest) (*response.Capability
 			if err != nil {
 				return nil, err
 			}
-			a.auditAction(req.TenantID, "authority", "manifest_refreshed", string(response.ActionKindCapability), ep, "", "success",
+			a.auditAction(req.TenantID, "hub", "manifest_refreshed", string(response.ActionKindCapability), ep, "", "success",
 				fmt.Sprintf("profile %s now holds %s (was %s), seq %d", n.Profile, strings.Join(n.Caps, ", "), strings.Join(m.Caps, ", "), n.Seq))
 			m = n
 		}
@@ -538,7 +534,7 @@ func ProfileInitialAllowed(profile string) bool {
 	return profile == "monitor" || profile == "respond"
 }
 
-func (a *Authority) signManifestLocked(tenantID, ep, profile string, seq int64) (*response.CapabilityManifest, error) {
+func (a *Signer) signManifestLocked(tenantID, ep, profile string, seq int64) (*response.CapabilityManifest, error) {
 	caps, ok := response.ProfileCaps(profile)
 	if !ok {
 		return nil, fmt.Errorf("unknown profile %q", profile)
@@ -564,7 +560,7 @@ func (a *Authority) signManifestLocked(tenantID, ep, profile string, seq int64) 
 }
 
 // allowIsolationRoute lifts monitor-only (an isolation_change authorization);
-// the authority raises the endpoint's manifest to respond when it signs it.
+// the hub raises the endpoint's manifest to respond when it signs it.
 const allowIsolationRoute = "/api/v1/endpoints/allow-isolation"
 
 // changesManifest reports whether authorizing this action changes a manifest.
@@ -587,7 +583,7 @@ type capabilityPayload struct {
 }
 
 // applyCapabilityChange signs the endpoint's next manifest.
-func (a *Authority) applyCapabilityChange(au *authorized) error {
+func (a *Signer) applyCapabilityChange(au *authorized) error {
 	tenantID := au.TenantID
 	var p routedPayload
 	if err := decodeJSON(au.Payload, &p); err != nil {

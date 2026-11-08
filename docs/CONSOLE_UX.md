@@ -16,7 +16,7 @@ timeline, evidence, status).
 | Asset view | 1,200 | No action buttons: terminal, screen, isolate, run a package are all behind one "Actions" menu. Ten stacked cards, including three identity cards that repeat OS and role. Every package shows a full description line. Wide tables clip their last column. Demo shows "undefined matching" and "undefined open alerts". |
 | Maintenance | 900 | No "run" anywhere on the page. Four monospace help paragraphs. Each package row carries a sentence; the Settings and Edit columns are clipped at desktop width. The 20-entry software catalog is always expanded and is most of the page. Linux and Windows packages with the same name look like duplicates. |
 | Alerts | 890 | Action column clipped. The summary card spends three lines on a legend. Phone: table scrolls sideways inside the card. |
-| Response | 460 | The script library is a full-height table with long descriptions; unlock is a plain button under a monospace paragraph. |
+| Response | 460 | The script library is a full-height table with long descriptions. |
 | Policy | 1,700 | Hundreds of threat indicators render inline (9,000 px page). Exclusion state column clipped. |
 | Audit | 1,900 | Readable table; fine as a dense log. |
 | Jobs page | 900 | 68 "in flight", most "taken by the agent" for days; nothing says they are stuck. One long flat list. |
@@ -113,7 +113,7 @@ Assets page head, so the phone top bar fits on one row.
 
 Decisions stay where they are answered (Maintenance, Alerts); the needs-you
 strip and the rail badge make them visible from anywhere. There are no approvals
-to answer: admin actions are authorized by the response authority on the first
+to answer: admin actions are signed by the hub on the first
 request (the console no longer shows "waiting for your phone" chips or an
 approval sheet), and what it signed or refused is in the audit and the Timeline.
 
@@ -127,7 +127,7 @@ approval sheet), and what it signed or refused is in the audit and the Timeline.
 
 Shared patterns and Assets first, then Alerts, Response and jobs, then Policy.
 Asset view and Maintenance come last, after the supervised-runs work lands
-there, so its run states, windows, steward and lock-level blocks fit the new
+there, so its run states, windows and lock-level blocks fit the new
 layout rather than the old one.
 
 ## After
@@ -186,7 +186,7 @@ in demo mode, with the fixture browser suite and the axe responsive check.
   table, destination and process move to the detail panel. On a phone each
   alert is a compact block led by its finding.
 - Response: one bar replaces three cards: lock state, terminals running and
-  jobs in flight (links), then Open a terminal, Job history and **Unlock**
+  jobs in flight (links), then Open a terminal and Job history
   (primary) or Session details and Lock. The access explanation is behind "?".
   Script library rows carry the description under the name, fold after 8, and
   explain versions and retire behind "?"; scheduled scripts get plain column
@@ -328,9 +328,8 @@ Rendered from synthetic events (22 events on 14 lines):
   mismatch) and the quick look has a Lock line. The asset list gets two
   filters: **Isolation mismatch** and **Host-locked**.
 - **Remote terminal and screen** has a Switch off... button (confirm sheet,
-  applies at once, ends open sessions). Switching it back on loosens a
-  safety setting, so the response authority authorizes it on the same
-  request and the audit records it.
+  applies at once, ends open sessions). Switching it back on applies
+  at once and the audit records it.
 - The Access page has a read-only **Release keys** card: the routine keys
   (epoch and short fingerprints) and the retired agent releases with how many
   machines still run them. Needs the hub's `retired_versions` in
@@ -361,7 +360,7 @@ Rendered from synthetic events (22 events on 14 lines):
 - The open-alert line says "Latest 50 of N shown" only when there are more
   than shown.
 
-For features that add a block to a machine (windows, steward, lock level),
+For features that add a block to a machine (windows, lock level),
 the tab list in `renderRoute` is the place: each tab is a list of cards.
 
 ![Asset view, after](images/console-ux/after-desk-route.png)

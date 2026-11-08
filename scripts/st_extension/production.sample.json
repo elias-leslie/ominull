@@ -8,7 +8,6 @@
   "admin_key_file": "/private/approved/admin.key",
   "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
   "local_binary": "build/ominull-hub",
-  "local_authority_binary": "build/ominull-response-authority",
   "drill": {
     "vm": 900,
     "endpoint": "linux-lab-guest",

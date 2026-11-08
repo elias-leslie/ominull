@@ -33,7 +33,7 @@ Root installs that file as `/usr/local/sbin/ominull-backup-dispatch` behind a
 `/etc/ominull-backup/recipient` (`scripts/pve/install.sh --recipient age1...`);
 then `backup_ssh_alias` in this file names that key's SSH alias and only the
 verb words cross. The dispatcher moves every member
-under `var/lib/ominull-response-authority/`, `etc/ominull/`,
+under `var/lib/ominull/grants/`, `etc/ominull/`,
 `var/lib/ominull/evidence/`, `var/lib/ominull/evidence.key` and
 `opt/ominull/bin/certs/*.key` into `secrets.tar.age`, refuses to publish if any
 remains in the bulk tar, and the generation holds `lxc-150.tar`,

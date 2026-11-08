@@ -234,11 +234,6 @@ func TestOminullctl_CommandParity(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"cancelled","job_id":"job-1"}`))
 	})
 
-	mux.HandleFunc("/api/v1/response/auth/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"online","signers_count":2}`))
-	})
-
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -307,10 +302,6 @@ func TestOminullctl_CommandParity(t *testing.T) {
 		t.Fatalf("cmdResponse jobs cancel failed: %v", err)
 	}
 
-	// Test 9: response-auth status
-	if err := client.cmdResponseAuth([]string{"status"}); err != nil {
-		t.Fatalf("cmdResponseAuth status failed: %v", err)
-	}
 }
 
 func TestOminullctl_DirectAliasesDispatch(t *testing.T) {

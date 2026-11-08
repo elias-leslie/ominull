@@ -1,4 +1,4 @@
-package responseauth_test
+package grants_test
 
 import (
 	"crypto/sha256"
@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 )
 
@@ -67,11 +67,11 @@ func execParams(t *testing.T, id, src string, params map[string]string, timeout 
 	return string(raw)
 }
 
-func packageRequest(targets []string, items ...string) *responseauth.AuthorizeInput {
+func packageRequest(targets []string, items ...string) *grants.AuthorizeInput {
 	sorted := append([]string(nil), targets...)
 	sort.Strings(sorted)
-	payload, _ := json.Marshal(responseauth.PackageRunPayload{Route: responseauth.PackageRunRoute, Items: items, Targets: sorted})
-	return &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindScriptExec,
+	payload, _ := json.Marshal(grants.PackageRunPayload{Route: grants.PackageRunRoute, Items: items, Targets: sorted})
+	return &grants.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: response.ActionKindScriptExec,
 		Targets: targets, Payload: payload}
 }
 
@@ -84,13 +84,13 @@ func TestPackageRunGrantsBindEachScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grants := au.Grants
-	if len(grants) != 4 {
-		t.Fatalf("want one grant per host and script: %d", len(grants))
+	signed := au.Grants
+	if len(signed) != 4 {
+		t.Fatalf("want one grant per host and script: %d", len(signed))
 	}
 	seen := map[string]bool{}
-	for _, g := range grants {
-		if g.ActionKind != response.ActionKindScriptExec || (g.ActionDigest != responseauth.ItemDigest(a) && g.ActionDigest != responseauth.ItemDigest(b)) {
+	for _, g := range signed {
+		if g.ActionKind != response.ActionKindScriptExec || (g.ActionDigest != grants.ItemDigest(a) && g.ActionDigest != grants.ItemDigest(b)) {
 			t.Fatalf("grant not bound to a script payload: %+v", g)
 		}
 		seen[g.EndpointID+g.ActionDigest] = true
@@ -131,7 +131,7 @@ func TestPackageRunRefusesAmbiguousKeys(t *testing.T) {
 	}
 }
 
-// The authority's list of released packages is exactly packages/windows and
+// The hub's list of released packages is exactly packages/windows and
 // packages/linux.
 func TestReleasedPackagesMatchTheRepository(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join("..", "..", "..", "packages", "windows", "*.ps1"))
@@ -151,14 +151,14 @@ func TestReleasedPackagesMatchTheRepository(t *testing.T) {
 		sum := sha256.Sum256(raw)
 		want[hex.EncodeToString(sum[:])] = h.Name + " " + h.Risk
 	}
-	got := responseauth.ReleasedPackages()
+	got := grants.ReleasedPackages()
 	if len(want) == 0 || fmt.Sprint(want) != fmt.Sprint(got) {
 		var b strings.Builder
 		for d, v := range want {
 			n, r, _ := strings.Cut(v, " ")
 			fmt.Fprintf(&b, "  %q: {\"name\": %q, \"risk\": %q},\n", d, n, r)
 		}
-		t.Fatalf("hub/pkg/responseauth/released_packages.json is out of step with packages/; it should hold:\n%s", b.String())
+		t.Fatalf("hub/pkg/grants/released_packages.json is out of step with packages/; it should hold:\n%s", b.String())
 	}
 }
 
@@ -193,7 +193,7 @@ func TestForgedPackageHeadersAreNotTrusted(t *testing.T) {
 }
 
 // Only the canonical bytes are accepted, so an agent that searches for the
-// first "source" member reads what the authority read.
+// first "source" member reads what the hub read.
 func TestPackageRunRefusesReorderedOrNestedFields(t *testing.T) {
 	auth := newTestAuthority(t)
 	item := execItem(t, "s-plain", "Write-Output 1\n", "audit", 300)
@@ -255,11 +255,11 @@ func TestCarefulStepsAreNamed(t *testing.T) {
 	}
 }
 
-func playbookRequest(targets []string, pb *responseauth.PlaybookRun, route string, items ...string) *responseauth.AuthorizeInput {
+func playbookRequest(targets []string, pb *grants.PlaybookRun, route string, items ...string) *grants.AuthorizeInput {
 	in := packageRequest(targets, items...)
 	sorted := append([]string(nil), targets...)
 	sort.Strings(sorted)
-	in.Payload, _ = json.Marshal(responseauth.PackageRunPayload{Route: route, Items: items, Targets: sorted, Playbook: pb})
+	in.Payload, _ = json.Marshal(grants.PackageRunPayload{Route: route, Items: items, Targets: sorted, Playbook: pb})
 	return in
 }
 
@@ -269,21 +269,21 @@ func TestPlaybookRunsLiveForTheWindow(t *testing.T) {
 	auth := newTestAuthority(t)
 	audit := packageItem(t, "windows-audit", "safe", "audit", 300)
 	cleanup := packageItem(t, "windows-cleanup", "safe", "audit", 3600)
-	pb := &responseauth.PlaybookRun{Name: "Weekly tidy", WindowSeconds: 2 * 3600}
+	pb := &grants.PlaybookRun{Name: "Weekly tidy", WindowSeconds: 2 * 3600}
 
-	for name, in := range map[string]*responseauth.AuthorizeInput{
-		"plain route":  playbookRequest([]string{"ep-a"}, pb, responseauth.PackageRunRoute, audit),
-		"no playbook":  playbookRequest([]string{"ep-a"}, nil, responseauth.PlaybookRunRoute, audit),
-		"short window": playbookRequest([]string{"ep-a"}, &responseauth.PlaybookRun{Name: "x", WindowSeconds: 60}, responseauth.PlaybookRunRoute, audit),
-		"long window":  playbookRequest([]string{"ep-a"}, &responseauth.PlaybookRun{Name: "x", WindowSeconds: 25 * 3600}, responseauth.PlaybookRunRoute, audit),
-		"no name":      playbookRequest([]string{"ep-a"}, &responseauth.PlaybookRun{WindowSeconds: 3600}, responseauth.PlaybookRunRoute, audit),
+	for name, in := range map[string]*grants.AuthorizeInput{
+		"plain route":  playbookRequest([]string{"ep-a"}, pb, grants.PackageRunRoute, audit),
+		"no playbook":  playbookRequest([]string{"ep-a"}, nil, grants.PlaybookRunRoute, audit),
+		"short window": playbookRequest([]string{"ep-a"}, &grants.PlaybookRun{Name: "x", WindowSeconds: 60}, grants.PlaybookRunRoute, audit),
+		"long window":  playbookRequest([]string{"ep-a"}, &grants.PlaybookRun{Name: "x", WindowSeconds: 25 * 3600}, grants.PlaybookRunRoute, audit),
+		"no name":      playbookRequest([]string{"ep-a"}, &grants.PlaybookRun{WindowSeconds: 3600}, grants.PlaybookRunRoute, audit),
 	} {
 		if _, err := auth.Authorize(in); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 
-	in := playbookRequest([]string{"ep-a"}, pb, responseauth.PlaybookRunRoute, cleanup, audit)
+	in := playbookRequest([]string{"ep-a"}, pb, grants.PlaybookRunRoute, cleanup, audit)
 	au, err := auth.Authorize(in)
 	if err != nil || len(au.Grants) != 2 {
 		t.Fatalf("playbook: %v %+v", err, au)
@@ -315,8 +315,8 @@ func TestLongPlaybookFitsOneSummary(t *testing.T) {
 		packageItem(t, "windows-audit", "safe", "audit", 300),
 		packageItem(t, "windows-maintenance-mode", "safe", "revert", 300),
 	}
-	pb := &responseauth.PlaybookRun{Name: "Laptop tune-up", WindowSeconds: 6 * 3600}
-	v, err := auth.Authorize(playbookRequest([]string{"ep-a"}, pb, responseauth.PlaybookRunRoute, items...))
+	pb := &grants.PlaybookRun{Name: "Laptop tune-up", WindowSeconds: 6 * 3600}
+	v, err := auth.Authorize(playbookRequest([]string{"ep-a"}, pb, grants.PlaybookRunRoute, items...))
 	if err != nil {
 		t.Fatalf("refused: %v", err)
 	}

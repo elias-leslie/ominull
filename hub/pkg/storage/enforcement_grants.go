@@ -6,11 +6,10 @@ import (
 	"time"
 )
 
-// Enforcement grants are the response authority's signed statements that
+// Enforcement grants are signed statements that
 // move an endpoint's enforcement state (isolate, release, mesh quarantine) or
-// authorize an agent update. The hub only carries them: agents verify each
-// one themselves. They are kept until they expire so an endpoint that was
-// offline when the authority signed still receives its grant when it returns.
+// authorize an agent update. Agents verify each one themselves. They are kept until they expire so an endpoint that was
+// offline when the hub signed still receives its grant when it returns.
 
 // StoredGrant is one grant as the hub keeps it. Target is the endpoint ID, or
 // "mesh:<address>" for a fleet-wide mesh quarantine change.

@@ -36,7 +36,7 @@ func lockRefusal(host string, rep *response.AgentTrustReport, capability string)
 		return ""
 	}
 	if rep.HostAuthority {
-		return fmt.Sprintf("%s takes only Nightshift-signed scripts (a host authority is pinned there); run released packages with ominullctl host-script run", host)
+		return fmt.Sprintf("%s takes only scripts signed by the key pinned on it, and the hub carries none, so run it over SSH", host)
 	}
 	if rep.Ceiling == "signed-scripts" || rep.Ceiling == "monitor-signed-scripts" {
 		return fmt.Sprintf("%s is locked to %s and has no host authority pinned, so it runs no scripts at all", host, rep.Ceiling)

@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
-	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,9 +13,8 @@ import (
 	"ominull/hub/pkg/storage"
 )
 
-// policyPost sends one detection-policy write with the admin key, once: what
-// an agent holding the key gets. The approval argument is unused (the hub signs
-// a loosening itself); callers pass "".
+// policyPost sends one detection-policy write with the admin key. The last
+// argument is unused; callers pass "".
 func policyPost(srv *Server, method, path, body, _ string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
@@ -26,35 +22,6 @@ func policyPost(srv *Server, method, path, body, _ string) *httptest.ResponseRec
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 	return w
-}
-
-// signedChange is the newest ACTION_AUTHORIZED row of a detection-policy
-// change: what the authority signed, in its own words.
-type signedChange struct {
-	ID      string
-	Target  string
-	Loosens []string
-	Summary string
-}
-
-var signedChangeRow = regexp.MustCompile(`^detection policy change loosening (.*) \(authorization (\S+)\): (.*)$`)
-
-// mustSign asserts the request finished at once with status code (no round
-// trip) and returns the authorization it left in the audit.
-func mustSign(t *testing.T, store *storage.Store, w *httptest.ResponseRecorder, code int) signedChange {
-	t.Helper()
-	if w.Code != code {
-		t.Fatalf("want %d on the first request, got %d %s", code, w.Code, w.Body.String())
-	}
-	rows := authorizedAudit(t, store)
-	if len(rows) == 0 {
-		t.Fatalf("no ACTION_AUTHORIZED row after %d %s", w.Code, w.Body.String())
-	}
-	m := signedChangeRow.FindStringSubmatch(rows[0].Details)
-	if m == nil {
-		t.Fatalf("newest ACTION_AUTHORIZED row is not a policy change: %+v", rows[0])
-	}
-	return signedChange{ID: m[2], Target: rows[0].Resource, Loosens: strings.Split(m[1], ", "), Summary: m[3]}
 }
 
 // noteKinds is the first half (before the colon) of each policy note.
@@ -75,226 +42,56 @@ func policyNotes(t *testing.T, store *storage.Store) []storage.AuditEntry {
 	return page.Entries
 }
 
-// Every field the tuning row saves says which way loosens, so a field added
-// later cannot slip through as "no change".
-func TestEveryTuningFieldKnowsWhichWayLoosens(t *testing.T) {
-	typ := reflect.TypeOf(storage.DetectionTuning{})
-	for i := 0; i < typ.NumField(); i++ {
-		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
-		if _, ok := tuningDirections[name]; !ok {
-			t.Errorf("tuning field %q has no direction in tuningDirections", name)
-		}
-	}
-}
-
-// withRule changes one of the tuning's rules by id.
-func withRule(id string, edit func(*storage.ExpectedRule)) func(*storage.DetectionTuning) {
-	return func(t *storage.DetectionTuning) {
-		for i := range t.ExpectedRules {
-			if t.ExpectedRules[i].ID == id {
-				edit(&t.ExpectedRules[i])
-				return
-			}
-		}
-		panic("no rule " + id)
-	}
-}
-
-func cloneTuning(t storage.DetectionTuning) storage.DetectionTuning {
-	raw, _ := json.Marshal(t)
-	var out storage.DetectionTuning
-	_ = json.Unmarshal(raw, &out)
-	return out
-}
-
-func TestTuningChangesAreJudgedFieldByField(t *testing.T) {
-	base := storage.DefaultDetectionTuning()
-	base.ExpectedRules = append(base.ExpectedRules, storage.ExpectedRule{ID: "gh", Reason: "cli", Workload: "/usr/bin/gh", Networks: []string{"as36459"},
-		Findings: []string{storage.KindNovelDestination, storage.KindNovelProcess}, ExpiresAt: testExpiry})
-	base = cloneTuning(base)
-	curl := storage.ExpectedRule{ID: "curl", Reason: "r", Programs: []storage.ExpectedProgram{{Path: "/usr/bin/curl"}}, Networks: []string{"as15169"}}
-	cases := []struct {
-		name   string
-		change func(*storage.DetectionTuning)
-		want   []string
-	}{
-		{"nothing", func(*storage.DetectionTuning) {}, nil},
-		{"beacon off", func(t *storage.DetectionTuning) { t.BeaconOn = false }, []string{"beacon_enabled"}},
-		{"raised threshold", func(t *storage.DetectionTuning) { t.BeaconScore = 0.95 }, []string{"beacon_score_threshold"}},
-		{"lowered threshold", func(t *storage.DetectionTuning) { t.BeaconScore = 0.6 }, nil},
-		{"narrower beacon band", func(t *storage.DetectionTuning) { t.BeaconMaxInterval = 600 }, []string{"beacon_max_interval_seconds"}},
-		{"longer learning period", func(t *storage.DetectionTuning) { t.WarmupHours = 48 }, []string{"warmup_hours"}},
-		{"added rule", func(t *storage.DetectionTuning) { t.ExpectedRules = append(t.ExpectedRules, curl) }, []string{"expected_rules"}},
-		{"removed rule", func(t *storage.DetectionTuning) { t.ExpectedRules = t.ExpectedRules[1:] }, nil},
-		// Same length, different contents: one rule swapped for another.
-		{"equal-length swap", func(t *storage.DetectionTuning) { t.ExpectedRules[len(t.ExpectedRules)-1] = curl }, []string{"expected_rules"}},
-		{"rented workload", withRule("gh", func(r *storage.ExpectedRule) { r.Tenancy = storage.ExpectedTenancyAny }), []string{"expected_rules"}},
-		{"vendor-only workload", withRule("gh", func(r *storage.ExpectedRule) { r.Tenancy = storage.ExpectedTenancyVendor }), nil},
-		{"workload expiry extended", withRule("gh", func(r *storage.ExpectedRule) { r.ExpiresAt = testExpiry.Add(time.Hour) }), []string{"expected_rules"}},
-		{"workload expiry shortened", withRule("gh", func(r *storage.ExpectedRule) { r.ExpiresAt = testExpiry.Add(-time.Hour) }), nil},
-		{"rule reason reworded", withRule("gh", func(r *storage.ExpectedRule) { r.Reason = "GitHub CLI" }), nil},
-		{"rule renamed", withRule("gh", func(r *storage.ExpectedRule) { r.Name = "GitHub" }), nil},
-		{"another network", withRule("gh", func(r *storage.ExpectedRule) { r.Networks = append(r.Networks, "as16509") }), []string{"expected_rules"}},
-		{"network replaced", withRule("gh", func(r *storage.ExpectedRule) { r.Networks = []string{"as16509"} }), []string{"expected_rules"}},
-		{"network dropped", withRule("gh", func(r *storage.ExpectedRule) { r.Networks = nil }), []string{"expected_rules"}},
-		{"another finding kind", withRule("gh", func(r *storage.ExpectedRule) { r.Findings = append(r.Findings, storage.KindBeacon) }), []string{"expected_rules"}},
-		{"fewer finding kinds", withRule("gh", func(r *storage.ExpectedRule) { r.Findings = r.Findings[:1] }), nil},
-		{"every finding kind", withRule("gh", func(r *storage.ExpectedRule) { r.Findings = nil }), []string{"expected_rules"}},
-		{"narrowed to a host", withRule("gh", func(r *storage.ExpectedRule) { r.Hosts = []string{"ws-1"} }), nil},
-		{"another host", withRule("curl-host", func(r *storage.ExpectedRule) { r.Hosts = append(r.Hosts, "ws-2") }), []string{"expected_rules"}},
-		{"host restriction lifted", withRule("curl-host", func(r *storage.ExpectedRule) { r.Hosts = nil }), []string{"expected_rules"}},
-		{"narrowed to a port", withRule("gh", func(r *storage.ExpectedRule) { r.Port = 443 }), nil},
-		{"port lifted", withRule("curl-host", func(r *storage.ExpectedRule) { r.Port = 0 }), []string{"expected_rules"}},
-		{"another port", withRule("curl-host", func(r *storage.ExpectedRule) { r.Port = 8443 }), []string{"expected_rules"}},
-		{"another program", withRule("curl-host", func(r *storage.ExpectedRule) {
-			r.Programs = append(r.Programs, storage.ExpectedProgram{Path: "/usr/bin/wget"})
-		}), []string{"expected_rules"}},
-		{"program account lifted", withRule("curl-host", func(r *storage.ExpectedRule) { r.Programs[0].RunAs = "" }), []string{"expected_rules"}},
-		{"program pinned to a build", withRule("curl-host", func(r *storage.ExpectedRule) { r.Programs[0].SHA256 = strings.Repeat("ab", 32) }), nil},
-		{"exception removed", withRule("curl-host", func(r *storage.ExpectedRule) { r.ExceptDomains = nil }), []string{"expected_rules"}},
-		{"exception added", withRule("curl-host", func(r *storage.ExpectedRule) { r.ExceptDomains = append(r.ExceptDomains, "www.googleapis.com") }), nil},
-		{"domains lifted", withRule("curl-host", func(r *storage.ExpectedRule) { r.Domains = nil }), []string{"expected_rules"}},
-		{"later expiry", withRule("curl-host", func(r *storage.ExpectedRule) { r.ExpiresAt = testExpiry.Add(48 * time.Hour) }), []string{"expected_rules"}},
-		{"expiry lifted", withRule("curl-host", func(r *storage.ExpectedRule) { r.ExpiresAt = time.Time{} }), []string{"expected_rules"}},
-		{"expiry added", withRule("gh-open", func(r *storage.ExpectedRule) { r.ExpiresAt = testExpiry }), nil},
-		{"vendor prefix added", withRule("vendor-claude", func(r *storage.ExpectedRule) { r.Prefixes = append(r.Prefixes, "198.51.100.0/24") }), []string{"expected_rules"}},
-		{"vendor domain added", withRule("vendor-claude", func(r *storage.ExpectedRule) { r.Domains = append(r.Domains, "example.com") }), []string{"expected_rules"}},
-		{"vendor prefix removed", withRule("vendor-claude", func(r *storage.ExpectedRule) { r.Prefixes = r.Prefixes[1:] }), nil},
-		{"vendor domain removed", withRule("vendor-claude", func(r *storage.ExpectedRule) { r.Domains = r.Domains[1:] }), nil},
-		{"vendor removed", func(t *storage.DetectionTuning) {
-			t.ExpectedRules = slices.DeleteFunc(t.ExpectedRules, func(r storage.ExpectedRule) bool { return r.ID == "vendor-claude" })
-		}, nil},
-		{"vendor network added", withRule("vendor-antigravity", func(r *storage.ExpectedRule) { r.Networks = append(r.Networks, "as396982") }), []string{"expected_rules"}},
-		{"vendor exclusion removed", withRule("vendor-antigravity", func(r *storage.ExpectedRule) { r.ExceptDomains = r.ExceptDomains[1:] }), []string{"expected_rules"}},
-		{"vendor exclusion added", withRule("vendor-antigravity", func(r *storage.ExpectedRule) { r.ExceptDomains = append(r.ExceptDomains, "www.googleapis.com") }), nil},
-		{"mixed", func(t *storage.DetectionTuning) { t.BeaconScore = 0.6; t.BandwidthOn = false }, []string{"bandwidth_enabled"}},
-		{"agent runtime removed", func(t *storage.DetectionTuning) { t.AgentRuntimes = t.AgentRuntimes[1:] }, []string{"agent_runtimes"}},
-		{"agent-heavy by observation", func(t *storage.DetectionTuning) { t.AgentHeavyObserved = !t.AgentHeavyObserved }, nil},
-		{"wider window", func(t *storage.DetectionTuning) { t.OffHoursStart = 21 }, nil},
-		{"shorter window", func(t *storage.DetectionTuning) { t.OffHoursStart = 23 }, []string{"off_hours_window"}},
-		{"moved window", func(t *storage.DetectionTuning) { t.OffHoursStart, t.OffHoursEnd = 23, 6 }, []string{"off_hours_window"}},
-		{"other zone", func(t *storage.DetectionTuning) { t.OffHoursZone = "UTC" }, []string{"off_hours_window"}},
-		{"lab network added", func(t *storage.DetectionTuning) { t.LabCIDRs = []string{"10.20.0.0/24"} }, []string{"lab_cidrs"}},
-		{"browser added", func(t *storage.DetectionTuning) { t.BeaconBrowsers = append(t.BeaconBrowsers, "lynx") }, []string{"beacon_browsers"}},
-		{"browser removed", func(t *storage.DetectionTuning) { t.BeaconBrowsers = t.BeaconBrowsers[1:] }, nil},
-		{"longer beacon span", func(t *storage.DetectionTuning) { t.BeaconPageSpanMin = 45 }, []string{"beacon_page_span_min"}},
-	}
-	// Two more rules to narrow and widen: one with every restriction, one
-	// open-ended.
-	base.ExpectedRules = append(base.ExpectedRules,
-		storage.ExpectedRule{ID: "curl-host", Reason: "r", Findings: []string{storage.KindBandwidthSpike}, Hosts: []string{"ws-1"},
-			Programs: []storage.ExpectedProgram{{Path: "/usr/bin/curl", RunAs: "root"}}, Domains: []string{"googleapis.com"},
-			ExceptDomains: []string{"storage.googleapis.com"}, Prefixes: []string{"142.250.0.0/16"}, Port: 443, ExpiresAt: testExpiry},
-		storage.ExpectedRule{ID: "gh-open", Reason: "r", Programs: []storage.ExpectedProgram{{Path: "/usr/bin/gh"}}, Networks: []string{"as36459"}})
-	base, err := storage.PrepareDetectionTuning(cloneTuning(base))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range cases {
-		after := cloneTuning(base)
-		c.change(&after)
-		after, err := storage.PrepareDetectionTuning(after)
-		if err != nil {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		got := tuningLoosens(base, after)
-		if strings.Join(got, ",") != strings.Join(c.want, ",") {
-			t.Errorf("%s: loosens %v, want %v", c.name, got, c.want)
-		}
-	}
-	// Taking a network out of a zone loosens too: its lab hosts lose the
-	// lab escape page, its servers the always-on page.
-	zoned := base
-	zoned.LabCIDRs, zoned.InfraCIDRs = []string{"10.20.0.0/24"}, []string{"10.0.0.1/32"}
-	if got := tuningLoosens(zoned, base); strings.Join(got, ",") != "infra_cidrs,lab_cidrs" {
-		t.Errorf("zones removed: loosens %v", got)
-	}
-	if base.AgentHeavyObserved {
-		off := base
-		off.AgentHeavyObserved = false
-		if got := tuningLoosens(off, base); len(got) != 1 {
-			t.Errorf("counting agent-heavy hosts by observation mutes more: %v", got)
-		}
-	}
-}
-
-// A reset tightens only when every rule it brings back is one already saved.
-func TestAResetLoosensWhenItBringsExpectedRulesBack(t *testing.T) {
-	shipped := storage.DefaultDetectionTuning()
-	tighter := cloneTuning(shipped)
-	tighter.ExpectedRules = tighter.ExpectedRules[1:]
-	if got := tuningLoosens(tighter, shipped); strings.Join(got, ",") != "expected_rules" {
-		t.Fatalf("reset re-adding a removed rule: %v", got)
-	}
-	looser := cloneTuning(shipped)
-	looser.ExpectedRules = append(looser.ExpectedRules, storage.ExpectedRule{ID: "extra", Reason: "r", Programs: []storage.ExpectedProgram{{Path: "/usr/bin/curl"}}})
-	looser.BeaconOn = false
-	if got := tuningLoosens(looser, shipped); len(got) != 0 {
-		t.Fatalf("reset from a looser row should only tighten: %v", got)
-	}
-}
-
-// The admin key, which every agent can read, can loosen detection, but the
-// authority signs each loosening first and the audit says what was signed:
-// the first request applies it, with no round trip.
-func TestALooseningSaveIsSignedAtOnce(t *testing.T) {
+// A policy save applies at once and leaves a note naming what changed and the
+// credential; a save that changes nothing leaves none.
+func TestAPolicySaveAppliesWithANote(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
 	rules := append(storage.DefaultDetectionTuning().ExpectedRules, storage.ExpectedRule{ID: "extra-curl", Reason: "r",
 		Programs: []storage.ExpectedProgram{{Path: "/usr/bin/curl"}}, Networks: []string{"as64500"}})
 	raw, _ := json.Marshal(map[string]any{"beacon_enabled": false, "expected_rules": rules})
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""), http.StatusOK)
-	if !strings.Contains(a.Summary, "beacon_enabled true -> false") || !strings.Contains(a.Summary, "id=extra-curl") {
-		t.Fatalf("the audit does not show the change: %+v", a)
-	}
-	if strings.Join(a.Loosens, ",") != "beacon_enabled,expected_rules" || a.Target != "detection:tuning" {
-		t.Fatalf("authorization = %+v", a)
+	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""); w.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", w.Code, w.Body.String())
 	}
 	if got := store.GetDetectionTuning(); got.BeaconOn || len(got.ExpectedRules) != len(rules) {
-		t.Fatal("the signed save did not apply")
+		t.Fatal("the save did not apply")
 	}
 	notes := policyNotes(t, store)
-	if len(notes) != 1 || !strings.Contains(notes[0].Details, "loosened (beacon_enabled, expected_rules) with authorization "+a.ID) ||
+	if len(notes) != 1 || !strings.Contains(notes[0].Details, "changed detection tuning") ||
 		!strings.Contains(notes[0].Details, "credential api-key (unverified)") {
 		t.Fatalf("notes = %+v", notes)
 	}
-}
-
-// PUT and case-variant keys go through the same gate: the loosening is
-// recognised, signed and audited like any other.
-func TestACaseVariantKeyIsStillJudgedALoosening(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	a := mustSign(t, store, policyPost(srv, http.MethodPut, "/api/v1/detection/tuning", `{"Beacon_Enabled":false}`, ""), http.StatusOK)
-	if strings.Join(a.Loosens, ",") != "beacon_enabled" || store.GetDetectionTuning().BeaconOn {
-		t.Fatalf("case-variant key: %+v beacon on=%v", a, store.GetDetectionTuning().BeaconOn)
-	}
-}
-
-// Tightening applies at once and leaves a note naming the credential.
-func TestATighteningSaveAppliesWithANote(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"beacon_score_threshold":0.7,"warmup_hours":12}`, "")
-	if w.Code != http.StatusOK {
-		t.Fatalf("tightening save = %d %s", w.Code, w.Body.String())
-	}
-	if got := store.GetDetectionTuning(); got.BeaconScore != 0.7 || got.WarmupHours != 12 {
-		t.Fatal("the tightening save did not apply")
-	}
-	notes := policyNotes(t, store)
-	if len(notes) != 1 || !strings.HasPrefix(notes[0].Details, "tightened detection tuning save") || !strings.Contains(notes[0].Details, "credential api-key (unverified)") {
-		t.Fatalf("notes = %+v", notes)
-	}
-	// A save that changes nothing leaves no note.
 	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{}`, ""); w.Code != http.StatusOK {
 		t.Fatalf("empty save = %d", w.Code)
 	}
 	if len(policyNotes(t, store)) != 1 {
 		t.Fatal("a save with no change left a note")
+	}
+}
+
+// Marking a finding expected writes the rule and acknowledges the finding on
+// the first request; deleting a rule applies at once too.
+func TestMarkingExpectedAndDeletingARuleApply(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedFinding(t, store, "f-wait", "/opt/acme/backup-agent", `{"destination_asn":"AS64500","destination_tenancy":"isp"}`)
+	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/expected/mark", `{"id":"f-wait"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("mark = %d %s", w.Code, w.Body.String())
+	}
+	if al, _ := store.GetAnomalyAlert("f-wait"); !al.Acknowledged || len(markedRules(store)) != 1 {
+		t.Fatal("the rule did not land")
+	}
+	id := markedRules(store)[0].ID
+	if w := policyPost(srv, http.MethodDelete, "/api/v1/detection/expected?id="+id, "", ""); w.Code != http.StatusOK {
+		t.Fatalf("delete = %d %s", w.Code, w.Body.String())
+	}
+	if _, ok := store.GetDetectionTuning().RuleByID(id); ok {
+		t.Fatal("the rule was not deleted")
+	}
+	if len(policyNotes(t, store)) != 2 {
+		t.Fatalf("notes = %+v", policyNotes(t, store))
 	}
 }
 
@@ -333,118 +130,6 @@ func TestConcurrentSavesAreNotLost(t *testing.T) {
 	got := store.GetDetectionTuning()
 	if got.BeaconScore != 0.7 || got.WarmupHours != 6 || got.BeaconCooldownMin != 10 || got.BandwidthCooldown != 2 || got.SilenceAfterMinutes != 10 {
 		t.Fatalf("a concurrent save was lost: %+v", got)
-	}
-}
-
-// Restoring the shipped values is signed when it brings back rules
-// someone removed, and applies plainly when it only tightens.
-func TestResetIsJudgedLikeAnySave(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	tu := storage.DefaultDetectionTuning()
-	tu.ExpectedRules = tu.ExpectedRules[1:]
-	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
-		t.Fatal(err)
-	}
-	a := mustSign(t, store, policyPost(srv, http.MethodDelete, "/api/v1/detection/tuning", "", ""), http.StatusOK)
-	if !strings.Contains(a.Summary, "expected_rules +{") || len(store.GetDetectionTuning().ExpectedRules) != len(storage.DefaultDetectionTuning().ExpectedRules) {
-		t.Fatalf("reset authorization = %+v", a)
-	}
-
-	n := len(authorizedAudit(t, store))
-	tu = storage.DefaultDetectionTuning()
-	tu.BeaconOn = false
-	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if w := policyPost(srv, http.MethodDelete, "/api/v1/detection/tuning", "", ""); w.Code != http.StatusOK {
-		t.Fatalf("tightening reset = %d %s", w.Code, w.Body.String())
-	}
-	if !store.GetDetectionTuning().BeaconOn {
-		t.Fatal("the tightening reset did not apply")
-	}
-	if got := len(authorizedAudit(t, store)); got != n {
-		t.Fatalf("a tightening reset was sent to the authority (%d -> %d rows)", n, got)
-	}
-}
-
-// "Expected" on a finding writes an expected rule, which loosens: the rule and
-// the acknowledgement land on the first request, with the rule in the audit.
-func TestMarkingExpectedIsSignedAtOnce(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	seedFinding(t, store, "f-wait", "/opt/acme/backup-agent", `{"destination_asn":"AS64500","destination_tenancy":"isp"}`)
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/expected/mark", `{"id":"f-wait"}`, ""), http.StatusOK)
-	if !strings.Contains(a.Summary, "id=marked-backup-agent-") || strings.Join(a.Loosens, ",") != "expected_rules" {
-		t.Fatalf("authorization = %+v", a)
-	}
-	if al, _ := store.GetAnomalyAlert("f-wait"); !al.Acknowledged || len(markedRules(store)) != 1 {
-		t.Fatal("the rule did not land")
-	}
-}
-
-// Saving a rule through the rule endpoint: a new rule, a widened one and a
-// renewal are signed; narrowing one and deleting one tighten, apply at once
-// and are noted.
-func TestExpectedRuleWritesAreJudged(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	expires := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
-	body := `{"id":"bridge","name":"bridge","reason":"bridge","programs":[{"path":"/usr/bin/docker-proxy"}],"prefixes":["172.18.0.0/16"],"port":7070,"protocol":"tcp","expires_at":"` + expires + `"}`
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/expected", body, ""), http.StatusOK)
-	if !strings.Contains(a.Summary, "id=bridge") || a.Target != "detection:tuning" {
-		t.Fatalf("rule authorization = %+v", a)
-	}
-	if _, ok := store.GetDetectionTuning().RuleByID("bridge"); !ok {
-		t.Fatal("the rule was not created")
-	}
-
-	// Narrowing it to one host applies at once.
-	narrow := strings.Replace(body, `"port":7070`, `"port":7070,"hosts":["ws-1"]`, 1)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/expected", narrow, ""); w.Code != http.StatusOK {
-		t.Fatalf("narrowing = %d %s", w.Code, w.Body.String())
-	}
-	// Opening it up again is signed.
-	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/expected", body, ""), http.StatusOK)
-	if strings.Join(a.Loosens, ",") != "expected_rules" {
-		t.Fatalf("widening authorization = %+v", a)
-	}
-	if got, _ := store.GetDetectionTuning().RuleByID("bridge"); len(got.Hosts) != 0 {
-		t.Fatal("the rule did not widen")
-	}
-	// A renewal loosens too.
-	later := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
-	mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/expected", strings.Replace(body, expires, later, 1), ""), http.StatusOK)
-
-	if w := policyPost(srv, http.MethodDelete, "/api/v1/detection/expected?id=bridge", "", ""); w.Code != http.StatusOK {
-		t.Fatalf("delete = %d %s", w.Code, w.Body.String())
-	}
-	kinds := noteKinds(policyNotes(t, store))
-	if len(kinds) != 5 || kinds[0] != "tightened detection tuning rule_delete" || !strings.HasPrefix(kinds[1], "loosened (expected_rules) with authorization ") ||
-		!strings.HasPrefix(kinds[2], "loosened (expected_rules) with authorization ") || kinds[3] != "tightened detection tuning rule_save" ||
-		!strings.HasPrefix(kinds[4], "loosened (expected_rules) with authorization ") {
-		t.Fatalf("notes = %v", kinds)
-	}
-}
-
-// Without the response authority nothing can sign a loosening: it is
-// refused, tightening still applies.
-func TestWithoutTheAuthorityLooseningIsRefused(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	srv.SetResponseAuth(nil)
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"beacon_enabled":false}`, ""); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("loosening without an authority = %d %s", w.Code, w.Body.String())
-	}
-	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"warmup_hours":1}`, ""); w.Code != http.StatusOK {
-		t.Fatalf("tightening without an authority = %d %s", w.Code, w.Body.String())
-	}
-	if got := store.GetDetectionTuning(); !got.BeaconOn || got.WarmupHours != 1 {
-		t.Fatal("wrong outcome")
 	}
 }
 
@@ -495,60 +180,9 @@ func TestTheFeedReportsPolicyChangesAndAnUnsoundRow(t *testing.T) {
 	}
 }
 
-// A save that pads a loosening with tightening edits cannot hide it: the
-// authority signs the loosening alone, and the audit shows it in full. Both
-// halves apply on the first request.
-func TestAMixedSaveIsSignedOnlyForItsLoosening(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	shipped := tuningFields(storage.DefaultDetectionTuning())
-	body := map[string]any{}
-	for _, k := range []string{"agent_baseline_days", "agent_upload_floor_mb", "bandwidth_cooldown_minutes",
-		"beacon_cooldown_minutes", "beacon_min_samples", "beacon_min_span_minutes",
-		"warmup_hours"} {
-		body[k] = shipped[k].(float64) - 1
-	}
-	rules := append(storage.DefaultDetectionTuning().ExpectedRules, storage.ExpectedRule{ID: "extra-curl", Reason: "r",
-		Programs: []storage.ExpectedProgram{{Path: "/usr/bin/curl"}}, Networks: []string{"as64500"}})
-	body["expected_rules"] = rules
-	raw, _ := json.Marshal(body)
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""), http.StatusOK)
-	if strings.Join(a.Loosens, ",") != "expected_rules" || !strings.Contains(a.Summary, "id=extra-curl") ||
-		strings.Contains(a.Summary, "warmup_hours") || strings.Contains(a.Summary, " more") {
-		t.Fatalf("the loosening is not shown on its own: %+v", a)
-	}
-	got := store.GetDetectionTuning()
-	if float64(got.WarmupHours) != shipped["warmup_hours"].(float64)-1 {
-		t.Fatal("the tightening half was not saved")
-	}
-	if _, ok := got.RuleByID("extra-curl"); !ok {
-		t.Fatalf("the loosening did not apply: %d rules", len(got.ExpectedRules))
-	}
-	notes := policyNotes(t, store)
-	if len(notes) != 2 {
-		t.Fatalf("want a tightened note and a loosened note, got %+v", notes)
-	}
-
-	// A list that loses rules and gains one loses them now; the authority
-	// signs only the one it gains.
-	if len(got.ExpectedRules) < 3 {
-		t.Fatalf("need shipped rules: %d", len(got.ExpectedRules))
-	}
-	swap, _ := json.Marshal(map[string]any{"expected_rules": []storage.ExpectedRule{got.ExpectedRules[0],
-		{ID: "other-curl", Reason: "r", Programs: []storage.ExpectedProgram{{Path: "/usr/bin/curl"}}, Networks: []string{"as64501"}}}})
-	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(swap), ""), http.StatusOK)
-	if !strings.Contains(a.Summary, "id=other-curl") || strings.Contains(a.Summary, "extra-curl") {
-		t.Fatalf("swap summary %q", a.Summary)
-	}
-	if got := store.GetDetectionTuning().ExpectedRules; len(got) != 2 || got[0].ID != storage.DefaultDetectionTuning().ExpectedRules[0].ID || got[1].ID != "other-curl" {
-		t.Fatalf("rules after the swap: %v", got)
-	}
-}
-
-// Retiring a host takes it off the silence floor, a loosening the authority
+// Retiring a host takes it off the silence floor, a loosening the hub
 // signs on the first request.
-func TestRetiringAHostIsSignedAtOnce(t *testing.T) {
+func TestRetiringAHostStopsWatchingIt(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -572,20 +206,19 @@ func TestRetiringAHostIsSignedAtOnce(t *testing.T) {
 		t.Fatal("the host starts unwatched")
 	}
 	retire := `{"endpoint_id":"srv-1","reason":"decommissioned"}`
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""), http.StatusOK)
-	if a.Summary != "host srv-1 (web); isolated true -> false; status active -> retired; reason decommissioned" || watched() {
-		t.Fatalf("retire authorization = %+v watched=%v", a, watched())
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""); w.Code != http.StatusOK || watched() {
+		t.Fatalf("retire = %d %s watched=%v", w.Code, w.Body.String(), watched())
 	}
 	if ep, _ := store.GetEndpoint("srv-1"); ep.Status != "retired" || ep.IsIsolated {
 		t.Fatalf("the host was not retired and released: %+v", ep)
 	}
-	// Retiring a host already retired changes nothing and signs nothing.
-	n := len(authorizedAudit(t, store))
-	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""); w.Code != http.StatusOK || len(authorizedAudit(t, store)) != n {
+	// Retiring a host already retired changes nothing.
+	n := len(policyNotes(t, store))
+	if w := policyPost(srv, http.MethodPost, "/api/v1/endpoints/retire", retire, ""); w.Code != http.StatusOK || len(policyNotes(t, store)) != n {
 		t.Fatalf("retire again = %d %s", w.Code, w.Body.String())
 	}
 	kinds := noteKinds(policyNotes(t, store))
-	if len(kinds) != 1 || !strings.HasPrefix(kinds[0], "loosened (retire) with authorization") {
+	if len(kinds) != 1 || !strings.HasPrefix(kinds[0], "changed endpoint watch retire") {
 		t.Fatalf("notes = %v", kinds)
 	}
 }
@@ -774,51 +407,10 @@ func TestAFailedAcknowledgementIsNotNoted(t *testing.T) {
 	}
 }
 
-// A maker's range is signed by the authority, refused when it is not one
-// maker's own address space, and a save that drops a range and adds another
-// drops it and signs only the one it adds.
-func TestVendorRangesAreJudgedAsPolicy(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	post := func(prefixes ...string) *httptest.ResponseRecorder {
-		rules := storage.DefaultDetectionTuning().ExpectedRules
-		for i := range rules {
-			if rules[i].ID == "vendor-claude" {
-				rules[i].Prefixes = prefixes
-			}
-		}
-		raw, _ := json.Marshal(map[string]any{"expected_rules": rules})
-		return policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), "")
-	}
-	for name, prefix := range map[string]string{"cloudflare": "104.16.0.0/16", "malformed": "160.79.104/23", "over-broad": "160.0.0.0/8"} {
-		if w := post(prefix); w.Code != http.StatusBadRequest {
-			t.Fatalf("%s prefix %s = %d %s, want 400", name, prefix, w.Code, w.Body.String())
-		}
-	}
-	if n := len(authorizedAudit(t, store)); n != 0 {
-		t.Fatalf("a refused range reached the authority: %d rows", n)
-	}
-	a := mustSign(t, store, post("160.79.104.0/23", "198.51.100.0/24"), http.StatusOK)
-	if strings.Join(a.Loosens, ",") != "expected_rules" {
-		t.Fatalf("loosens %v", a.Loosens)
-	}
-	got := store.GetDetectionTuning()
-	claude := storage.ExpectCtx{Kind: storage.KindBandwidthSpike, Host: "ws", Path: "/home/u/.local/share/claude/versions/2.1.5", User: "u",
-		DstIP: "198.51.100.9", Domain: "api.anthropic.com", Port: 443, Direction: "OUTBOUND"}
-	if !expects(got, claude) {
-		t.Fatalf("the added range is not honoured: %+v", got.ExpectedRules)
-	}
-	claude.DstIP = "2607:6bc0::1"
-	if expects(got, claude) {
-		t.Fatal("a range the save dropped still counts")
-	}
-}
-
 // A workload rule needs an expiry in the future when it is added, moving one
 // later is signed while moving another earlier applies plainly, and the feed
 // note names expired rules and a saved row weaker than the floor.
-func TestWorkloadRuleExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
+func TestWorkloadRuleExpiryAndTheFloorAreShown(t *testing.T) {
 	t.Parallel()
 	srv, store := setupTestServer(t)
 	defer store.Close()
@@ -850,9 +442,8 @@ func TestWorkloadRuleExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
 		}
 	}
 	raw, _ := json.Marshal(map[string]any{"expected_rules": rules})
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""), http.StatusOK)
-	if strings.Join(a.Loosens, ",") != "expected_rules" {
-		t.Fatalf("an extended expiry should be signed: %+v", a)
+	if w := policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""); w.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", w.Code, w.Body.String())
 	}
 	gh, _ := store.GetDetectionTuning().RuleByID("gh")
 	ssh, _ := store.GetDetectionTuning().RuleByID("ssh")
@@ -885,83 +476,4 @@ func TestWorkloadRuleExpiryAndTheFloorAreJudgedAndShown(t *testing.T) {
 		return
 	}
 	t.Fatal("no detection policy note")
-}
-
-// A loosening change carries the floor drill run against the policy it would
-// save into what the authority signs, so the audit shows what it blinds: a
-// rule over an internet range blinds the 10 MB burst and the rare beacon, a
-// container network over the LAN blinds the lateral sweeps and the lab escape;
-// a case already blinded is not counted again.
-func TestTheAuthorizationRecordsWhatALooseningChangeWouldBlind(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	body := `{"id":"uploads","name":"uploads","prefixes":["203.0.113.0/24"],"reason":"backup target"}`
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/expected", body, ""), http.StatusOK)
-	if !strings.HasPrefix(a.Summary, "BLINDS 1 FLOOR CASE: rare beacon; ") {
-		t.Fatalf("rule authorization = %q", a.Summary)
-	}
-
-	a = mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", `{"container_cidrs":["192.168.250.0/24"]}`, ""), http.StatusOK)
-	// The beacon the saved rule already blinds is not this change's; the
-	// lateral sweeps and the lab escape are.
-	if !strings.HasPrefix(a.Summary, "BLINDS ") || !strings.Contains(a.Summary, "lateral sweep, lab escape") ||
-		strings.Contains(a.Summary, "rare beacon") || !strings.HasSuffix(a.Summary, "container_cidrs +192.168.250.0/24") {
-		t.Fatalf("tuning authorization = %q", a.Summary)
-	}
-	if len(store.GetDetectionTuning().ContainerCIDRs) != 1 {
-		t.Fatal("the container network did not apply")
-	}
-}
-
-// A floor case that raises today and is missing from the proposed run counts
-// as blinded: removing the agent runtime a rule's program is drops that
-// program's resolver-bypass case.
-func TestADrillCaseTheChangeDropsCountsAsBlinded(t *testing.T) {
-	t.Parallel()
-	srv, store := setupTestServer(t)
-	defer store.Close()
-	tu := store.GetDetectionTuning()
-	tu.ExpectedRules = append(tu.ExpectedRules, storage.ExpectedRule{ID: "assistant", Name: "assistant", Reason: "test",
-		Programs: []storage.ExpectedProgram{{Path: "/usr/local/bin/agy"}}, Hosts: []string{"ws-1"}})
-	if _, err := store.SaveDetectionTuning(tu, "test"); err != nil {
-		t.Fatal(err)
-	}
-	tu = store.GetDetectionTuning()
-	var kept []storage.AgentRuntime
-	for _, rt := range tu.AgentRuntimes {
-		if rt.Path != "agy" {
-			kept = append(kept, rt)
-		}
-	}
-	if len(kept) == len(tu.AgentRuntimes) {
-		t.Fatal("need agy among the shipped agent runtimes")
-	}
-	raw, _ := json.Marshal(map[string]any{"agent_runtimes": kept})
-	a := mustSign(t, store, policyPost(srv, http.MethodPost, "/api/v1/detection/tuning", string(raw), ""), http.StatusOK)
-	if !strings.HasPrefix(a.Summary, "BLINDS 1 FLOOR CASE: resolver bypass under rule assistant") {
-		t.Fatalf("summary %q", a.Summary)
-	}
-}
-
-// Adding a decoy name or a feed tightens; dropping either, or changing a
-// feed's confidence, loosens.
-func TestDecoyNamesAndDomainFeedsLoosenWhenTakenAway(t *testing.T) {
-	base := storage.DefaultDetectionTuning()
-	more := base
-	more.DecoyNames = []string{"s3.vault-archive.lan"}
-	more.DomainIntelFeeds = append(append([]storage.DomainIntelFeed(nil), base.DomainIntelFeeds...),
-		storage.DomainIntelFeed{Name: "extra", URL: "https://lists.example/hosts", Confidence: 80})
-	if got := tuningLoosens(base, more); len(got) != 0 {
-		t.Fatalf("adding a decoy name and a feed loosened %v", got)
-	}
-	if got := tuningLoosens(more, base); len(got) != 2 {
-		t.Fatalf("taking them away loosened only %v", got)
-	}
-	lower := more
-	lower.DomainIntelFeeds = append([]storage.DomainIntelFeed(nil), more.DomainIntelFeeds...)
-	lower.DomainIntelFeeds[0].Confidence = 10
-	if got := tuningLoosens(more, lower); len(got) != 1 || got[0] != "domain_intel_feeds" {
-		t.Fatalf("lowering a feed's confidence loosened %v", got)
-	}
 }

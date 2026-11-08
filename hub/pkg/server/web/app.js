@@ -466,9 +466,7 @@
     // it is a per-host answer and only one host is ever on screen.
     baselineByEndpoint: {},
     audit: [],
-    responseAuthStatus: null,
     responseJobs: [],
-    responseSession: null,
     terminalSessions: [],
     scripts: [],
     scriptSchedules: [],
@@ -3357,7 +3355,7 @@
 
   var ASSET_HELP = "Click a row to see its facts, open ports and actions; Open full view has everything else. " +
     "The three bars after a name show who knows the machine: agent (green), scan (amber), router lease (blue). " +
-    "Host-locked machines run only scripts Nightshift signed; Isolation mismatch means the hub and the agent disagree about isolation. " +
+    "Host-locked machines run only scripts signed by a key pinned on them; Isolation mismatch means the hub and the agent disagree about isolation. " +
     "No client cert means the agent reports with its device credential but has not shown a client certificate yet. " +
     "Keys: j and k move, Enter opens, i isolates, r rescans; Ctrl or Shift plus click selects several.";
 
@@ -6184,7 +6182,7 @@
 
     /* An expected rule silences findings, so it is the one table where
        "take this away" is a security action: removing tightens and applies at
-       once, and the hub refuses to loosen without the response authority. */
+       once. */
     var excl = simpleTable(["Rule", "Program", "Destination", "Covers", "State", ""],
       state.expected.map(function (r) {
         var gone = ruleExpired(r);
@@ -6499,165 +6497,14 @@
   }
 
 
-  /* ------------------------------------------------- response authority & crypto */
 
-  var ephemeralResponseKey = null;
 
-  function hasWebCrypto() {
-    return !!(window.crypto && window.crypto.subtle && window.crypto.subtle.generateKey && window.isSecureContext);
-  }
 
-  function bufToHex(buffer) {
-    var bytes = new Uint8Array(buffer);
-    var hex = "";
-    for (var i = 0; i < bytes.length; i++) {
-      var b = bytes[i].toString(16);
-      hex += (b.length === 1 ? "0" : "") + b;
-    }
-    return hex;
-  }
 
-  function encodeActionProofV2(proof) {
-    var parts = [];
-    function writeString(str) {
-      var bytes = new TextEncoder().encode(str);
-      var lenBuf = new Uint8Array(4);
-      new DataView(lenBuf.buffer).setUint32(0, bytes.length, false);
-      parts.push(lenBuf, bytes);
-    }
-    function writeUint32(n) {
-      var buf = new Uint8Array(4);
-      new DataView(buf.buffer).setUint32(0, n, false);
-      parts.push(buf);
-    }
-    function writeInt64(n) {
-      var buf = new Uint8Array(8);
-      new DataView(buf.buffer).setBigInt64(0, BigInt(n), false);
-      parts.push(buf);
-    }
-    function writeHexNormalized(hexStr) {
-      writeString(String(hexStr || "").toLowerCase().trim());
-    }
-    function writeStringSlice(arr) {
-      writeUint32(arr.length);
-      for (var i = 0; i < arr.length; i++) {
-        writeString(arr[i]);
-      }
-    }
 
-    writeString("OMINULL-ACTION-PROOF-V2");
-    writeUint32(proof.version || 2);
-    writeString(proof.session_id);
-    writeString(proof.tenant_id);
-    writeString(proof.action_kind);
-    writeHexNormalized(proof.action_digest);
-    writeStringSlice(proof.target_endpoints || []);
-    writeInt64(proof.timestamp);
-    writeHexNormalized(proof.nonce);
 
-    var totalLen = 0;
-    for (var i = 0; i < parts.length; i++) totalLen += parts[i].length;
-    var out = new Uint8Array(totalLen);
-    var offset = 0;
-    for (var j = 0; j < parts.length; j++) {
-      out.set(parts[j], offset);
-      offset += parts[j].length;
-    }
-    return out;
-  }
 
-  function digestSHA256(str) {
-    var bytes = new TextEncoder().encode(str);
-    return window.crypto.subtle.digest("SHA-256", bytes).then(function (digestBuf) {
-      return bufToHex(digestBuf);
-    });
-  }
 
-  function signActionProof(actionKind, actionDigestHex, targetEndpoints) {
-    if (!state.responseSession || !ephemeralResponseKey) {
-      return Promise.reject(new Error("Response is locked. Unlock it with your authenticator code first."));
-    }
-    var nonceBytes = new Uint8Array(16);
-    window.crypto.getRandomValues(nonceBytes);
-    var nonceHex = bufToHex(nonceBytes);
-
-    var nowSec = Math.floor(Date.now() / 1000);
-    var targets = Array.isArray(targetEndpoints) ? targetEndpoints : [targetEndpoints];
-
-    var proof = {
-      version: 2,
-      session_id: state.responseSession.session_id,
-      tenant_id: state.responseSession.tenant_id || "default",
-      action_kind: actionKind,
-      action_digest: String(actionDigestHex || "").toLowerCase().trim(),
-      target_endpoints: targets,
-      timestamp: nowSec,
-      nonce: nonceHex
-    };
-
-    var canonicalBytes = encodeActionProofV2(proof);
-    return window.crypto.subtle.sign({ name: "Ed25519" }, ephemeralResponseKey.privateKey, canonicalBytes)
-      .then(function (sigBuf) {
-        proof.signature = bufToHex(sigBuf);
-        return proof;
-      });
-  }
-
-  function updateResponseButton() {
-    var btn = $("topbar-response-btn");
-    var txt = $("response-status-text");
-    if (!btn || !txt) return;
-
-    if (!state.responseSession) {
-      btn.setAttribute("data-status", "locked");
-      btn.title = "Collecting evidence and running scripts is locked. Click to unlock with your authenticator code.";
-      txt.textContent = "Response Locked";
-      var icon = btn.querySelector("use");
-      if (icon) icon.setAttribute("href", "#i-lock");
-      return;
-    }
-
-    var now = Date.now();
-    var exp = state.responseSession.expires_at ? new Date(state.responseSession.expires_at).getTime() : 0;
-    var idleExp = state.responseSession.idle_expires_at ? new Date(state.responseSession.idle_expires_at).getTime() : 0;
-
-    if ((exp && now >= exp) || (idleExp && now >= idleExp)) {
-      state.responseSession = null;
-      ephemeralResponseKey = null;
-      btn.setAttribute("data-status", "locked");
-      btn.title = "Response locked itself: the unlock ran out. Click to unlock again.";
-      txt.textContent = "Response Locked";
-      var icon = btn.querySelector("use");
-      if (icon) icon.setAttribute("href", "#i-lock");
-      toast("Response locked itself: the unlock ran out.", "warn");
-      if (state.section === "response") renderBody();
-      return;
-    }
-
-    btn.setAttribute("data-status", "unlocked");
-    btn.title = "Collecting evidence and running scripts is unlocked. Click for details or to lock.";
-    var icon = btn.querySelector("use");
-    if (icon) icon.setAttribute("href", "#i-unlock");
-
-    var remMs = Math.min(exp ? exp - now : 86400000, idleExp ? idleExp - now : 86400000);
-    var remSec = Math.max(0, Math.floor(remMs / 1000));
-    var min = Math.floor(remSec / 60);
-    var sec = remSec % 60;
-    var timeStr = (min < 10 ? "0" : "") + min + ":" + (sec < 10 ? "0" : "") + sec;
-
-    txt.textContent = "Unlocked (" + timeStr + ")";
-  }
-
-  function updateResponseTimer() {
-    if (state.responseSession) {
-      updateResponseButton();
-    }
-  }
-
-  /* Locking throws away the browser signing key. Re-unlocking is a fresh TOTP
-     and a fresh key, which is a real interruption mid-incident, so the two
-     deliberate "Lock Response Authority" buttons ask first. Expiry and idle
-     timeout call lockResponseSession() directly and must not prompt. */
   /* A rule may carry an expiry; one without it stands until it is removed. */
   function ruleExpired(r) {
     if (!r.expires_at) return false;
@@ -6699,243 +6546,10 @@
       .catch(function (e) { toast("Could not remove the rule: " + e.message, "crit"); });
   }
 
-  /* The job lifecycle, named exactly as the hub names it (response.JobState:
-     queued, offered, acknowledged, running, succeeded, failed, cancel_requested,
-     cancelled). Listing the *finished* states rather than the open ones is the
-     safe direction: a state added later shows a Cancel button the hub then
-     refuses, instead of silently hiding the button on a job that is very much
-     still running. cancel_requested is already on its way out, so it is
-     finished for this purpose too. */
-  function confirmLockResponseSession() {
-    confirmSheet({
-      title: "Lock response",
-      consequence: "Collecting evidence and running scripts stops working in this browser until you unlock again with your authenticator code.",
-      detail: "Jobs already sent to a host keep running.",
-      confirmLabel: "Lock",
-      stack: true,
-      onConfirm: lockResponseSession
-    });
-  }
 
-  function lockResponseSession() {
-    if (state.responseSession && state.responseSession.session_id) {
-      request("/api/v1/response/auth/lock", "POST", { session_id: state.responseSession.session_id })
-        .catch(function () {});
-    }
-    state.responseSession = null;
-    ephemeralResponseKey = null;
-    updateResponseButton();
-    toast("Response locked.", "info");
-    if (state.section === "response") renderBody();
-  }
 
-  function openResponseControllerSheet() {
-    if (!state.responseSession) return;
-    var sess = state.responseSession;
-    var keyFp = ephemeralResponseKey ? ephemeralResponseKey.publicKeyHex.slice(0, 16) + "\u2026" : "active";
 
-    var body = h("div", { cls: "card-body stack" },
-      h("div", { cls: "form-row" },
-        chip("ok", "Unlocked"),
-        h("span", { cls: "dim-2", text: "Session " + (sess.session_id ? sess.session_id.slice(0, 16) + "\u2026" : "") })
-      ),
-      h("dl", { cls: "kv" },
-        h("dt", { text: "Operator" }), h("dd", {}, h("b", { text: sess.operator_id || OPERATOR || "admin" })),
-        h("dt", { text: "Tenant" }), h("dd", { text: sess.tenant_id || "default" }),
-        h("dt", { text: "Unlocked with" }), h("dd", { text: !sess.auth_method || sess.auth_method === "totp" ? "Authenticator code" : sess.auth_method }),
-        h("dt", { text: "Browser key" }), h("dd", { cls: "ip", text: keyFp }),
-        h("dt", { text: "Locks at" }), h("dd", { text: sess.expires_at ? new Date(sess.expires_at).toLocaleTimeString() : "8h" }),
-        h("dt", { text: "Locks if idle at" }), h("dd", { text: sess.idle_expires_at ? new Date(sess.idle_expires_at).toLocaleTimeString() : "30m" })
-      )
-    );
 
-    var lockBtn = h("button", {
-      cls: "btn btn-crit",
-      type: "button",
-      text: "Lock",
-      /* confirmLockResponseSession, not lockResponseSession - see there. */
-      on: {
-        click: function () {
-          closeSheet();
-          confirmLockResponseSession();
-        }
-      }
-    });
-
-    var foot = [
-      h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
-      lockBtn
-    ];
-
-    openSheet("Response unlocked", body, foot);
-  }
-
-  /* The authority's own errors, as the person at the dialog needs them. */
-  function unlockErrorText(err) {
-    var text = (err && err.message) || "";
-    if (/invalid or expired TOTP/i.test(text)) return "That code is wrong or has run out. Try the next one from your app.";
-    if (/no authenticators enrolled/i.test(text)) return "No authenticator is set up for you yet. Add one below.";
-    return text || "Couldn't unlock. Try again.";
-  }
-
-  function openUnlockResponseSheet(onSuccess) {
-    if (!hasWebCrypto()) {
-      openSheet("Can't unlock on this connection",
-        h("div", { cls: "card-body stack" },
-          h("div", { cls: "st-banner", "data-state": "crit", text: "This connection isn't secure enough to unlock" }),
-          h("p", { text: "Browsers only allow the key this unlock needs on a secure connection." }),
-          h("p", { text: "Open the console over HTTPS with a trusted certificate (the hub's console TLS address), then unlock there." })
-        ),
-        [h("button", { cls: "btn", type: "button", text: "Dismiss", on: { click: closeSheet } })]
-      );
-      return;
-    }
-
-    var op = state.you || OPERATOR || "admin";
-    var errBox = h("div", { cls: "note note-crit", role: "alert", hidden: true });
-    var codeInput = h("input", {
-      type: "text",
-      id: "unlock-totp-code",
-      cls: "input-code",
-      placeholder: "000000",
-      maxlength: "8",
-      pattern: "[0-9]*",
-      autocomplete: "one-time-code",
-      autofocus: true
-    });
-
-    var submitBtn = h("button", {
-      cls: "btn btn-primary",
-      type: "button",
-      text: "Unlock",
-      on: {
-        click: function () {
-          var code = (codeInput.value || "").trim().replace(/\s+/g, "");
-          if (code.length < 6) {
-            errBox.textContent = "Enter the 6-digit code from your authenticator app.";
-            errBox.removeAttribute("hidden");
-            codeInput.focus();
-            return;
-          }
-
-          submitBtn.disabled = true;
-          submitBtn.textContent = "Unlocking\u2026";
-          errBox.setAttribute("hidden", "");
-
-          var browserSessionId = "sess-browser-" + bufToHex(window.crypto.getRandomValues(new Uint8Array(16)).buffer);
-
-          window.crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"])
-            .then(function (keyPair) {
-              return window.crypto.subtle.exportKey("raw", keyPair.publicKey)
-                .then(function (rawPub) {
-                  var pubHex = bufToHex(rawPub);
-                  return request("/api/v1/response/auth/unlock", "POST", {
-                    operator_id: op,
-                    browser_session_id: browserSessionId,
-                    browser_public_key: pubHex,
-                    totp_code: code
-                  }).then(function (session) {
-                    state.responseSession = session;
-                    ephemeralResponseKey = {
-                      keyPair: keyPair,
-                      privateKey: keyPair.privateKey,
-                      publicKeyHex: pubHex,
-                      browserSessionId: browserSessionId
-                    };
-                    closeSheet();
-                    updateResponseButton();
-                    toast(session.expires_at ? "Response unlocked until " + new Date(session.expires_at).toLocaleTimeString() + ", or until it sits idle." : "Response unlocked.", "ok");
-                    if (state.section === "response") renderBody();
-                    if (typeof onSuccess === "function") onSuccess(session);
-                  });
-                });
-            })
-            .catch(function (err) {
-              submitBtn.disabled = false;
-              submitBtn.textContent = "Unlock";
-              errBox.textContent = unlockErrorText(err);
-              errBox.removeAttribute("hidden");
-              codeInput.focus();
-            });
-        }
-      }
-    });
-
-    codeInput.addEventListener("keydown", function (e) {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        submitBtn.click();
-      }
-    });
-
-    var enrollBox = h("div", { cls: "totp-enroll-box stack-s u-mt2", hidden: true });
-    var enrollBtn = h("button", {
-      cls: "btn mini",
-      type: "button",
-      text: "Add an authenticator",
-      on: {
-        click: function () {
-          enrollBtn.disabled = true;
-          enrollBtn.textContent = "Creating setup key…";
-          request("/api/v1/response/auth/totp/enroll", "POST", { operator_id: op })
-            .then(function (res) {
-              enrollBtn.style.display = "none";
-              enrollBox.style.display = "block";
-              enrollBox.innerHTML = "";
-              var keyRow = h("div", { cls: "stack-s totp-key-row" },
-                h("div", { cls: "label-meta", text: "Setup key" }),
-                h("div", { cls: "row-acts uf uf-g3" },
-                  h("code", { cls: "cmd u-strong u-break", text: res.secret }),
-                  h("button", {
-                    cls: "btn mini",
-                    type: "button",
-                    text: "Copy key",
-                    on: {
-                      click: function () { copyText(res.secret, "Setup key"); }
-                    }
-                  })
-                ),
-                h("div", { cls: "why u-mt1" },
-                  h("span", { text: "Add this key to your authenticator app, then enter the 6-digit code it shows. " }),
-                  res.otpauth_url ? h("a", { href: res.otpauth_url, target: "_blank", rel: "noopener", text: "Open in authenticator app" }) : null
-                )
-              );
-              enrollBox.appendChild(keyRow);
-              toast("Setup key ready. Add it to your app, then enter its code.", "ok");
-              codeInput.focus();
-            })
-            .catch(function (err) {
-              enrollBtn.disabled = false;
-              enrollBtn.textContent = "Add an authenticator";
-              errBox.textContent = "Couldn't add an authenticator: " + (err.message || err);
-              errBox.removeAttribute("hidden");
-            });
-        }
-      }
-    });
-
-    var body = h("div", { cls: "card-body stack" },
-      h("p", { text: "Collecting evidence and running scripts needs your authenticator code. It locks again by itself when it sits idle, and the key it uses stays in this browser's memory." }),
-      h("div", { cls: "form-row" },
-        h("span", { cls: "dim-2", text: "Unlocking as " }), h("b", { text: op })
-      ),
-      h("div", { cls: "form-row stack-s" },
-        h("label", { "for": "unlock-totp-code", text: "Authenticator code" }),
-        codeInput
-      ),
-      h("div", { cls: "form-row u-mt1" }, enrollBtn),
-      enrollBox,
-      errBox
-    );
-
-    var foot = [
-      h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: closeSheet } }),
-      submitBtn
-    ];
-
-    openSheet("Unlock response", body, foot);
-    setTimeout(function () { codeInput.focus(); }, 100);
-  }
 
   /* ------------------------------------------------------------ terminal */
 
@@ -7066,37 +6680,19 @@
     var view = $("view");
     clear(view);
 
-    var auth = state.responseAuthStatus || { active_sessions: 0 };
-    var isUnlocked = !!state.responseSession;
-
-    var authActions = isUnlocked
-      ? [
-          h("button", { cls: "btn", type: "button", text: "Session details", on: { click: openResponseControllerSheet } }),
-          h("button", { cls: "btn btn-crit", type: "button", text: "Lock", on: { click: confirmLockResponseSession } })
-        ]
-      : [
-          h("button", { cls: "btn btn-primary", type: "button", text: "Unlock", title: "Unlock with your authenticator code", disabled: READ_ONLY, on: { click: function () { openUnlockResponseSheet(); } } })
-        ];
-
     /* Terminals and response jobs have their own pages; this bar says how
        many there are and links there. */
     var liveTerms = arrayOf(state.terminalSessions).filter(terminalSessionIsLive).length;
     var openJobs = arrayOf(state.responseJobs).filter(function (j) {
       return ["succeeded", "failed", "cancelled"].indexOf(String(j.state || "queued")) < 0;
     }).length;
-    var others = Math.max(0, (auth.active_sessions || 0) - (isUnlocked ? 1 : 0));
     var authCard = pageTools(h("div", { cls: "needs-you" },
-        chip(isUnlocked ? "ok" : "warn", isUnlocked ? "Unlocked" : "Locked"),
-        others ? h("span", { cls: "dim-2", text: others + " other unlocked " + (others === 1 ? "session" : "sessions") }) : null,
         countLink(liveTerms, liveTerms === 1 ? "terminal running" : "terminals running", "/console/terminal"),
         countLink(openJobs, openJobs === 1 ? "job in flight" : "jobs in flight", "/console/jobs" + (openJobs ? "" : "?view=history"))),
       h("div", { cls: "row-acts" },
         h("a", { cls: "btn", href: "/console/terminal", text: "Open a terminal" }),
-        h("a", { cls: "btn", href: "/console/jobs?view=history", text: "Job history" }),
-        authActions),
-      { key: "Response access", text: isUnlocked
-        ? "Unlocked: you can collect evidence and run scripts. Each one is signed with a key this browser holds in memory until you lock it." + (auth.signer_key_id ? " Signing key " + auth.signer_key_id.slice(0, 16) + "\u2026." : "") + " Terminals don't use this unlock."
-        : "Collecting evidence and running scripts need an unlocked session. Unlock with your authenticator code. Terminals don't use this unlock." });
+        h("a", { cls: "btn", href: "/console/jobs?view=history", text: "Job history" })),
+      { key: "Response access", text: "Collecting evidence and running scripts run at once. The hub signs each one for that host, and the agent checks the signature itself." });
 
     var scriptRows = (state.scripts || []).map(function (sc) {
       return [
@@ -7158,7 +6754,7 @@
       scriptRows.length ? h("div", {}, stackOnPhone(simpleTable(["Script", "Interpreter", "Version", "Status", "Updated", ""], foldedScripts.rows, { key: "scripts" })), foldedScripts.toggle)
         : emptyBox("No scripts yet. New script adds one."),
       [scriptCardHead], false,
-      "Each script version is stored as written and never changes. Run sends one version to the machines you pick, signed with your unlocked session, once or on a schedule. Retire stops every future run and schedule of all its versions; past jobs are kept."
+      "Each script version is stored as written and never changes. Run sends one version to the machines you pick, signed by the hub, once or on a schedule. Retire stops every future run and schedule of all its versions; past jobs are kept."
     );
 
     var schedRows = (state.scriptSchedules || []).map(function (sched) {
@@ -7533,7 +7129,7 @@
       id: "run-script-action-btn",
       cls: "btn btn-primary",
       type: "button",
-      text: "Sign & Execute Script"
+      text: "Run Script"
     });
 
     function updateMode() {
@@ -7542,7 +7138,7 @@
       scheduleTargetRow.hidden = !isSched;
       scheduleTargetsContainer.hidden = !isSched;
       schedSection.hidden = !isSched;
-      actionBtn.textContent = isSched ? "Freeze & Schedule Execution" : "Sign & Execute Script";
+      actionBtn.textContent = isSched ? "Freeze & Schedule Execution" : "Run Script";
     }
 
     modeRunNow.addEventListener("change", updateMode);
@@ -7638,13 +7234,6 @@
         }
       }
 
-      if (!state.responseSession || !ephemeralResponseKey) {
-        openUnlockResponseSheet(function () {
-          openScriptRunSheet(script, vNum, singleEndpointSel.value);
-        });
-        return;
-      }
-
       errBox.setAttribute("hidden", "");
 
       if (!isSched) {
@@ -7657,32 +7246,16 @@
         }
 
         actionBtn.disabled = true;
-        actionBtn.textContent = "Signing Proof & Dispatching...";
+        actionBtn.textContent = "Dispatching...";
 
-        // Request canonical action digest
-        request("/api/v1/scripts/digest", "POST", {
+        request("/api/v1/scripts/run", "POST", {
           script_id: script.id,
           version: vNum,
+          endpoint_id: epId,
           parameters: collectedParams,
           timeout_seconds: toSec,
           max_output_bytes: maxB
         })
-          .then(function (res) {
-            return signActionProof("script_exec", res.action_digest, [epId])
-              .then(function (proof) {
-                return request("/api/v1/scripts/run", "POST", {
-                  script_id: script.id,
-                  version: vNum,
-                  endpoint_id: epId,
-                  parameters: collectedParams,
-                  timeout_seconds: toSec,
-                  max_output_bytes: maxB,
-                  session_id: state.responseSession.session_id,
-                  action_digest: res.action_digest,
-                  proof: proof
-                });
-              });
-          })
           .then(function (job) {
             closeSheet();
             toast("Script execution job dispatched (" + (job.id ? job.id.slice(0, 8) : "") + "...) Target: " + epId, "ok");
@@ -7690,7 +7263,7 @@
           })
           .catch(function (err) {
             actionBtn.disabled = false;
-            actionBtn.textContent = "Sign & Execute Script";
+            actionBtn.textContent = "Run Script";
             errBox.textContent = err.message || "Failed to dispatch script execution.";
             errBox.removeAttribute("hidden");
           });
@@ -7722,8 +7295,7 @@
           start_time: startVal,
           max_runs: maxR,
           timeout_seconds: toSec,
-          max_output_bytes: maxB,
-          session_id: state.responseSession.session_id
+          max_output_bytes: maxB
         })
           .then(function (sched) {
             closeSheet();
@@ -7858,13 +7430,6 @@
       return;
     }
 
-    if (!state.responseSession || !ephemeralResponseKey) {
-      openUnlockResponseSheet(function () {
-        launchForensicsSheet(asset);
-      });
-      return;
-    }
-
     var ep = asset.endpoint;
 
     var profileSel = h("select", { id: "forensics-profile-select" });
@@ -7908,7 +7473,7 @@
           var toSec = parseInt(timeoutSel.value, 10) || 120;
 
           launchBtn.disabled = true;
-          launchBtn.textContent = "Signing Proof & Dispatching\u2026";
+          launchBtn.textContent = "Dispatching\u2026";
           errBox.setAttribute("hidden", "");
 
           var payload = {
@@ -7918,20 +7483,11 @@
           };
           var payloadStr = JSON.stringify(payload);
 
-          digestSHA256(payloadStr)
-            .then(function (digestHex) {
-              return signActionProof("forensic_collection", digestHex, [ep.id])
-                .then(function (proof) {
-                  return request("/api/v1/response/jobs", "POST", {
-                    endpoint_id: ep.id,
-                    kind: "forensic_collection",
-                    payload_json: payloadStr,
-                    session_id: state.responseSession.session_id,
-                    action_digest: digestHex,
-                    proof: proof
-                  });
-                });
-            })
+          request("/api/v1/response/jobs", "POST", {
+            endpoint_id: ep.id,
+            kind: "forensic_collection",
+            payload_json: payloadStr
+          })
             .then(function (job) {
               closeSheet();
               /* The job's page follows it to the end; the evidence it
@@ -7958,7 +7514,7 @@
         h("span", { cls: "dim-2", text: "Platform: " }), h("b", { text: ep.os || "Linux" }),
         h("span", { cls: "dim-2", text: " \u00b7 Isolation: " }), chip(asset.isolated ? "crit" : "ok", asset.isolated ? "ISOLATED" : "Online")
       ),
-      h("p", { cls: "pending", text: "Forensic collections run under the response authority with signed ActionProof V2. The agent collects forensic telemetry in-process, validates size bounds, computes SHA-256 digests, and generates an Ed25519-signed canonical manifest." }),
+      h("p", { cls: "pending", text: "The hub signs this collection for this host. The agent checks the signature, collects forensic telemetry in-process, validates size bounds, computes SHA-256 digests, and generates an Ed25519-signed canonical manifest." }),
       h("div", { cls: "form-row stack-s" },
         h("label", { "for": "forensics-profile-select", text: "Select Collection Profile:" }),
         profileSel
@@ -10140,8 +9696,8 @@
   var LOCK_LEVELS = {
     monitor: ["Watch only", "Watches and takes agent updates. It cannot be isolated and runs no scripts, terminal or screen."],
     isolate: ["Isolate only", "Can be isolated, hands over evidence and takes agent updates. No scripts, terminal or screen."],
-    "signed-scripts": ["Signed scripts", "Can be isolated, hands over evidence, takes updates and runs scripts Nightshift signed. No terminal or screen."],
-    "monitor-signed-scripts": ["Watch and signed scripts", "Hands over evidence, takes updates and runs scripts Nightshift signed. It cannot be isolated and has no terminal or screen."],
+    "signed-scripts": ["Signed scripts", "Can be isolated, hands over evidence, takes updates and runs scripts signed by a key pinned on it. No terminal or screen."],
+    "monitor-signed-scripts": ["Watch and signed scripts", "Hands over evidence, takes updates and runs scripts signed by a key pinned on it. It cannot be isolated and has no terminal or screen."],
     respond: ["No scripts", "Everything except scripts: isolation, evidence, updates, terminal and screen."],
     engagement: ["Everything", "No lock level holds anything back."]
   };
@@ -10175,10 +9731,10 @@
     var keys = arrayOf(t.host_keys);
     var scriptsOk = !t.ceiling || /scripts|engagement/.test(t.ceiling);
     if (t.host_authority) {
-      return "Only scripts Nightshift signed run here" + (keys.length ? " (" + keys.length + (keys.length === 1 ? " key" : " keys") + " pinned: " + keys.map(function (k) { return k.role; }).join(", ") + ")" : "") + "." +
+      return "Only scripts signed by a key pinned here run" + (keys.length ? " (" + keys.length + (keys.length === 1 ? " key" : " keys") + " pinned: " + keys.map(function (k) { return k.role; }).join(", ") + ")" : "") + "." +
         (scriptsOk ? "" : " The lock level holds them back anyway.");
     }
-    if (t.ceiling === "signed-scripts" || t.ceiling === "monitor-signed-scripts") return "Refused until a Nightshift key is pinned on the machine.";
+    if (t.ceiling === "signed-scripts" || t.ceiling === "monitor-signed-scripts") return "Refused until a signing key is pinned on the machine.";
     if (!scriptsOk) return "None run here: the lock level does not allow scripts.";
     return "Scripts the hub signs run here, inside what the permission profile allows.";
   }
@@ -10259,7 +9815,7 @@
           on: { click: function () { setRemoteAccessOff(asset, !off); } } }));
     }
     return card("Access and lock", h("div", {}, h("div", { cls: "card-body" }, h("dl", { cls: "kv kv-2" }, facts)), remote), null, true,
-      "The lock level is set on the machine itself, as root or Administrator, and the hub cannot change it. A host-locked machine takes scripts only from keys Nightshift pinned on it. Refusals are what the agent last turned down.");
+      "The lock level is set on the machine itself, as root or Administrator, and the hub cannot change it. A host-locked machine takes scripts only from keys pinned on it. Refusals are what the agent last turned down.");
   }
 
   function routeHeadChips(asset) {
@@ -11495,7 +11051,6 @@
         if (e.status === 404 || e.status === 403) state.terminalAvailable = false;
       }));
     if (state.section === "response") {
-      jobs.push(request("/api/v1/response/auth/status").then(function (d) { state.responseAuthStatus = d || null; }).catch(function () {}));
       jobs.push(request("/api/v1/response/jobs?limit=50").then(function (d) { state.responseJobs = arrayOf(d && d.jobs || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts").then(function (d) { state.scripts = arrayOf(d && d.scripts || d); }).catch(function () {}));
       jobs.push(request("/api/v1/scripts/schedules").then(function (d) { state.scriptSchedules = arrayOf(d && d.schedules || d); }).catch(function () {}));
@@ -11668,25 +11223,6 @@
 
     if (state.demo) toast("Demo mode \u2014 synthetic fleet, no live hub data", "warn");
     if (READ_ONLY) toast("Read-only role \u2014 the hub refuses any action taken from this console", "warn");
-
-    var respBtn = $("topbar-response-btn");
-    if (respBtn) {
-      respBtn.addEventListener("click", function () {
-        if (state.responseSession) {
-          openResponseControllerSheet();
-        } else {
-          openUnlockResponseSheet();
-        }
-      });
-      updateResponseButton();
-    }
-    setInterval(updateResponseTimer, 1000);
-
-    /* Twenty-five window.__* handles used to ship to production, among them
-       __responseCrypto.signActionProof - the primitive that mints response
-       authorisations. Anything that got script execution in this page was
-       handed a signing oracle and a direct call into every destructive sheet.
-       Nothing in the console reads them; they were a debugging convenience. */
 
     if ("serviceWorker" in navigator && !state.demo) {
       window.addEventListener("load", function () {

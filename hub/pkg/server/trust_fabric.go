@@ -22,7 +22,7 @@ import (
 //   - full: the endpoint reaches only the hub. The fabric is not consulted and
 //     no exception may be named. Detector isolation is always full.
 //   - selective: the endpoint's effective policy is expanded into allow_ips
-//     before the authority signs, so the signed grant carries exactly what was
+//     before the hub signs, so the signed grant carries exactly what was
 //     authorized; a rule changed later does not reach an isolation in force.
 //   - omitted: the request's own allow_ips only, as before modes existed.
 //

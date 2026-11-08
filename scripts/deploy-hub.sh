@@ -5,7 +5,7 @@
 #   scripts/deploy-hub.sh --rev REV   build that commit instead (e.g. to go back further than one deploy)
 #   scripts/deploy-hub.sh --rollback  put the previous binaries back and restart
 #
-# Builds ominull-hub, ominull-response-authority and ominullctl from `git archive REV`
+# Builds ominull-hub and ominullctl from `git archive REV`
 # (never the working tree, so other work in the checkout is not shipped), streams them
 # into the hub container over the Proxmox root SSH alias, keeps each replaced binary as
 # <name>.prev, restarts what changed and waits for /api/v1/agents/update-status to report
@@ -60,14 +60,13 @@ health() {
     return 1
 }
 swap_back() {
-    for b in ominull-hub ominull-response-authority; do
+    for b in ominull-hub; do
         [ -f "$BIN/$b.prev" ] || continue
         cp -p "$BIN/$b" "$STAGE/$b.undo"
         install -m 0755 -o root -g root "$BIN/$b.prev" "$BIN/$b.new" && mv -f "$BIN/$b.new" "$BIN/$b"
         mv -f "$STAGE/$b.undo" "$BIN/$b.prev"
     done
     if [ -f /usr/bin/ominullctl.prev ]; then cp -p /usr/bin/ominullctl.prev /usr/bin/ominullctl; fi
-    systemctl restart ominull-response-authority.service 2>/dev/null || true
     systemctl restart ominull-hub.service
 }
 case "$action" in
@@ -76,7 +75,7 @@ stage)
     ;;
 deploy)
     changed=""
-    for b in ominull-hub ominull-response-authority; do
+    for b in ominull-hub; do
         [ -f "$STAGE/$b" ] || continue
         if [ -f "$BIN/$b" ] && cmp -s "$STAGE/$b" "$BIN/$b"; then continue; fi
         [ -f "$BIN/$b" ] && cp -p "$BIN/$b" "$BIN/$b.prev"
@@ -88,7 +87,6 @@ deploy)
         install -m 0755 -o root -g root "$STAGE/ominullctl" /usr/bin/ominullctl.new && mv -f /usr/bin/ominullctl.new /usr/bin/ominullctl
     fi
     rm -rf "$STAGE"
-    case "$changed" in *ominull-response-authority*) systemctl restart ominull-response-authority.service ;; esac
     systemctl restart ominull-hub.service
     echo "replaced:${changed:- nothing (same bytes), restarted the hub}"
     if build="$(health)"; then echo "live build $build"; exit 0; fi
@@ -127,7 +125,6 @@ echo "[*] Building hub ${build} ($(git -C "${ROOT_DIR}" log -1 --format=%s "${sh
     cd "${work}/hub"
     export CGO_ENABLED=0
     go build -trimpath -ldflags "-X main.version=${build}" -o "${work}/out/ominull-hub" ./cmd
-    go build -trimpath -o "${work}/out/ominull-response-authority" ./cmd/ominull-response-authority
     go build -trimpath -o "${work}/out/ominullctl" ./cmd/ominullctl
 )
 echo "[*] Copying to CT ${LXC} through ${ALIAS}."
@@ -138,7 +135,7 @@ ssh "${ssh_opts[@]}" -- "${ALIAS}" "pct exec ${LXC} -- sh /root/.ominull-deploy.
 echo "[*] Swapping binaries and restarting."
 ssh "${ssh_opts[@]}" -- "${ALIAS}" "pct exec ${LXC} -- sh -c 'sh /root/.ominull-deploy.sh deploy ${build}; rc=\$?; rm -f /root/.ominull-deploy.sh; exit \$rc'"
 echo "[+] Hub ${build} is live."
-# The maintenance package library ships with the hub (responseauth/released_packages.json).
+# The maintenance package library ships with the hub (grants/released_packages.json).
 # shellcheck source=lib/hub-admin-key.sh
 . "${ROOT_DIR}/scripts/lib/hub-admin-key.sh"
 hub_admin_key_from_config

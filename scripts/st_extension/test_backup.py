@@ -121,7 +121,7 @@ def write_dump(directory, extra=()):
     archive = directory / "vzdump-lxc-150-2026_10_06-15_00_00.tar"
     with tarfile.open(archive, "w", format=tarfile.GNU_FORMAT) as tar:
         for name in ["./", "./etc/", "./etc/ominull/", "./var/", "./var/lib/", "./var/lib/ominull/",
-                     "./var/lib/ominull/evidence/", "./var/lib/ominull-response-authority/", "./opt/",
+                     "./var/lib/ominull/evidence/", "./var/lib/ominull/grants/", "./opt/",
                      "./opt/ominull/", "./opt/ominull/bin/", "./opt/ominull/bin/certs/"]:
             member = tarfile.TarInfo(name)
             member.type, member.mode = tarfile.DIRTYPE, 0o755
@@ -332,13 +332,13 @@ class SecretSplitTests(unittest.TestCase):
             return members
 
     def test_secret_members_are_sealed_and_gone_from_the_bulk_tar(self):
-        later_key = tarfile.TarInfo("./var/lib/ominull-response-authority/tenants/t-1.key")
+        later_key = tarfile.TarInfo("./var/lib/ominull/grants/keys/t-1.key")
         later_key.size = 6
-        nested = tarfile.TarInfo("./var/lib/ominull-response-authority/tenants/")
+        nested = tarfile.TarInfo("./var/lib/ominull/grants/keys/")
         nested.type = tarfile.DIRTYPE
         new_cert_key = tarfile.TarInfo("./opt/ominull/bin/certs/client.key")
         new_cert_key.size = 4
-        wal = tarfile.TarInfo("./var/lib/ominull-response-authority/authority.db-wal")
+        wal = tarfile.TarInfo("./var/lib/ominull/grants/keys/held-open.key")
         wal.size = 3
         with dump_root() as root:
             directory = owned_attempt(root)
@@ -357,11 +357,11 @@ class SecretSplitTests(unittest.TestCase):
             self.assertEqual(response["sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
             self.assertEqual(oct(sealed.stat().st_mode & 0o777), "0o600")
             self.assertEqual(response["secrets"]["paths_verified"],
-                             sorted(pd.SECRET_REQUIRED | {"var/lib/ominull-response-authority/authority.db-wal"}))
+                             sorted(pd.SECRET_REQUIRED))
             members = self.decrypt(sealed)
             for name in pd.SECRET_REQUIRED:
                 self.assertEqual(members[name], ("content of " + name).encode())
-            self.assertEqual(members["var/lib/ominull-response-authority/tenants/t-1.key"], b"tenant")
+            self.assertEqual(members["var/lib/ominull/grants/keys/t-1.key"], b"tenant")
             self.assertEqual(members["opt/ominull/bin/certs/client.key"], b"cert")
             self.assertNotIn("var/lib/ominull/ominull.db", members)
             self.assertNotIn(b"content of etc/ominull/admin.key", archive.read_bytes())
@@ -376,7 +376,7 @@ class SecretSplitTests(unittest.TestCase):
             self.assertIn("secrets", self.split(root, forced=False))
 
     def test_hard_link_across_the_boundary_is_refused(self):
-        for source, target in [("./var/lib/ominull/copy-of-secret", "./var/lib/ominull-response-authority/secret.key"),
+        for source, target in [("./var/lib/ominull/copy-of-secret", "./var/lib/ominull/grants/secret.key"),
                                ("./etc/ominull/db-link", "./var/lib/ominull/ominull.db")]:
             with self.subTest(source=source), dump_root() as root:
                 link = tarfile.TarInfo(source)
@@ -390,7 +390,7 @@ class SecretSplitTests(unittest.TestCase):
                 self.assertFalse((directory / "secrets.tar.age").exists())
 
     def test_dotted_names_cannot_hide_a_secret_from_the_prefix_test(self):
-        for name in ["./var/lib/ominull/../ominull-response-authority/copy.key", "./var//lib/ominull-response-authority/x",
+        for name in ["./var/lib/ominull/evidence/../grants/copy.key", "./var//lib/ominull/grants/x",
                      "./etc/./ominull/admin.key.bak", "../etc/ominull/escape"]:
             with self.subTest(name=name), dump_root() as root:
                 member = tarfile.TarInfo(name)
@@ -431,8 +431,7 @@ class BackupConfigurationTests(unittest.TestCase):
                       "lxc_id": 150, "hub_base_url": "https://hub.example.invalid:9443",
                       "admin_key_file": str(root / "missing-admin.key"),
                       "hub_package": "dist/ominull-hub_1.8.43_amd64.deb",
-                      "local_binary": "build/ominull-hub",
-                      "local_authority_binary": "build/ominull-response-authority"}
+                      "local_binary": "build/ominull-hub"}
             path = directory / "production.local.json"
             path.write_text(json.dumps(config))
             path.chmod(0o600)

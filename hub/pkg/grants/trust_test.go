@@ -1,4 +1,4 @@
-package responseauth_test
+package grants_test
 
 import (
 	"crypto/ed25519"
@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 )
 
 func pub(t *testing.T, h string) ed25519.PublicKey {
@@ -27,7 +27,7 @@ func pub(t *testing.T, h string) ed25519.PublicKey {
 }
 
 // authorizeGrants authorizes one action and returns its grants.
-func authorizeGrants(t *testing.T, auth *responseauth.Authority, in *responseauth.AuthorizeInput) []*response.EndpointGrant {
+func authorizeGrants(t *testing.T, auth *grants.Signer, in *grants.AuthorizeInput) []*response.EndpointGrant {
 	t.Helper()
 	au, err := auth.Authorize(in)
 	if err != nil {
@@ -72,7 +72,7 @@ func TestTrustKeysAreThreeDistinctStableKeys(t *testing.T) {
 func TestAutoIsolationIsNarrowAndRationed(t *testing.T) {
 	auth := newTestAuthority(t)
 	keys, _ := auth.TrustKeys("default")
-	g, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1", Reason: "port sweep"})
+	g, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1", Reason: "port sweep"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,12 +93,12 @@ func TestAutoIsolationIsNarrowAndRationed(t *testing.T) {
 	if json.Unmarshal(payload, &p) != nil || p.Route != response.AutoIsolateRoute || len(p.Targets) != 1 || p.Targets[0] != "ep-1" {
 		t.Fatalf("auto payload %s", payload)
 	}
-	if _, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"}); !errors.Is(err, responseauth.ErrAutoIsolateRateLimit) {
+	if _, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"}); !errors.Is(err, grants.ErrAutoIsolateRateLimit) {
 		t.Fatalf("second isolation of the same endpoint within 10 min: %v", err)
 	}
 	last := g.Grant.IssuedAt
 	for i := 2; i <= 6; i++ {
-		g, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-" + string(rune('0'+i))})
+		g, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-" + string(rune('0'+i))})
 		if err != nil {
 			t.Fatalf("isolation %d: %v", i, err)
 		}
@@ -107,10 +107,10 @@ func TestAutoIsolationIsNarrowAndRationed(t *testing.T) {
 		}
 		last = g.Grant.IssuedAt
 	}
-	if _, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-7"}); !errors.Is(err, responseauth.ErrAutoIsolateRateLimit) {
+	if _, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-7"}); !errors.Is(err, grants.ErrAutoIsolateRateLimit) {
 		t.Fatalf("seventh isolation in an hour: %v", err)
 	}
-	if _, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "mesh:10.0.0.1"}); err == nil {
+	if _, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "mesh:10.0.0.1"}); err == nil {
 		t.Fatal("auto isolation of a mesh target accepted")
 	}
 }
@@ -154,36 +154,36 @@ func TestManifestLifecycle(t *testing.T) {
 	auth := newTestAuthority(t)
 	keys, _ := auth.TrustKeys("default")
 	polKey := pub(t, keys.PolicyKey)
-	m, err := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
+	m, err := auth.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
 	if err != nil || m.Profile != "respond" || m.Seq != 1 {
 		t.Fatalf("initial manifest %+v %v", m, err)
 	}
 	if err := m.Verify(polKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-2", Profile: "engagement"}); !errors.Is(err, responseauth.ErrManifestNeedsRoute) {
+	if _, err := auth.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-2", Profile: "engagement"}); !errors.Is(err, grants.ErrManifestNeedsRoute) {
 		t.Fatalf("initial engagement without a signed change: %v", err)
 	}
-	same, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1", Profile: "engagement"})
+	same, _ := auth.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-1", Profile: "engagement"})
 	if same.Seq != 1 || same.Profile != "respond" {
 		t.Fatalf("a raise without a signed change changed the manifest: %+v", same)
 	}
-	narrow, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1", Profile: "monitor"})
+	narrow, _ := auth.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-1", Profile: "monitor"})
 	if narrow.Seq != 2 || narrow.Profile != "monitor" || narrow.Verify(polKey) != nil {
 		t.Fatalf("narrowing: %+v", narrow)
 	}
 
 	// Lifting monitor-only raises to respond when the allow-isolation grant is signed.
-	allow := &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation, Targets: []string{"ep-1"},
+	allow := &grants.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: grants.ActionKindIsolation, Targets: []string{"ep-1"},
 		Payload: routedPayload("/api/v1/endpoints/allow-isolation", map[string]interface{}{"endpoint_id": "ep-1", "reason": "lab", "revision": 1}, []string{"ep-1"})}
 	authorizeGrants(t, auth, allow)
-	raised, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
+	raised, _ := auth.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
 	if raised.Seq != 3 || raised.Profile != "respond" {
 		t.Fatalf("after allow-isolation: %+v", raised)
 	}
 
 	// Engagement only through a signed capability change.
-	change := &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindCapability, Targets: []string{"ep-1"},
+	change := &grants.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: grants.ActionKindCapability, Targets: []string{"ep-1"},
 		Payload: routedPayload("/api/v1/endpoints/capabilities", map[string]interface{}{"endpoint_id": "ep-1", "profile": "engagement", "reason": "pentest"}, []string{"ep-1"})}
 	v, err := auth.Authorize(change)
 	if err != nil {
@@ -192,7 +192,7 @@ func TestManifestLifecycle(t *testing.T) {
 	if !strings.Contains(v.Summary, "engagement") {
 		t.Fatalf("summary %q does not name the profile", v.Summary)
 	}
-	eng, _ := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
+	eng, _ := auth.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
 	if eng.Seq != 4 || eng.Profile != "engagement" || !eng.Has(response.CapScript) || eng.Verify(polKey) != nil {
 		t.Fatalf("after the capability change: %+v", eng)
 	}
@@ -200,7 +200,7 @@ func TestManifestLifecycle(t *testing.T) {
 
 func TestIsolationExceptionsAreSignedWithTheIsolation(t *testing.T) {
 	auth := newTestAuthority(t)
-	mk := func(baselines interface{}, route string, targets []string) *responseauth.AuthorizeInput {
+	mk := func(baselines interface{}, route string, targets []string) *grants.AuthorizeInput {
 		body := map[string]interface{}{"endpoint_id": targets[0]}
 		if route == "/api/v1/endpoints/isolate-bulk" {
 			body = map[string]interface{}{"scope": "ids", "ids": targets}
@@ -210,7 +210,7 @@ func TestIsolationExceptionsAreSignedWithTheIsolation(t *testing.T) {
 			fields["baselines"] = baselines
 		}
 		raw, _ := json.Marshal(fields)
-		return &responseauth.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: responseauth.ActionKindIsolation, Targets: targets, Payload: raw}
+		return &grants.AuthorizeInput{TenantID: "default", Requester: "admin", Kind: grants.ActionKindIsolation, Targets: targets, Payload: raw}
 	}
 	dns := []response.IsolationBaseline{{Endpoints: []string{"ep-1"}, Rules: []response.IsolationRule{{Destination: "10.0.0.53", Port: 53, Protocol: "udp", Service: "dns"}}}}
 	v, err := auth.Authorize(mk(dns, "/api/v1/endpoints/isolate", []string{"ep-1"}))
@@ -247,7 +247,7 @@ func TestIsolationExceptionsAreSignedWithTheIsolation(t *testing.T) {
 		t.Fatal("an upper-case key accepted")
 	}
 	// The detector's narrow grant carries the host's own exceptions only.
-	g, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1", Baselines: dns})
+	g, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1", Baselines: dns})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestIsolationExceptionsAreSignedWithTheIsolation(t *testing.T) {
 	if !strings.Contains(string(payload), `"baselines":[{"endpoints":["ep-1"],"rules":[{"destination":"10.0.0.53","port":53,"protocol":"udp","service":"dns"}]}]`) {
 		t.Fatalf("auto payload %s", payload)
 	}
-	if _, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-9", Baselines: dns}); err == nil {
+	if _, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-9", Baselines: dns}); err == nil {
 		t.Fatal("auto isolation with another host's exceptions accepted")
 	}
 }
@@ -266,22 +266,22 @@ func TestCorruptEnforcementClockRefusesToSign(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "enforcement_clock.json"), []byte("garbage\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	auth, err := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir}, responseauth.NewMemoryStore())
+	auth, err := grants.Open(grants.Config{StateDir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"}); err == nil {
+	if _, err := auth.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"}); err == nil {
 		t.Fatal("signed with a corrupt enforcement clock")
 	}
 	// A good clock is persisted before a time is handed out.
 	dir2 := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir2, "keys"), 0o700)
-	auth2, _ := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir2}, responseauth.NewMemoryStore())
-	if _, err := auth2.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"}); err == nil {
+	auth2, _ := grants.Open(grants.Config{StateDir: dir2})
+	if _, err := auth2.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"}); err == nil {
 		t.Fatal("the detector brought a tenant into being")
 	}
 	_, _ = auth2.TrustKeys("default")
-	g, err := auth2.SignAutoIsolation(&responseauth.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"})
+	g, err := auth2.SignAutoIsolation(&grants.AutoIsolateRequest{TenantID: "default", EndpointID: "ep-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,8 +294,7 @@ func TestCorruptEnforcementClockRefusesToSign(t *testing.T) {
 func TestTrustEpochIsTheAuthoritysAndManifestsFollowThePolicyKey(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "keys"), 0o700)
-	store := responseauth.NewMemoryStore()
-	auth, err := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir}, store)
+	auth, err := grants.Open(grants.Config{StateDir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,12 +305,12 @@ func TestTrustEpochIsTheAuthoritysAndManifestsFollowThePolicyKey(t *testing.T) {
 	if k2, _ := auth.TrustKeys("default"); k2.Epoch != 1 {
 		t.Fatalf("epoch moved without a key change: %d", k2.Epoch)
 	}
-	m, err := auth.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
+	m, err := auth.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A floor set by root on the authority host raises the epoch.
-	auth2, err := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir, TrustEpochFloor: 7}, store)
+	// A floor set by root on the hub host raises the epoch.
+	auth2, err := grants.Open(grants.Config{StateDir: dir, TrustEpochFloor: 7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +320,8 @@ func TestTrustEpochIsTheAuthoritysAndManifestsFollowThePolicyKey(t *testing.T) {
 	// A manifest signed under a retired policy key is re-signed at the next seq.
 	raw, _ := os.ReadFile(filepath.Join(dir, "manifests.json"))
 	_ = os.WriteFile(filepath.Join(dir, "manifests.json"), []byte(strings.Replace(string(raw), m.SignerKeyID, strings.Repeat("0", 64), 1)), 0o600)
-	auth3, _ := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir}, store)
-	n, err := auth3.EndpointManifest(&responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
+	auth3, _ := grants.Open(grants.Config{StateDir: dir})
+	n, err := auth3.EndpointManifest(&grants.ManifestRequest{TenantID: "default", EndpointID: "ep-1"})
 	if err != nil || n.Seq != m.Seq+1 || n.SignerKeyID != m.SignerKeyID || n.Profile != m.Profile {
 		t.Fatalf("re-signed manifest %+v %v (was %+v)", n, err, m)
 	}
@@ -334,15 +333,15 @@ func TestTrustEpochIsTheAuthoritysAndManifestsFollowThePolicyKey(t *testing.T) {
 func TestManifestFollowsItsProfileAcrossReleases(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "keys"), 0o700)
-	open := func() *responseauth.Authority {
-		a, err := responseauth.NewAuthorityWithStore(responseauth.Config{StateDir: dir}, responseauth.NewMemoryStore())
+	open := func() *grants.Signer {
+		a, err := grants.Open(grants.Config{StateDir: dir})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return a
 	}
 	auth := open()
-	req := &responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-old"}
+	req := &grants.ManifestRequest{TenantID: "default", EndpointID: "ep-old"}
 	m, err := auth.EndpointManifest(req)
 	if err != nil || m.Seq != 1 || !m.Has(response.CapScreen) {
 		t.Fatalf("initial manifest %+v %v", m, err)

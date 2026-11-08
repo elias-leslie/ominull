@@ -4,7 +4,7 @@ package server
 // (maintenance or security) has a fleet default (enabled, mode, interval,
 // parameter values) that an endpoint may override; each category has a fleet
 // and endpoint enable on top. Changing a setting never grants anything: the
-// schedule runs the effective settings, and a run the authority
+// schedule runs the effective settings, and a run the hub
 // refuses is blocked with its reason and reported.
 
 import (
@@ -485,7 +485,7 @@ func (s *Server) putMaintenanceSettings(w http.ResponseWriter, r *http.Request, 
 	}
 	detail, _ := json.Marshal(row)
 	s.audit(r, "MAINTENANCE_SETTINGS_CHANGED", key, fmt.Sprintf("%s settings for %s: %s", key, scope, detail))
-	// The schedule picks the change up on its next pass (the authority signs
+	// The schedule picks the change up on its next pass (the hub signs
 	// it then, or the run is blocked with a reason); run it now so it is prompt.
 	s.maintBlocks.kicks.Add(1)
 	go func() {

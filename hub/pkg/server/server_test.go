@@ -1218,10 +1218,6 @@ func TestResponseRoutesFailClosedByDefault(t *testing.T) {
 		{http.MethodPost, "/api/v1/response/jobs/cancel", `{"job_id":"test-job-1"}`},
 		{http.MethodPost, "/api/v1/response/jobs/ack", `{"job_id":"test-job-1","lease_id":"lease-1"}`},
 		{http.MethodPost, "/api/v1/response/jobs/result", `{"job_id":"test-job-1","lease_id":"lease-1","state":"succeeded"}`},
-		{http.MethodPost, "/api/v1/response/auth/totp/enroll", `{"operator_id":"admin"}`},
-		{http.MethodPost, "/api/v1/response/auth/unlock", `{"operator_id":"admin","code":"123456"}`},
-		{http.MethodPost, "/api/v1/response/auth/lock", `{}`},
-		{http.MethodGet, "/api/v1/response/auth/status", ""},
 
 		// 11. Encrypted Evidence Storage & Export API
 		{http.MethodPost, "/api/v1/evidence/bundles", `{"endpoint_id":"ep-1","profile":"diagnostic"}`},

@@ -13,7 +13,7 @@ import (
 
 // Routine release keys (response/routine_keys.go): the pinned release key
 // signs which routine keys exist; the hub keeps that signed list, hands it to
-// agents in the heartbeat and to the authority with every rollout ask, and
+// agents in the heartbeat and to the hub with every rollout ask, and
 // never decides it itself.
 const routineKeysSetting = "routine_release_keys"
 

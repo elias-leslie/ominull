@@ -60,7 +60,7 @@ func TestMonitorOnlyRefusesHostIsolation(t *testing.T) {
 	if ep, _ := store.GetEndpoint("ep-pve"); !ep.MonitorOnly || ep.MonitorOnlyReason() == "" || ep.ResponseProfileRev != 1 {
 		t.Fatalf("ep-pve: %+v", ep)
 	}
-	// Self-labelled endpoints are not monitor-only: the authority signs the
+	// Self-labelled endpoints are not monitor-only: the hub signs the
 	// isolation on the first request.
 	for _, id := range []string{"ep-role", "ep-cant", "ep-old"} {
 		if w := adminPost(srv, "/api/v1/endpoints/isolate", `{"endpoint_id":"`+id+`","force":true}`, ""); w.Code != http.StatusOK {
@@ -151,7 +151,7 @@ func TestStoreNeverIsolatesMonitorOnly(t *testing.T) {
 	}
 }
 
-// Lifting monitor-only is a capability raise: the authority signs it on the
+// Lifting monitor-only is a capability raise: the hub signs it on the
 // first request, for the revision of the setting the caller names, and only
 // for the endpoint it names.
 func TestAllowIsolationIsAuthorizedForTheNamedRevision(t *testing.T) {

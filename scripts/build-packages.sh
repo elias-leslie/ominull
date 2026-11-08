@@ -42,13 +42,11 @@ echo "[*] Building retained Ominull packages v${VERSION}."
 echo "[*] Building Linux agent in the baseline container."
 bash "${ROOT_DIR}/scripts/build-linux-agent.sh" "${BUILD_DIR}"
 
-echo "[*] Building hub and response authority."
+echo "[*] Building hub and control CLI."
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
     -ldflags "-X main.version=${VERSION}" -o "${BUILD_DIR}/ominull-hub" ./cmd)
 (cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
     -o "${BUILD_DIR}/ominullctl" ./cmd/ominullctl)
-(cd "${ROOT_DIR}/hub" && CGO_ENABLED=0 go build -trimpath \
-    -o "${BUILD_DIR}/ominull-response-authority" ./cmd/ominull-response-authority)
 
 # The remote screen helper (docs/REMOTE_SCREEN.md section 6) is Rust, built
 # offline from its vendored, lock-pinned sources. It ships inside the signed
@@ -112,15 +110,6 @@ make_deb() {
     if [ -n "${ctl}" ]; then
         mkdir -p "${root}/usr/bin"
         install -m 0755 "${ctl}" "${root}/usr/bin/ominullctl"
-    fi
-    if [ "${name}" = "ominull-hub" ]; then
-        if [ -f "${BUILD_DIR}/ominull-response-authority" ]; then
-            install -m 0755 "${BUILD_DIR}/ominull-response-authority" "${root}/opt/ominull/bin/ominull-response-authority"
-        fi
-        if [ -f "${ROOT_DIR}/packaging/linux/hub/response-authority.service" ]; then
-            mkdir -p "${root}/lib/systemd/system"
-            install -m 0644 "${ROOT_DIR}/packaging/linux/hub/response-authority.service" "${root}/lib/systemd/system/ominull-response-authority.service"
-        fi
     fi
     install -m 0644 "${ROOT_DIR}/LICENSE" "${root}/usr/share/doc/${package}/LICENSE"
     # Pre-Depends, not Depends: dpkg checks it before unpacking, so a host with

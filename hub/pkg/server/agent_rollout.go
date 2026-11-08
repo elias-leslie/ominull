@@ -59,7 +59,7 @@ func (s *Server) planAgentUpdates(version string, want func(storage.Endpoint) bo
 	}
 	for _, ep := range endpoints {
 		if granted != nil && !contains(granted, ep.ID) {
-			continue // only what the authority signed, even for "all"
+			continue // only what the hub signed, even for "all"
 		}
 		if !want(ep) || ep.Status == "retired" {
 			continue

@@ -3,7 +3,7 @@ package server
 // Per-run attention records for Nightshift: a supervised run that waits on a
 // window (needs_hands), stopped making progress (stalled) or failed gets its
 // own feed record, ominull.run.<endpoint>.<package>, so Nightshift's planner
-// can wake a steward for it. At most runRecordsMax are open at once (the
+// can wake an agent for it. At most runRecordsMax are open at once (the
 // neediest first). A record that clears (a later run succeeded, the job
 // ended) reads resolved for runResolvedFor, then drops; the raised set is a
 // settings row so a hub restart does not leave Nightshift holding stale ones.
@@ -61,11 +61,11 @@ func runUID(endpointID, pkg string) string {
 	return "ominull.run." + feedSafe(endpointID) + "." + feedSafe(pkg)
 }
 
-// runNextMove says what a steward (or the owner) should do about the run.
+// runNextMove says what an agent (or the owner) should do about the run.
 func runNextMove(state, jobID string) string {
 	switch state {
 	case "needs_hands":
-		return "take a steward remote-screen session for run " + jobID + " and click the dialog"
+		return "open a remote-screen session on the machine for run " + jobID + " and click the dialog"
 	case "stalled":
 		return "check the machine: run " + jobID + " has made no progress; cancel it (ominullctl maint cancel " + jobID + ") if it is stuck"
 	}

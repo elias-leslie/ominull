@@ -137,20 +137,14 @@ sandbox /usr/bin/dpkg --force-depends -i /release/base-hub.deb >/dev/null
 [ "$(sandbox /usr/bin/dpkg-query -W -f='${Status}' ominull-hub)" = 'install ok installed' ]
 [ "$(sandbox /usr/bin/dpkg-query -S /opt/ominull/bin/ominulld)" = 'ominull-agent: /opt/ominull/bin/ominulld' ]
 [ "$(sandbox /usr/bin/dpkg-query -S /usr/bin/ominullctl)" = 'ominull-hub: /usr/bin/ominullctl' ]
-[ "$(sandbox /usr/bin/dpkg-query -S /opt/ominull/bin/ominull-response-authority)" = 'ominull-hub: /opt/ominull/bin/ominull-response-authority' ]
 [ -s "${SANDBOX_ROOT}/etc/ominull/admin.key" ]
 [ "$(stat -c '%a' "${SANDBOX_ROOT}/etc/ominull/admin.key")" = 640 ]
 [ "$(stat -c '%a' "${SANDBOX_ROOT}/etc/ominull/hub.env")" = 640 ]
 [ -s "${SANDBOX_ROOT}/etc/ominull/hub.env" ]
-[ -s "${SANDBOX_ROOT}/etc/ominull/response-authority.env" ]
-[ "$(stat -c '%a' "${SANDBOX_ROOT}/etc/ominull/response-authority.env")" = 600 ]
-[ -d "${SANDBOX_ROOT}/var/lib/ominull-response-authority" ]
-[ "$(stat -c '%a' "${SANDBOX_ROOT}/var/lib/ominull-response-authority")" = 700 ]
-[ -d "${SANDBOX_ROOT}/run/ominull-response-authority" ]
-[ "$(stat -c '%a' "${SANDBOX_ROOT}/run/ominull-response-authority")" = 750 ]
 sandbox /usr/bin/ominullctl setup-token >/dev/null
 [ -s "${SANDBOX_ROOT}/var/lib/ominull/setup.token" ]
 [ "$(stat -c '%a' "${SANDBOX_ROOT}/var/lib/ominull/setup.token")" = 600 ]
+[ "$(stat -c '%a' "${SANDBOX_ROOT}/var/lib/ominull/grants")" = 700 ]
 printf '%s\n' 'hub_url=https://example.invalid' 'endpoint_id=lifecycle' > "${SANDBOX_ROOT}/etc/ominull/agent.conf"
 printf '%s\n' 'OMINULL_ADMIN_KEY=test-admin-value' 'OMINULL_DB=/var/lib/ominull/ominull.db' \
     "OMINULL_AGENT_VERSION=${VERSION}" > "${SANDBOX_ROOT}/etc/ominull/hub.env"
@@ -206,5 +200,4 @@ sandbox /usr/bin/dpkg --force-depends --purge ominull-hub >/dev/null
 [ -s "${SANDBOX_ROOT}/var/lib/ominull/ominull.db" ]
 [ -s "${SANDBOX_ROOT}/var/lib/ominull/pki-marker" ]
 [ -s "${SANDBOX_ROOT}/etc/ominull/hub.env" ]
-[ -s "${SANDBOX_ROOT}/etc/ominull/response-authority.env" ]
 echo "[+] Debian lifecycle ${VERSION}: registration, upgrade, downgrade refusal, identity preservation, purge, and hub data/PKI preservation verified."

@@ -87,14 +87,10 @@ client certificate.
 
 ## Console Secure Origin & Browser Trust (LAN & Disconnected Setup)
 
-Modern browser security standards require a **Secure Context** (HTTPS with a trusted certificate on a valid DNS domain) to activate:
-1. **WebCrypto (`window.crypto.subtle`)**: Used to generate ephemeral browser session keys and sign `ActionProof` payloads for remote response actions.
-2. **WebAuthn (`navigator.credentials`)**: Used for FIDO2/passkey hardware token authentication.
+Serve the console over HTTPS so the login and its session cookie stay private. Nothing in the console needs a browser passkey or browser-side crypto, so an IP address works if its certificate is trusted.
 
 ### Supported Console Origins
-- **Valid Domain Name Required**: Console origins must use a valid DNS domain name (e.g. `https://hub.lan:8443` or `https://console.example.org`).
-- **IP Address Prohibition**: Under W3C WebAuthn Level 2 (§5.4.3), relying party IDs (RP IDs) cannot be IP addresses (`https://192.0.2.58:8443` fails passkey enrollment with `SecurityError`).
-- **Hostname Immutability**: Changing the console hostname at a later date invalidates all enrolled WebAuthn passkeys because stored credentials are permanently bound to the RP ID.
+- A DNS name (e.g. `https://hub.lan:8443` or `https://console.example.org`) or an IP address, with a certificate the browser trusts.
 
 ### Certificate Modes
 1. **Source A (Operator-Supplied)**: Supply PEM certificate and private key paths via `OMINULL_CONSOLE_TLS_CERT` and `OMINULL_CONSOLE_TLS_KEY`.

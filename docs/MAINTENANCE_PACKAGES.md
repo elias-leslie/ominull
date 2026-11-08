@@ -28,7 +28,7 @@ packages but small: a handful of machines, one owner, no new stores.
   "security"`; none ship yet.
 - **Execution = an ordinary `script_exec` job**, authorized like any other
   script run: from the console, from `ominullctl maint run` or from the
-  schedule, the hub asks the response authority, which signs the grants on the
+  schedule, the hub signs the grants on the
   first request and nobody is asked (see "Authorizing a package run").
 - **State = the latest job.** Nothing is stored per (host, package); the hub
   derives the current state from the newest job of each package on read.
@@ -233,7 +233,7 @@ machine's page, and both are authorized on the first request. Parameters: `only_
 
 `linux-cleanup` (safe, no role) is routine upkeep for a Linux machine. It is a
 plain `/bin/sh` script that reads `OMINULL_PARAM_*`, so the same bytes run
-from the hub, from `ominullctl host-script run` and, with the hub down, by hand
+from the hub and, with the hub down, by hand
 as root (`env -i OMINULL_PARAM_MODE=enforce sh cleanup.sh`).
 `scripts/package-manifest.py` prints the Linux packages (file, sha256,
 interval, timeout, parameter defaults as environment values); a tool that runs
@@ -261,7 +261,7 @@ hub.
 ### Software removal
 
 `windows-software-removal` uninstalls third-party software the hub's
-**software catalog** names. It is careful, so the authority's audit statement
+**software catalog** names. It is careful, so the audit statement
 for every run (audit too) flags it as careful and names the catalog's size.
 
 - **Catalog.** One settings row (`maintenance.software_catalog`); a hub that
@@ -278,10 +278,8 @@ for every run (audit too) flags it as careful and names the catalog's size.
   `manual` (never run; reported for someone at the screen).
 - **API.** `GET /api/v1/maintenance/catalog` (any role) returns the entries,
   whether they were saved here, and the category, method and flag labels.
-  `PUT {"entry":{...}}` (admin) adds or replaces one entry: adding one or
-  changing what it matches or how it is removed is a loosening, which the
-  authority authorizes on the same request (it writes the audit statement from
-  the entry); a name or note change is not. `DELETE ?id=` removes one. All
+  `PUT {"entry":{...}}` (admin) adds or replaces one entry: the change
+  applies at once. `DELETE ?id=` removes one. All
   are audited as `SOFTWARE_CATALOG_CHANGED`.
 - **Runs carry the catalog.** The hub puts the catalog in force into the
   run's `catalog` parameter at dispatch (compact JSON, notes dropped, at
@@ -330,7 +328,7 @@ A Restart step is allowed anywhere in the list.
 - **Window.** Each step's time limit plus 10 minutes (and 10 minutes for
   each maintenance mode run, 75 more for each Restart step), rounded up to
   whole hours; a playbook that
-  would need more than 24 hours is refused. The payload the authority signs
+  would need more than 24 hours is refused. The payload the hub signs
   (`PackageRunPayload.playbook {name, window_seconds}`, route
   `/api/v1/maintenance/playbooks/run`) carries the window, the audit statement reads
   "one step after another, all within N hours" with the steps numbered (or,
@@ -338,7 +336,7 @@ A Restart step is allowed anywhere in the list.
   short names, the mode only when it is not enforce, options said once; a
   playbook that still does not fit is cut with an ellipsis, and the grants stay bound to the
   full payload), and
-  the authority signs every grant of that run for exactly the window.
+  the hub signs every grant of that run for exactly the window.
 - **One step at a time.** The agent starts every job it is offered at once,
   so the hub keeps the grants and starts a machine's next step only when the
   one before it has ended (finished, failed, or quiet past its time limit
@@ -426,14 +424,13 @@ treat a larger timeout as the 60 s default.
 ## Authorizing a package run
 
 `POST /api/v1/maintenance/run` (`{"endpoint_ids","packages","mode"}`, admin
-key) is authorized on the first request: the hub calls the response authority
-(`POST /v1/authorize`), which validates the payload, signs the grants and the
-hub dispatches one job per host and package at once. Nobody is asked and there
+key) is authorized on the first request: the hub validates the payload, signs the grants and
+dispatches one job per host and package at once. Nobody is asked and there
 is no 202, no `X-Approval-ID` from the caller (the hub sets it from the
 authorization id) and no rule to make. The run uses each host's effective
 parameters; hosts in one call must share them.
 
-- **What is signed**: the response authority sees the exact script payload
+- **What is signed**: the hub signer sees the exact script payload
   of every run (source, digest, interpreter, parameters, timeout, output
   bound) and the named hosts, and writes the audit text ("Run as
   SYSTEM on laptop-1: windows-cleanup (enforce), up to 60 min, settings
@@ -442,15 +439,15 @@ parameters; hosts in one call must share them.
   against the defaults. Each grant binds one host and one script payload, which
   must be exactly the bytes `json.Marshal` makes of it. A request is
   limited to 50 hosts.
-- **Which scripts count as packages**: the authority ships with the digest,
+- **Which scripts count as packages**: the hub ships with the digest,
   name and risk of every file in `packages/windows` and `packages/linux`
-  (`hub/pkg/responseauth/released_packages.json`, kept in step by a test).
+  (`hub/pkg/grants/released_packages.json`, kept in step by a test).
   Only those sources, run by their platform's interpreter (`powershell.exe`
   or `/bin/sh`) with `mode` plus exactly the
   parameters their (trusted) header declares, each valid, are packages; the
   hub's own copy of the header is never trusted. Anything else is audited as
-  "not a released package". A changed package needs a hub release before the
-  authority names it as a package.
+  "not a released package". A changed package needs a hub release before it
+  counts as a package.
 - **Refusals**: an invalid payload, parameters outside the header's bounds,
   ambiguous or reordered fields, more than 50 hosts, or a playbook that would
   need more than 24 hours is refused with the reason (HTTP error and audit
@@ -475,7 +472,7 @@ the last 30 s), no run of it is open there, its last success (`ok`, `fixed`,
 old. A laptop that was off simply catches up the next time it is online.
 Hosts whose run would be the identical payload are grouped into one request.
 
-The schedule asks the authority like `maint run` and dispatches at once
+The schedule signs like `maint run` and dispatches at once
 (at most 50 hosts per run; the rest wait for the next pass). A run the
 authority will not sign, or an authority that is not available, shows up as a
 schedule block (console and health findings) with its reason and is tried again
@@ -484,7 +481,7 @@ on the next pass.
 **Audit-then-enforce.** A safe package (not careful, not maintenance mode or Restart) may set `on_drift` to
 `"enforce"` at fleet or machine level (`null` clears it; it applies only while mode is audit). It keeps auditing on
 its interval. When a host's newest run of it is a scheduled audit that finished with `drift`, the next pass requests one
-enforce run on that host, inside its maintenance window, the same way as any enforce run: the authority signs it and
+enforce run on that host, inside its maintenance window, the same way as any enforce run: the hub signs it and
 it is dispatched at once ("PACKAGE (enforce: the scheduled audit found drift)"). Nothing more is requested until the
 next scheduled audit; a hand-run audit's drift never triggers it. Careful packages (and any with a role) are
 refused when you set `on_drift` (`400`): auto-enforce is only for safe packages, so run a careful package's enforce by hand.
@@ -499,7 +496,7 @@ The hub's health findings (`/api/v1/health/findings`, pushed to Aico as Status r
   the latest runs, hosts that need changes, hosts that need a reboot and
   compliance per category.
 - `ominull.maintenance.schedule`: medium (board only) while a scheduled run is
-  blocked (the authority refused it or was not available), resolved otherwise.
+  blocked (the signer refused it or was not available), resolved otherwise.
   The message text still says "approval or a declined ask"; read it as a block.
 - `ominull.decisions.<run>`: one per run with items waiting for the owner
   (below), medium (board only), listing each item; resolved for a week once
@@ -507,7 +504,7 @@ The hub's health findings (`/api/v1/health/findings`, pushed to Aico as Status r
 - `ominull.run.<endpoint>.<package>`: one per run that needs someone: `needs_hands` (waiting on a window) and
   `stalled` at low severity, `failed` (finished in the last day) at medium. `unmapped` carries `endpoint_id`,
   `endpoint`, `package`, `state`, `reason`, `window` (title, process, pid, session), `mode`, `job_id`, `since` and
-  `next_move` (needs_hands: take a steward remote-screen session for the run and click the dialog). At most 20, the
+  `next_move` (needs_hands: open a remote-screen session on the machine and click the dialog). At most 20, the
   neediest first. When the run clears, the record reads resolved for a day, then drops (the raised set is the
   settings row `maintenance.run_records`).
 
@@ -589,7 +586,7 @@ latest runs (`ominull.decisions.playbook.<id>`,
   package, the card state from the latest run, expiry, a Linux audit and the schedule never running maintenance mode.
 - `hub/pkg/scripts/package_params_test.go`: header parsing, parameter checks,
   change summaries and settings resolution including expiry.
-- `hub/pkg/responseauth/package_run_test.go`: per-script grants, careful
+- `hub/pkg/grants/package_run_test.go`: per-script grants, careful
   steps named, playbook windows, forged, tampered, reordered or ambiguous
   payloads, runs too long to show whole being cut.
 - `hub/pkg/server/maintenance_run_test.go`: the run route authorized on the

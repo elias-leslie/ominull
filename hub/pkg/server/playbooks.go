@@ -10,7 +10,7 @@ package server
 // The agent starts every job it is offered at once, so the hub holds each
 // machine's next step back until the one before it has ended (finished,
 // failed, or gone quiet past its time limit). The grants live for the window
-// the authority signed (responseauth.PlaybookRun); a step that has not started
+// the hub signed (grants.PlaybookRun); a step that has not started
 // by then is not started at all. A step that fails does not stop the ones
 // after it: each package checks and skips by itself, and maintenance mode
 // still ends. Scheduled package runs leave a machine alone while a playbook
@@ -31,8 +31,8 @@ import (
 	"time"
 	"unicode"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 )
 
@@ -40,7 +40,7 @@ const (
 	playbooksSetting    = "maintenance.playbooks"
 	playbookRunsSetting = "maintenance.playbook_runs"
 	playbooksAudit      = "PLAYBOOK_CHANGED"
-	playbookMaxSteps    = 8 // with maintenance mode on and off, the authority's 10 scripts
+	playbookMaxSteps    = 8 // with maintenance mode on and off, the hub's 10 scripts
 	playbookMaxCount    = 50
 	playbookRunsKept    = 20
 	playbookStepSlack   = 10 * time.Minute // per step, for an agent that polls late
@@ -320,7 +320,7 @@ func (s *Server) playbookRunPlan(tenantID string, body []byte) (*playbookPlan, e
 		total += 2 * playbookStepSlack // its own two short runs
 	}
 	hours := int64((total + time.Hour - 1) / time.Hour)
-	if hours*3600 > responseauth.PlaybookMaxWindow {
+	if hours*3600 > grants.PlaybookMaxWindow {
 		return nil, fmt.Errorf("this playbook can take up to %d hours on a machine; a run takes at most 24, so split it", hours)
 	}
 	plan.window = hours * 3600
@@ -355,8 +355,8 @@ func (s *Server) maintenanceModePackage(tenantID string, windows bool) (*scripts
 }
 
 func (p *playbookPlan) payload() []byte {
-	pr := responseauth.PackageRunPayload{Route: responseauth.PlaybookRunRoute, Targets: p.req.EndpointIDs,
-		Playbook: &responseauth.PlaybookRun{Name: p.book.Name, WindowSeconds: p.window}}
+	pr := grants.PackageRunPayload{Route: grants.PlaybookRunRoute, Targets: p.req.EndpointIDs,
+		Playbook: &grants.PlaybookRun{Name: p.book.Name, WindowSeconds: p.window}}
 	for _, it := range p.items {
 		pr.Items = append(pr.Items, it.Raw)
 	}
@@ -393,7 +393,7 @@ func tenantOr(t string) string {
 	return t
 }
 
-// handlePlaybookRun runs once the authority signed: it records the run with
+// handlePlaybookRun runs once the hub signed: it records the run with
 // every step's grant and starts the first step on each machine.
 func (s *Server) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -453,7 +453,7 @@ func (s *Server) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "the run could not be saved: "+err.Error())
 		return
 	}
-	s.audit(r, "PLAYBOOK_RUN_STARTED", run.ID, fmt.Sprintf("Playbook %s (%s) on %s authorized by the response authority, within %s",
+	s.audit(r, "PLAYBOOK_RUN_STARTED", run.ID, fmt.Sprintf("Playbook %s (%s) on %s authorized by the hub, within %s",
 		plan.book.Name, strings.Join(plan.labels, ", "), strings.Join(plan.req.EndpointIDs, ", "), time.Duration(plan.window)*time.Second))
 	s.advancePlaybookRuns(now)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"run": s.playbookRunView(run.ID)})

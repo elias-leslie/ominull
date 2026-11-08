@@ -9,13 +9,13 @@ observer can read these facts about the hub container and nothing else:
 
 The command line arrives in SSH_ORIGINAL_COMMAND as one of:
 
-    service ROLE              systemctl show of the hub or response authority unit
+    service ROLE              systemctl show of the hub unit
     digest ROLE               sha256sum of /opt/ominull/bin/<binary>
     running-digest ROLE PID   sha256sum of /proc/PID/exe
     running-binary ROLE PID   the first 64 MiB + 1 bytes of /proc/PID/exe
     package                   dpkg-query status and version of ominull-hub
 
-ROLE is hub or authority. PID must be the unit's current MainPID, so the key
+ROLE is hub. PID must be the unit's current MainPID, so the key
 cannot read another process's executable. Nothing here writes, restarts or
 reads a file other than those. Until the key is installed the observer runs the
 same commands (command_for) over its ordinary alias.
@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 GUEST = "150"
-UNITS = {"hub": "ominull-hub", "authority": "ominull-response-authority"}
+UNITS = {"hub": "ominull-hub"}
 MAX_BINARY = 64 * 1024 * 1024
 SERVICE_PROPERTIES = "ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestampMonotonic"
 PID = re.compile(r"[1-9][0-9]{0,9}")

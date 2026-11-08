@@ -1,15 +1,10 @@
 package server
 
 // One choke point for every write to detection policy: tuning saves, the
-// shipped-values reset, "Expected" on a finding, the exclusions, and each
-// host's presence and retirement (which decide whether the silence floor
-// reports it). Each change is compared field by field with what is saved now.
-// One that only tightens applies at once and leaves a note for Nightshift. One
-// that loosens anything is authorized by the response authority and recorded
-// in the audit with a note for Nightshift, through the same authorization
-// isolation uses. The authority's statement carries the field-level diff, and
-// its digest binds the exact before and after, so an authorization granted
-// against one saved policy is refused once that policy has changed.
+// shipped-values reset, "Expected" on a finding, the exclusions and each host's
+// retirement. A change is applied at once, recorded in the audit with what
+// changed, and the floor drill runs on the result; ClampToFloor keeps a saved
+// value from going below the floor, and the Aico push counts the changes.
 //
 // The credential a change came through (api-key, jwt or console) is recorded
 // with it. It is a label, not proof of who acted: the admin key can mint any
@@ -19,197 +14,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"reflect"
-	"sort"
 	"strings"
 	"time"
 
 	"ominull/hub/pkg/detector"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
 )
 
 const policyChangedAudit = "DETECTION_POLICY_CHANGED"
 
-// policyChange is one write to detection policy, judged before it is applied.
+// policyChange is one write to detection policy.
 type policyChange struct {
 	policy  string // "detection_tuning", "exclusion", or "endpoint_watch"
-	op      string // see responseauth's detectionPolicyOps
+	op      string
 	target  string // "detection:tuning", "exclusion:<id>", or "endpoint:<id>"
 	before  any    // the saved policy (nil for a new exclusion)
-	after   any    // the policy the change would save
-	loosens []string
-	wording string // what changed, for the audit row and the note
-	// tightenedFirst is the tightening half of a mixed change, already
-	// saved, so the owner is asked about the loosening alone.
-	tightenedFirst string
-	// drill is the floor drill run against the policy the change would save:
-	// the floor cases it would blind (empty when none). drilled says the drill
-	// ran; only tuning and exclusion changes reach the floor rules.
-	drill   []string
-	drilled bool
-	// subject names what the change loosens in the caller's errors and the
-	// 202 body; empty means detection.
-	subject string
-}
-
-func (c policyChange) loosensWhat() string {
-	if c.subject != "" {
-		return c.subject
-	}
-	return "detection"
-}
-
-// payload is what the authority digests and describes. Both sides build it
-// the same way from the same before and after, so a retried request whose
-// saved policy has not moved yields the same digest.
-func (c policyChange) payload() ([]byte, error) {
-	before, err := json.Marshal(c.before)
-	if err != nil {
-		return nil, err
-	}
-	after, err := json.Marshal(c.after)
-	if err != nil {
-		return nil, err
-	}
-	// The authority accepts only canonical JSON (sorted keys, as decoded and
-	// encoded again), so the struct field order cannot leak into it.
-	if before, err = canonicalJSON(before); err != nil {
-		return nil, err
-	}
-	if after, err = canonicalJSON(after); err != nil {
-		return nil, err
-	}
-	if c.policy == "detection_tuning" {
-		// Only what moved is digested and shown: the whole tuning, rules
-		// included, is more than the authority takes.
-		if before, after, err = changedOnly(before, after); err != nil {
-			return nil, err
-		}
-	}
-	body := map[string]interface{}{
-		"policy": c.policy, "op": c.op,
-		"before": json.RawMessage(before), "after": json.RawMessage(after),
-	}
-	if c.drilled {
-		// The owner sees what the change would blind before tapping.
-		body["drill"] = append([]string{}, c.drill...)
-	}
-	return json.Marshal(body)
-}
-
-// changedOnly cuts two canonical tuning objects down to their difference: a
-// key that did not move is dropped from both, and a list keeps only the
-// entries the other side lacks.
-func changedOnly(before, after []byte) ([]byte, []byte, error) {
-	var a, b map[string]any
-	if err := json.Unmarshal(before, &a); err != nil {
-		return nil, nil, err
-	}
-	if err := json.Unmarshal(after, &b); err != nil {
-		return nil, nil, err
-	}
-	entries := func(v any) map[string]bool {
-		out := map[string]bool{}
-		list, _ := v.([]any)
-		for _, x := range list {
-			raw, _ := json.Marshal(x)
-			out[string(raw)] = true
-		}
-		return out
-	}
-	only := func(v any, other map[string]bool) []any {
-		list, _ := v.([]any)
-		out := []any{}
-		for _, x := range list {
-			if raw, _ := json.Marshal(x); !other[string(raw)] {
-				out = append(out, x)
-			}
-		}
-		return out
-	}
-	for k := range a {
-		if reflect.DeepEqual(a[k], b[k]) {
-			delete(a, k)
-			delete(b, k)
-			continue
-		}
-		_, aList := a[k].([]any)
-		_, bList := b[k].([]any)
-		if aList && bList {
-			hadA, hadB := entries(a[k]), entries(b[k])
-			a[k], b[k] = only(a[k], hadB), only(b[k], hadA)
-		}
-	}
-	ra, err := json.Marshal(a)
-	if err != nil {
-		return nil, nil, err
-	}
-	rb, err := json.Marshal(b)
-	if err != nil {
-		return nil, nil, err
-	}
-	if ra, err = canonicalJSON(ra); err != nil {
-		return nil, nil, err
-	}
-	rb, err = canonicalJSON(rb)
-	return ra, rb, err
-}
-
-// drillProposed runs the floor drill against the policy a change would save
-// and lists the floor cases it would blind that the saved policy does not
-// (one already blinded is a CRITICAL on the feed of its own). Run again when
-// the approved change is retried, it gives the same answer unless the policy
-// around it moved, and then the digest no longer matches and the owner is
-// asked again.
-func (s *Server) drillProposed(c policyChange) ([]string, bool) {
-	now := time.Now().UTC()
-	var cases []detector.DrillCase
-	var err error
-	switch after := c.after.(type) {
-	case storage.DetectionTuning:
-		cases, err = detector.DrillWith(s.store, now, &after)
-	default:
-		return nil, false
-	}
-	var current []detector.DrillCase
-	if err == nil {
-		current, err = detector.Drill(s.store, now)
-	}
-	if err != nil {
-		return []string{drillFailed}, true
-	}
-	// A case that raises today and is missing from the proposed run (removing
-	// an agent runtime drops its resolver-bypass case) is blinded too.
-	proposed := map[string]bool{}
-	missed := []string{}
-	for _, dc := range cases {
-		proposed[dc.Rule] = true
-	}
-	already := map[string]bool{}
-	for _, dc := range current {
-		if judgeDrillCase(dc) != "" {
-			already[dc.Rule] = true
-		} else if !proposed[dc.Rule] {
-			missed = append(missed, dc.Rule)
-		}
-	}
-	for _, dc := range cases {
-		if !already[dc.Rule] && judgeDrillCase(dc) != "" {
-			missed = append(missed, dc.Rule)
-		}
-	}
-	if len(missed) > drillMaxShown {
-		missed = missed[:drillMaxShown]
-	}
-	return missed, true
+	after   any    // the policy the change saves
+	wording string // what changed, for the audit row
 }
 
 // drillFailed is the one entry a drill that could not run sends; the
 // authority shows it as such, not as a blinded case.
 const drillFailed = "the drill could not run"
 
-// drillMaxShown is the most cases the authority accepts in one payload.
+// drillMaxShown is the most cases the hub accepts in one payload.
 const drillMaxShown = 256
 
 // credentialOf names how the caller authenticated; relay-key is Nightshift's
@@ -223,53 +51,11 @@ func credentialOf(r *http.Request) string {
 	return "unknown"
 }
 
-// policyAuthorized has the authority sign off a change that loosens
-// detection (nothing else is asked: the hub applies the change itself, the
-// authority audits it and the Aico push's detection-policy note reports
-// it). A change that loosens nothing passes without the authority. It returns
-// the authorization id for the audit row.
-func (s *Server) policyAuthorized(w http.ResponseWriter, r *http.Request, c policyChange) (string, bool) {
-	if len(c.loosens) == 0 {
-		return "", true
-	}
-	if s.responseAuth == nil {
-		writeJSONError(w, http.StatusServiceUnavailable,
-			"this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+") and the response authority that signs it off is not available")
-		return "", false
-	}
-	c.drill, c.drilled = s.drillProposed(c)
-	payload, err := c.payload()
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "the change could not be described: "+err.Error())
-		return "", false
-	}
-	tenantID := s.tenantFromRequest(r)
-	if tenantID == "" {
-		tenantID = "default"
-	}
-	requester := s.operatorFromRequest(r) + " (" + credentialOf(r) + ")"
-	au, err := s.responseAuth.Authorize(r.Context(), &responseauth.AuthorizeInput{
-		TenantID: tenantID, Requester: requester, Kind: responseauth.ActionKindDetection,
-		Targets: []string{c.target}, Payload: payload,
-	})
-	if err != nil {
-		s.audit(r, "ACTION_REFUSED", c.target, "detection policy: "+err.Error())
-		writeJSONError(w, authorizeStatus(err), "this change loosens "+c.loosensWhat()+" ("+strings.Join(c.loosens, ", ")+") and the authority did not sign it off: "+err.Error())
-		return "", false
-	}
-	s.audit(r, "ACTION_AUTHORIZED", c.target, fmt.Sprintf("detection policy change loosening %s (authorization %s): %s", strings.Join(c.loosens, ", "), au.ID, au.Summary))
-	return au.ID, true
-}
-
 // notePolicyChange records an applied change for the audit trail and for the
 // Aico push's detection-policy note.
-func (s *Server) notePolicyChange(r *http.Request, c policyChange, approvalID string) {
-	how := "tightened"
-	if approvalID != "" {
-		how = "loosened (" + strings.Join(c.loosens, ", ") + ") with authorization " + approvalID
-	}
-	s.audit(r, policyChangedAudit, c.target, fmt.Sprintf("%s %s %s: %s; credential %s (unverified)",
-		how, strings.ReplaceAll(c.policy, "_", " "), c.op, c.wording, credentialOf(r)))
+func (s *Server) notePolicyChange(r *http.Request, c policyChange) {
+	s.audit(r, policyChangedAudit, c.target, fmt.Sprintf("changed %s %s: %s; credential %s (unverified)",
+		strings.ReplaceAll(c.policy, "_", " "), c.op, c.wording, credentialOf(r)))
 	// Every applied change is drilled at once, so one that blinds a floor
 	// rule is on the feed now rather than at the next weekly run.
 	s.runFloorDrill(time.Now().UTC())
@@ -339,131 +125,8 @@ func tuningChange(op string, before, after storage.DetectionTuning) policyChange
 	return policyChange{
 		policy: "detection_tuning", op: op, target: "detection:tuning",
 		before: before, after: after,
-		loosens: tuningLoosens(before, after),
 		wording: tuningDelta(before, after),
 	}
-}
-
-// tightenFirst splits a tuning change that tightens some fields and loosens
-// others. The tightening half needs nobody, so it is saved now and noted; the
-// change returned carries only the loosening, which is all the owner is asked
-// about. A list that loses some entries and gains others loses them now. The
-// caller holds policyMu; false means the request has been answered.
-func (s *Server) tightenFirst(w http.ResponseWriter, r *http.Request, c policyChange) (policyChange, bool) {
-	before, okB := c.before.(storage.DetectionTuning)
-	after, okA := c.after.(storage.DetectionTuning)
-	if len(c.loosens) == 0 || !okB || !okA {
-		return c, true
-	}
-	loose := map[string]bool{}
-	for _, k := range c.loosens {
-		loose[k] = true
-	}
-	a, b := tuningFields(before), tuningFields(after)
-	mid := tuningFields(before)
-	keys := map[string]bool{}
-	for k := range a {
-		keys[k] = true
-	}
-	for k := range b {
-		keys[k] = true
-	}
-	for k := range keys {
-		dir := tuningDirections[k]
-		takeAfter := !loose[k]
-		if dir == windowField {
-			takeAfter = !loose["off_hours_window"]
-		}
-		switch {
-		case takeAfter:
-			if v, ok := b[k]; ok {
-				mid[k] = v
-			} else {
-				delete(mid, k)
-			}
-		case dir == addLoosens:
-			mid[k] = keptEntries(a[k], b[k])
-		case dir == removeLoosens:
-			mid[k] = unionEntries(a[k], b[k])
-		case dir == rulesField:
-			mid[k] = keptRules(a[k], b[k])
-		}
-	}
-	var half storage.DetectionTuning
-	raw, err := json.Marshal(mid)
-	if err == nil {
-		err = json.Unmarshal(raw, &half)
-	}
-	if err == nil {
-		half, err = storage.PrepareDetectionTuning(half)
-	}
-	if err == nil && len(tuningLoosens(before, half)) > 0 {
-		err = fmt.Errorf("it would loosen %s", strings.Join(tuningLoosens(before, half), ", "))
-	}
-	if err != nil {
-		writeJSONError(w, http.StatusConflict, "this change tightens some settings and loosens others ("+strings.Join(c.loosens, ", ")+
-			"), and its tightening part cannot be saved on its own ("+err.Error()+"); save the tightening and the loosening as separate changes")
-		return c, false
-	}
-	tight := tuningChange(c.op, before, half)
-	if !tight.changed() {
-		return c, true
-	}
-	if _, err := s.store.SaveDetectionTuning(half, operatorName(r)); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
-		return c, false
-	}
-	if s.detector != nil {
-		s.detector.InvalidateTuning()
-	}
-	s.refreshDomainFeedsIfChanged(before, s.store.GetDetectionTuning())
-	s.notePolicyChange(r, tight, "")
-	rest := tuningChange(c.op, s.store.GetDetectionTuning(), after)
-	rest.tightenedFirst = tight.wording
-	return rest, true
-}
-
-// unionEntries is the list before with the entries after adds: the
-// tightening half of a list where taking an entry away loosens.
-func unionEntries(before, after any) any {
-	list, _ := before.([]any)
-	out := append([]any{}, list...)
-	has := map[string]bool{}
-	for _, x := range list {
-		raw, _ := json.Marshal(x)
-		has[string(raw)] = true
-	}
-	if next, ok := after.([]any); ok {
-		for _, x := range next {
-			if raw, _ := json.Marshal(x); !has[string(raw)] {
-				out = append(out, x)
-			}
-		}
-	}
-	return out
-}
-
-// keptEntries is the list before without the entries after drops.
-func keptEntries(before, after any) any {
-	list, ok := before.([]any)
-	if !ok {
-		return before
-	}
-	has := map[string]bool{}
-	if next, ok := after.([]any); ok {
-		for _, x := range next {
-			raw, _ := json.Marshal(x)
-			has[string(raw)] = true
-		}
-	}
-	kept := []any{}
-	for _, x := range list {
-		raw, _ := json.Marshal(x)
-		if has[string(raw)] {
-			kept = append(kept, x)
-		}
-	}
-	return kept
 }
 
 func setOf(list []string) map[string]bool {
@@ -479,195 +142,6 @@ func (c policyChange) changed() bool {
 	a, _ := json.Marshal(c.before)
 	b, _ := json.Marshal(c.after)
 	return string(a) != string(b)
-}
-
-// How a change to one tuning field reads. Every field the row saves is named
-// here (TestEveryTuningFieldKnowsWhichWayLoosens); a field that is not is
-// judged as loosening.
-type tuningDirection int
-
-const (
-	ignored       tuningDirection = iota // bookkeeping
-	offLoosens                           // switching it off loosens
-	onLoosens                            // switching it on loosens
-	higherLoosens                        // a larger number loosens
-	lowerLoosens                         // a smaller number loosens
-	addLoosens                           // a list entry that was not there loosens
-	anyLoosens                           // any change loosens
-	windowField                          // the off-hours window, judged as a whole
-	rulesField                           // expected rules: a new rule, or one that covers more (ruleLoosens), loosens
-	removeLoosens                        // a list entry taken away loosens
-)
-
-var tuningDirections = map[string]tuningDirection{
-	"updated_at": ignored, "updated_by": ignored,
-
-	"off_hours_start": windowField, "off_hours_end": windowField, "off_hours_zone": windowField,
-	"off_hours_enabled": offLoosens,
-
-	"beacon_enabled":              offLoosens,
-	"beacon_min_samples":          higherLoosens,
-	"beacon_min_span_minutes":     higherLoosens,
-	"beacon_min_interval_seconds": higherLoosens,
-	"beacon_max_interval_seconds": lowerLoosens,
-	"beacon_score_threshold":      higherLoosens,
-	"beacon_cooldown_minutes":     higherLoosens,
-
-	"bandwidth_enabled":          offLoosens,
-	"bandwidth_cooldown_minutes": higherLoosens,
-	"silence_enabled":            offLoosens,
-	"silence_after_minutes":      higherLoosens,
-	"warmup_hours":               higherLoosens,
-
-	"container_cidrs": addLoosens,
-	"expected_rules":  rulesField,
-
-	"agent_egress_enabled":  offLoosens,
-	"agent_runtimes":        anyLoosens, // a runtime named is also muted where it runs
-	"agent_baseline_days":   higherLoosens,
-	"agent_upload_floor_mb": higherLoosens,
-	"agent_upload_factor":   higherLoosens,
-	"agent_heavy_endpoints": addLoosens,
-	"agent_heavy_roles":     addLoosens,
-	"agent_heavy_observed":  onLoosens,
-
-	// Any change to a zone loosens something: a network added mutes the
-	// admin and sweep rules there, one removed drops its hosts' lab escape
-	// and always-on infrastructure pages.
-	"lab_cidrs":                   anyLoosens,
-	"infra_cidrs":                 anyLoosens,
-	"beacon_browsers":             addLoosens,
-	"beacon_page_span_min":        higherLoosens,
-	"decoy_addrs":                 removeLoosens,
-	"decoy_names":                 removeLoosens,
-	"domain_intel_feeds":          removeLoosens, // a feed dropped, or its confidence changed
-	"tunnel_services":             removeLoosens,
-	"intel_page_confidence":       higherLoosens,
-	"auto_isolate_roles":          removeLoosens,
-	"page_incident_hours":         higherLoosens,
-	"aico_fleet_fresh_minutes":    anyLoosens, // longer trusts an old word, shorter drops a dark-sensor page
-	"aico_fleet_off_memory_hours": higherLoosens,
-	"lan_sweep_hosts":             higherLoosens,
-	"lab_escape_hosts":            higherLoosens,
-	"beacon_page_score":           higherLoosens,
-	"beacon_rare_devices":         lowerLoosens,
-	"new_dest_upload_mb":          higherLoosens,
-	"new_dest_window_min":         lowerLoosens,
-	"max_plausible_rate_mbps":     lowerLoosens,
-	"ephemeral_port_from":         anyLoosens, // a port range decides which flows count as served
-}
-
-// tuningLoosens names each field whose change loosens detection; empty means
-// the change only tightens, or changes nothing.
-func tuningLoosens(before, after storage.DetectionTuning) []string {
-	a, b := tuningFields(before), tuningFields(after)
-	keys := map[string]bool{}
-	for k := range a {
-		keys[k] = true
-	}
-	for k := range b {
-		keys[k] = true
-	}
-	var out []string
-	window := false
-	for k := range keys {
-		if reflect.DeepEqual(a[k], b[k]) {
-			continue
-		}
-		dir, known := tuningDirections[k]
-		if !known {
-			out = append(out, k)
-			continue
-		}
-		loose := false
-		switch dir {
-		case ignored:
-		case windowField:
-			window = true
-		case offLoosens:
-			loose = a[k] == true && b[k] != true
-		case onLoosens:
-			loose = a[k] != true && b[k] == true
-		case higherLoosens, lowerLoosens:
-			x, okA := a[k].(float64)
-			y, okB := b[k].(float64)
-			loose = !okA || !okB || (dir == higherLoosens && y > x) || (dir == lowerLoosens && y < x)
-		case addLoosens:
-			loose = addsEntries(a[k], b[k])
-		case removeLoosens:
-			loose = addsEntries(b[k], a[k])
-		case rulesField:
-			loose = rulesLoosen(a[k], b[k])
-		default:
-			loose = true
-		}
-		if loose {
-			out = append(out, k)
-		}
-	}
-	if window && !windowCovers(after, before) {
-		out = append(out, "off_hours_window")
-	}
-	sort.Strings(out)
-	return out
-}
-
-func tuningFields(t storage.DetectionTuning) map[string]any {
-	raw, _ := json.Marshal(t)
-	out := map[string]any{}
-	_ = json.Unmarshal(raw, &out)
-	return out
-}
-
-// addsEntries reports a list that gained an entry: a longer list, or one the
-// same length holding something the old one did not.
-func addsEntries(before, after any) bool {
-	had := map[string]bool{}
-	if list, ok := before.([]any); ok {
-		for _, x := range list {
-			raw, _ := json.Marshal(x)
-			had[string(raw)] = true
-		}
-	} else if before != nil {
-		return true
-	}
-	list, ok := after.([]any)
-	if !ok {
-		return after != nil
-	}
-	for _, x := range list {
-		raw, _ := json.Marshal(x)
-		if !had[string(raw)] {
-			return true
-		}
-	}
-	return false
-}
-
-// windowCovers reports whether the new off-hours window still holds every
-// hour of the old one, in the same zone. Another zone is a different window.
-func windowCovers(after, before storage.DetectionTuning) bool {
-	if !strings.EqualFold(strings.TrimSpace(after.OffHoursZone), strings.TrimSpace(before.OffHoursZone)) {
-		return false
-	}
-	hours := func(t storage.DetectionTuning) [24]bool {
-		var h [24]bool
-		for i := 0; i < 24; i++ {
-			if t.OffHoursStart < t.OffHoursEnd {
-				h[i] = i >= t.OffHoursStart && i < t.OffHoursEnd
-			} else if t.OffHoursStart > t.OffHoursEnd {
-				h[i] = i >= t.OffHoursStart || i < t.OffHoursEnd
-			}
-		}
-		return h
-	}
-	was, now := hours(before), hours(after)
-	for i := range was {
-		if was[i] && !now[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // detectionPolicySection is the Aico push's view of detection policy: a
@@ -693,11 +167,7 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	}
 	const uid, title = "ominull.detection.changes", "Detection policy changes"
 	changes := make([]map[string]any, 0, len(page.Entries))
-	loosened := 0
 	for _, e := range page.Entries {
-		if strings.HasPrefix(e.Details, "loosened") {
-			loosened++
-		}
 		changes = append(changes, map[string]any{"at": e.Timestamp.UTC().Format(time.RFC3339), "by": e.Username, "target": e.Resource, "change": e.Details})
 	}
 	// Every dismissal row in the window is counted, not one page of them: the
@@ -809,8 +279,7 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	}
 	var parts []string
 	if len(changes) > 0 {
-		parts = append(parts, fmt.Sprintf("%s in the last 24 h (%d loosened, %d tightened)",
-			plural(len(changes), "detection policy change", "detection policy changes"), loosened, len(changes)-loosened))
+		parts = append(parts, plural(len(changes), "detection policy change", "detection policy changes")+" in the last 24 h")
 	}
 	if len(dismissed) > 0 {
 		atLeast := ""
@@ -837,4 +306,13 @@ func (s *Server) detectionPolicySection(now time.Time) ([]feedFinding, error) {
 	}
 	out = append(out, s.feedFinding(now, uid, title, ocsfSevInformational, ocsfStatusNew, strings.Join(parts, "; "), nil, unmapped))
 	return out, nil
+}
+
+// ruleSummary is one line for an audit entry.
+func ruleSummary(r storage.ExpectedRule) string {
+	what := strings.Join(r.Kinds(), ", ")
+	if what == "" {
+		what = "nothing"
+	}
+	return r.ID + " (" + what + ")"
 }

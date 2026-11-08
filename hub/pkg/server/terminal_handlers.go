@@ -408,12 +408,9 @@ func (s *Server) handleTerminalFrames(w http.ResponseWriter, r *http.Request) {
 // session and hands back its refreshed summary, so the console can open a new
 // WebSocket against a session it has detached from.
 //
-// It deliberately does not ask for a fresh ActionProof. The V2 proof on session
-// creation authorises *spawning* a root shell on an endpoint; coming back to a
-// shell this operator already spawned, inside the same response session, is not
-// a second privileged action, and demanding a TOTP code to look at output you
-// have already been shown teaches people to keep a shell attached rather than
-// detach it. The response session is still required - the route is behind
+// It deliberately signs nothing new. The grant on session creation authorises
+// *spawning* a root shell on an endpoint; coming back to a shell this operator
+// already spawned is not a second privileged action. The route is behind
 // responseGate and authMiddleware, and a lapsed unlock fails here exactly as it
 // does everywhere else.
 func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +454,7 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
 		return
 	}
-	// The authority authorized a shell for one person. Another operator in the same
+	// The hub authorized a shell for one person. Another operator in the same
 	// tenant does not inherit it by reattaching.
 	if sess.OperatorID != s.operatorFromRequest(r) {
 		writeJSONError(w, http.StatusForbidden, "only the operator who opened this terminal can reattach to it")
@@ -607,7 +604,7 @@ func (s *Server) terminalProgram(w http.ResponseWriter, endpointID, program stri
 	return program, nil, true
 }
 
-// resolveTerminal describes a terminal request for the authority. The
+// resolveTerminal describes a terminal request for the hub. The
 // digested payload is exactly the grant payload the agent verifies.
 func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
 	role := r.Header.Get("X-Role")
@@ -630,7 +627,7 @@ func (s *Server) resolveTerminal(w http.ResponseWriter, r *http.Request, body []
 	}
 	// The digested payload stays {"program":...}: agents check a terminal
 	// grant against exactly that. The session length is the hub's to
-	// enforce; the authority only shows it to the owner.
+	// enforce; the hub only shows it to the owner.
 	d := s.terminalDuration(req.MaxDurationSeconds)
 	payload, err := json.Marshal(response.TerminalSessionPayload{Program: program})
 	if err != nil {

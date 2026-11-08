@@ -77,20 +77,20 @@ func TestServer_RemoteAccessOff(t *testing.T) {
 		t.Fatalf("other machine: %d", code)
 	}
 
-	// Switching it back on loosens: signed at once (200, carrying the authorization id).
+	// Switching it back on applies at once and leaves a note.
 	code, m = call(http.MethodPut, "/api/v1/remote-access/settings", `{"endpoint_id":"win-ra","off":false}`)
-	if code != http.StatusOK || m["approval_id"] == nil || srv.remoteAccessOff("win-ra") {
+	if code != http.StatusOK || srv.remoteAccessOff("win-ra") {
 		t.Fatalf("on: %d %v off=%v", code, m, srv.remoteAccessOff("win-ra"))
 	}
-	signed := false
+	noted := false
 	logs, _ := store.ListAuditLogs("", 100)
 	for _, l := range logs {
-		if l.Action == "ACTION_AUTHORIZED" && strings.Contains(l.Details, "allowed again on endpoint win-ra") {
-			signed = true
+		if l.Action == remoteAccessAudit && strings.Contains(l.Details, "switched back on") && strings.Contains(l.Details, "allowed again on endpoint win-ra") {
+			noted = true
 		}
 	}
-	if !signed {
-		t.Fatalf("switching remote access back on was not recorded as authorized: %+v", logs)
+	if !noted {
+		t.Fatalf("switching remote access back on left no note: %+v", logs)
 	}
 
 	// An unreadable row refuses everywhere until rewritten.

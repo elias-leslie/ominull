@@ -42,12 +42,10 @@ echo "[*] Building Linux socket-collection agent in the baseline container..."
 bash "${ROOT_DIR}/scripts/build-linux-agent.sh" "$BUILD_DIR"
 file "$BUILD_DIR/ominulld"
 
-echo "[*] Compiling Linux hub, control CLI, and response authority..."
+echo "[*] Compiling Linux hub and control CLI..."
 (cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$VERSION" -o "$BUILD_DIR/ominull-hub" ./cmd)
 (cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -trimpath -o "$BUILD_DIR/ominullctl" ./cmd/ominullctl)
-(cd "$ROOT_DIR/hub" && CGO_ENABLED=0 go build -trimpath -o "$BUILD_DIR/ominull-response-authority" ./cmd/ominull-response-authority)
 file "$BUILD_DIR/ominull-hub"
 file "$BUILD_DIR/ominullctl"
-file "$BUILD_DIR/ominull-response-authority"
 
 echo "[+] Retained binaries built for version $VERSION."

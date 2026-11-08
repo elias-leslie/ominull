@@ -37,8 +37,8 @@ func (s *Server) policyExpiryWarn() time.Duration {
 }
 
 // policyExpiryFinding tells Nightshift which expected rules lapse within policy_expiry_warn_days (or lapsed in the last week),
-// with how to renew each. Renewing loosens, so the hub authorizes and audits
-// it as for any new rule; deciding whether a row is still wanted is the
+// with how to renew each. Renewing is audited like any
+// rule change; deciding whether a row is still wanted is the
 // agent's job, so the finding is medium (a daily item), never a page.
 func (s *Server) policyExpiryFinding(now time.Time) (feedFinding, error) {
 	const uid, title = "ominull.detection.expiring", "Expected rules expiring"

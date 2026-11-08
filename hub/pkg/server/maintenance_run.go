@@ -1,6 +1,6 @@
 package server
 
-// Package runs authorized by the response authority: POST /api/v1/maintenance/run has the
+// Package runs authorized by the hub: POST /api/v1/maintenance/run has the
 // authority sign grants for named packages on named hosts and dispatches them
 // at once. Each run is an ordinary script_exec
 // job, so its result lands on the Maintenance card and the jobs page.
@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 )
 
@@ -163,7 +163,7 @@ func (s *Server) buildPackageItem(tenantID string, sc *scripts.Script, mode stri
 	if err != nil {
 		return packageRunItem{}, nil, err
 	}
-	return packageRunItem{Raw: raw, Digest: responseauth.ItemDigest(raw), Script: sc, Version: sv.Version}, h, nil
+	return packageRunItem{Raw: raw, Digest: grants.ItemDigest(raw), Script: sc, Version: sv.Version}, h, nil
 }
 
 func sameParams(a, b map[string]string) bool {
@@ -179,7 +179,7 @@ func sameParams(a, b map[string]string) bool {
 }
 
 func packageRunPayload(items []packageRunItem, targets []string) []byte {
-	p := responseauth.PackageRunPayload{Route: responseauth.PackageRunRoute, Targets: targets}
+	p := grants.PackageRunPayload{Route: grants.PackageRunRoute, Targets: targets}
 	for _, it := range items {
 		p.Items = append(p.Items, it.Raw)
 	}
@@ -257,8 +257,8 @@ func (s *Server) dispatchPackageGrants(tenantID, requestedBy, runID string, item
 	return out, nil
 }
 
-// handleMaintenanceRun runs once the authority has authorized it: it
-// creates the jobs the authority's grants allow.
+// handleMaintenanceRun runs once the hub has authorized it: it
+// creates the jobs the hub's grants allow.
 func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -290,7 +290,7 @@ func (s *Server) handleMaintenanceRun(w http.ResponseWriter, r *http.Request) {
 	runID := r.Header.Get(approvalHeader)
 	jobs, err := s.dispatchPackageGrants(tenantID, requestedBy, runID, items, grants)
 	for _, j := range jobs {
-		s.audit(r, "SCRIPT_RUN_DISPATCHED", j.JobID, fmt.Sprintf("Dispatched package %s v%d to %s authorized by the response authority", j.Package, j.Version, j.EndpointID))
+		s.audit(r, "SCRIPT_RUN_DISPATCHED", j.JobID, fmt.Sprintf("Dispatched package %s v%d to %s authorized by the hub", j.Package, j.Version, j.EndpointID))
 	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("created %d of %d jobs: %v", len(jobs), len(grants), err))

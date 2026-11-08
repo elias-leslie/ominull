@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/storage"
 )
 
@@ -512,7 +512,7 @@ func TestMonitorScriptsProfile(t *testing.T) {
 
 	seedEndpointRow(t, store, storage.Endpoint{ID: "ep-r", ResponseCapabilities: `{"isolate":true}`})
 	trustBeat(t, srv, "ep-r", &response.AgentTrustReport{V: 1, Keys: "missing"})
-	got, err := srv.responseAuth.EndpointManifest(context.Background(), &responseauth.ManifestRequest{TenantID: "default", EndpointID: "ep-r", Profile: "monitor-scripts"})
+	got, err := srv.responseAuth.EndpointManifest(context.Background(), &grants.ManifestRequest{TenantID: "default", EndpointID: "ep-r", Profile: "monitor-scripts"})
 	if err != nil || got.Profile != "respond" {
 		t.Fatalf("respond -> monitor-scripts was signed by the manifest request alone: %+v %v", got, err)
 	}

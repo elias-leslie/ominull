@@ -126,8 +126,6 @@ func main() {
 		err = client.cmdScripts(rest)
 	case "maint":
 		err = client.cmdMaint(rest)
-	case "host-script":
-		err = client.cmdHostScript(rest)
 	case "shell":
 		err = client.cmdShell(rest)
 	case "screen":
@@ -644,20 +642,7 @@ func (c *APIClient) cmdResponse(args []string) error {
 }
 
 func (c *APIClient) cmdResponseAuth(args []string) error {
-	if len(args) == 0 || args[0] == "status" {
-		raw, err := c.doRequest(http.MethodGet, "/api/v1/response/auth/status", nil)
-		if err != nil {
-			return err
-		}
-		var res interface{}
-		_ = json.Unmarshal(raw, &res)
-		c.printOutput(res, func() {
-			fmt.Println("=== Response Authority Status ===")
-			fmt.Println(string(raw))
-		})
-		return nil
-	}
-	if args[0] == "recovery-token" {
+	if len(args) > 0 && args[0] == "recovery-token" {
 		opID := "admin"
 		if len(args) > 1 {
 			opID = args[1]
@@ -675,7 +660,7 @@ func (c *APIClient) cmdResponseAuth(args []string) error {
 		})
 		return nil
 	}
-	return fmt.Errorf("usage: ominullctl response-auth status|recovery-token")
+	return fmt.Errorf("usage: ominullctl response-auth recovery-token")
 }
 
 func (c *APIClient) cmdForensics(args []string) error {
@@ -1306,7 +1291,7 @@ func (c *APIClient) cmdConsole(args []string) error {
 				"chrome":       "Settings -> Privacy and security -> Security -> Manage certificates -> Authorities -> Import ca.crt -> Trust for identifying websites",
 				"firefox":      "Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import ca.crt -> Trust this CA to identify websites",
 			},
-			"rationale": "Browsers require a secure context with a trusted root certificate to enable WebCrypto (ActionProof signing) and WebAuthn (FIDO2/passkeys).",
+			"rationale": "Browsers trust the console over HTTPS only with a trusted root certificate; it keeps the login and session cookie private.",
 		}, func() {
 			fmt.Println("=== Ominull Hub Root CA Trust Installation Instructions ===")
 			fmt.Println()
@@ -1491,15 +1476,12 @@ Fleet & CyberOps Commands:
   maint settings [ENDPOINT]               Effective package settings (fleet, or one host)
   maint set PKG|@CATEGORY [--endpoint ID] [--on|--off] [--mode M] [--every R] [NAME=VALUE|NAME=default...] [--reason T] [--until D] [--reset]
                                           Change a fleet default or a host override
-  host-script run EP --package NAME [--mode M] [--auto] [--timeout D] [--no-wait]
-                                          Run a released package on a host-authority host: reserve, Nightshift signs, submit, wait
-                                          (exit 6 endpoint refuses, 7 reservation lapsed, 8 signer refused, 9 hub refused the grant)
   install reports [list|show]             Inspect bootstrap error reports
   enrol list|open|close                   LAN self-enrolment windows 
 
 Forensics & Response Commands:
   response jobs list|cancel <id>          Inspect and manage durable response jobs
-  response-auth status|recovery-token     Inspect Response Authority and issue emergency recovery
+  response-auth recovery-token            Issue a new first-run setup token
   forensics list|show|verify <manifest>   Manage and verify forensic evidence collections
   scripts list|show|create|update|retire  Manage versioned immutable script library
   scripts sync DIR       Sync maintenance packages (DIR/*.ps1) into the library; unchanged ones are skipped

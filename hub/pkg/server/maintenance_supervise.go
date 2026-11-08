@@ -40,7 +40,7 @@ type runProgress struct {
 	Processes   int       `json:"processes"`
 }
 
-// runAttention: states that wait on someone (a steward or the owner).
+// runAttention: states that wait on someone (an agent or the owner).
 func runAttention(state string) bool {
 	return state == "stalled" || state == "needs_hands" || state == "no_result"
 }

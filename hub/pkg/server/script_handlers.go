@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 	"ominull/hub/pkg/scripts"
 )
 
@@ -81,6 +81,10 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
+		if r.Header.Get("X-Role") != "admin" {
+			writeJSONError(w, http.StatusForbidden, "admin role required")
+			return
+		}
 		var req struct {
 			ID                  string `json:"id,omitempty"`
 			Name                string `json:"name"`
@@ -203,7 +207,11 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 
 	// Fail-closed check: static API keys cannot execute scripts; active console session required
 	if r.Header.Get("X-Auth-Method") == "api-key" {
-		writeJSONError(w, http.StatusForbidden, "static API keys cannot execute scripts; an active console response session is required")
+		writeJSONError(w, http.StatusForbidden, "static API keys cannot execute scripts; sign in to the console")
+		return
+	}
+	if r.Header.Get("X-Role") != "admin" {
+		writeJSONError(w, http.StatusForbidden, "admin role required")
 		return
 	}
 
@@ -218,15 +226,13 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ScriptID       string                    `json:"script_id"`
-		Version        int                       `json:"version"`
-		EndpointID     string                    `json:"endpoint_id"`
-		Parameters     map[string]string         `json:"parameters"`
-		TimeoutSeconds int                       `json:"timeout_seconds"`
-		MaxOutputBytes int64                     `json:"max_output_bytes"`
-		SessionID      string                    `json:"session_id"`
-		ActionDigest   string                    `json:"action_digest"`
-		Proof          *responseauth.ActionProof `json:"proof"`
+		ScriptID       string            `json:"script_id"`
+		Version        int               `json:"version"`
+		EndpointID     string            `json:"endpoint_id"`
+		Parameters     map[string]string `json:"parameters"`
+		TimeoutSeconds int               `json:"timeout_seconds"`
+		MaxOutputBytes int64             `json:"max_output_bytes"`
+		ActionDigest   string            `json:"action_digest"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -325,30 +331,22 @@ func (s *Server) handleScriptsRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("action digest mismatch: client supplied %s but recomputed payload digest is %s", req.ActionDigest, computedDigestHex))
 		return
 	}
-	if req.Proof != nil && req.Proof.ActionDigest != "" && !strings.EqualFold(req.Proof.ActionDigest, computedDigestHex) {
-		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("proof action digest mismatch: proof binds to %s but recomputed payload digest is %s", req.Proof.ActionDigest, computedDigestHex))
-		return
-	}
 
 	if s.responseAuth == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "response authority not available")
+		writeJSONError(w, http.StatusServiceUnavailable, "the grant signer is not available")
 		return
 	}
 
-	// Validate action proof and sign grant
-	grant, err := s.responseAuth.SignGrant(r.Context(), &responseauth.SignGrantRequest{
-		TenantID:      tenantID,
-		OperatorID:    operatorID,
-		SessionID:     req.SessionID,
-		EndpointID:    req.EndpointID,
-		ActionKind:    response.ActionKindScriptExec,
-		ActionDigest:  computedDigestHex,
-		ActionPayload: json.RawMessage(payloadJSONBytes),
-		TTLSeconds:    300,
-		Proof:         req.Proof,
+	grant, err := s.responseAuth.SignGrant(r.Context(), &grants.SignGrantRequest{
+		TenantID:     tenantID,
+		OperatorID:   operatorID,
+		EndpointID:   req.EndpointID,
+		ActionKind:   response.ActionKindScriptExec,
+		ActionDigest: computedDigestHex,
+		TTLSeconds:   300,
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusForbidden, "response authority denied script execution: "+err.Error())
+		writeJSONError(w, http.StatusForbidden, "the script run was not signed: "+err.Error())
 		return
 	}
 
@@ -509,6 +507,10 @@ func (s *Server) handleScriptSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
+		if r.Header.Get("X-Role") != "admin" {
+			writeJSONError(w, http.StatusForbidden, "admin role required")
+			return
+		}
 		// Fail-closed gate: static API keys cannot create schedules
 		if r.Header.Get("X-Auth-Method") == "api-key" {
 			writeJSONError(w, http.StatusForbidden, "static API keys cannot schedule scripts; an active console response session is required")
@@ -516,19 +518,17 @@ func (s *Server) handleScriptSchedules(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var req struct {
-			ScriptID        string                    `json:"script_id"`
-			Version         int                       `json:"version"`
-			TargetEndpoints []string                  `json:"target_endpoints"`
-			Parameters      map[string]string         `json:"parameters"`
-			Recurrence      string                    `json:"recurrence"`
-			StartTime       time.Time                 `json:"start_time"`
-			EndTime         *time.Time                `json:"end_time,omitempty"`
-			MaxRuns         int                       `json:"max_runs"`
-			TimeoutSeconds  int                       `json:"timeout_seconds"`
-			MaxOutputBytes  int64                     `json:"max_output_bytes"`
-			SessionID       string                    `json:"session_id"`
-			ActionDigest    string                    `json:"action_digest"`
-			Proof           *responseauth.ActionProof `json:"proof"`
+			ScriptID        string            `json:"script_id"`
+			Version         int               `json:"version"`
+			TargetEndpoints []string          `json:"target_endpoints"`
+			Parameters      map[string]string `json:"parameters"`
+			Recurrence      string            `json:"recurrence"`
+			StartTime       time.Time         `json:"start_time"`
+			EndTime         *time.Time        `json:"end_time,omitempty"`
+			MaxRuns         int               `json:"max_runs"`
+			TimeoutSeconds  int               `json:"timeout_seconds"`
+			MaxOutputBytes  int64             `json:"max_output_bytes"`
+			ActionDigest    string            `json:"action_digest"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -543,15 +543,6 @@ func (s *Server) handleScriptSchedules(w http.ResponseWriter, r *http.Request) {
 		operatorID := s.operatorFromRequest(r)
 		if operatorID == "" {
 			operatorID = "operator"
-		}
-
-		// Verify active response session if response authority configured
-		if s.responseAuth != nil && req.SessionID != "" {
-			st, err := s.responseAuth.Status(r.Context(), tenantID)
-			if err != nil || st.ActiveSessions <= 0 {
-				writeJSONError(w, http.StatusForbidden, "active response authority session required to create schedules")
-				return
-			}
 		}
 
 		sched, err := s.scriptsStore.CreateSchedule(

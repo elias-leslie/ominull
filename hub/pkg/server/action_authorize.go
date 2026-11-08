@@ -3,11 +3,10 @@ package server
 // Authorizing high-impact operations. The static admin key, a console session
 // or a JWT minted from the admin key can ask for an isolation change, an agent
 // update, a mesh quarantine, a terminal, a screen session or a package run.
-// The hub works out what the request would do, hands that to the response
-// authority, which checks it, puts it in its own words for the audit and signs
-// the grants for each target. Then the handler runs. Nobody is asked: an
-// action the authority will not sign is refused with the reason (HTTP 4xx), and
-// the endpoints still accept only grants the authority signed, check them
+// The hub works out what the request would do, checks it can read it (grants)
+// and signs the grants for each target. Then the handler runs. Nobody is asked:
+// an action that does not read is refused with the reason (HTTP 4xx), and the
+// endpoints accept only grants signed with the keys they pinned, check them
 // themselves and enforce their own locks and capability limits.
 //
 // The detector's automatic isolation is not an HTTP caller: it runs inside
@@ -18,22 +17,19 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"ominull/hub/pkg/grants"
 	"ominull/hub/pkg/response"
-	"ominull/hub/pkg/responseauth"
 )
 
 // approvalHeader carries the authorization id to the handler an authorized
@@ -48,7 +44,7 @@ func approvalGrants(r *http.Request) []*response.EndpointGrant {
 	return g
 }
 
-// grantedTargets is the endpoint set the authority signed for this request, or
+// grantedTargets is the endpoint set the hub signed for this request, or
 // nil when the request carried no grants (the in-hub automatic paths). A
 // handler that resolves its targets from a scope uses this instead, so a
 // fleet that changed between authorization and use cannot widen the action.
@@ -73,20 +69,12 @@ type actionPlan struct {
 	Targets []string
 	Payload []byte // the digested action; nil means route + canonical body + targets
 	Body    []byte // replaces the request body (digested and handed on) when set
-	// Release is the signed agent packages an agent update installs; the
-	// authority reads it to tell a release signed with a routine key.
-	Release []responseauth.ReleaseEvidence
-	// RoutineKeys is the signed routine key list beside Release; the
-	// authority verifies it against the pinned release key itself.
-	RoutineKeys *response.RoutineKeys
 	// SessionSeconds is how long a terminal or screen session may run
 	// (audited, not part of the digest).
 	SessionSeconds int64
 	// AskFirst: a screen session asks the person at the keyboard first
 	// (audited, not digested).
 	AskFirst bool
-	// StewardRun is the stuck maintenance run a steward screen request is for.
-	StewardRun string
 }
 
 // agentLabelHeader is the name an agent calling with the shared hub admin
@@ -108,7 +96,7 @@ func agentLabel(r *http.Request) (string, bool) {
 		return "", true
 	case 1:
 		v := strings.TrimSpace(vals[0])
-		if responseauth.ValidAgentLabel(v) {
+		if grants.ValidAgentLabel(v) {
 			return v, true
 		}
 	}
@@ -136,14 +124,14 @@ func canonicalJSON(body []byte) ([]byte, error) {
 }
 
 func authorizeStatus(err error) int {
-	var ae *responseauth.AuthorityError
+	var ae *grants.RefusalError
 	if errors.As(err, &ae) && ae.Status != 0 {
 		return ae.Status
 	}
-	return http.StatusServiceUnavailable
+	return http.StatusInternalServerError
 }
 
-// authorized has the authority sign the grants for a POST route, then runs the
+// authorized has the hub sign the grants for a POST route, then runs the
 // handler. Other methods pass straight through (GET and DELETE on the
 // terminal route).
 func (s *Server) authorized(resolve actionResolver, next http.HandlerFunc) http.HandlerFunc {
@@ -153,7 +141,7 @@ func (s *Server) authorized(resolve actionResolver, next http.HandlerFunc) http.
 			return
 		}
 		if s.responseAuth == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "the response authority is not available, so this action cannot be signed")
+			writeJSONError(w, http.StatusServiceUnavailable, "the grant signer is not available, so this action cannot be signed")
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024+1))
@@ -223,14 +211,14 @@ func (s *Server) authorized(resolve actionResolver, next http.HandlerFunc) http.
 			return
 		}
 
-		au, err := s.responseAuth.Authorize(r.Context(), &responseauth.AuthorizeInput{
+		au, err := s.responseAuth.Authorize(r.Context(), &grants.AuthorizeInput{
 			TenantID: tenantID, Requester: requester, Kind: plan.Kind, Targets: plan.Targets, Payload: payload,
-			Release: plan.Release, RoutineKeys: plan.RoutineKeys, SessionSeconds: plan.SessionSeconds,
-			AskFirst: plan.AskFirst, AgentLabel: label, StewardRun: plan.StewardRun,
+			SessionSeconds: plan.SessionSeconds,
+			AskFirst:       plan.AskFirst, AgentLabel: label,
 		})
 		if err != nil {
 			s.audit(r, "ACTION_REFUSED", strings.Join(plan.Targets, ","), plan.Action+": "+err.Error())
-			writeJSONError(w, authorizeStatus(err), "the authority did not sign this action: "+err.Error())
+			writeJSONError(w, authorizeStatus(err), "this action was not signed: "+err.Error())
 			return
 		}
 		id, grants := au.ID, au.Grants
@@ -238,7 +226,7 @@ func (s *Server) authorized(resolve actionResolver, next http.HandlerFunc) http.
 		for _, g := range grants {
 			ids = append(ids, g.GrantID)
 		}
-		s.audit(r, "ACTION_AUTHORIZED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s (authorization %s), grants %s: %s", plan.Action, id, strings.Join(ids, ","), plan.Summary))
+		s.audit(r, "ACTION_AUTHORIZED", strings.Join(plan.Targets, ","), fmt.Sprintf("%s (authorization %s), grants %s: %s; signed as %s: %s", plan.Action, id, strings.Join(ids, ","), plan.Summary, au.Action, au.Summary))
 		r = r.WithContext(context.WithValue(r.Context(), grantsCtxKey{}, grants))
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		// The handler sees the authorization it runs under (a run's id).
@@ -347,7 +335,7 @@ func decodeInto(w http.ResponseWriter, body []byte, v interface{}) bool {
 }
 
 // withNormalizedField returns body with one member replaced by its normalized
-// value, so the authority signs and the handler records
+// value, so the hub signs and the handler records
 // the same spelling an agent accepts (no surrounding space, no IPv4-mapped
 // form).
 func withNormalizedField(w http.ResponseWriter, body []byte, name string, value interface{}) ([]byte, bool) {
@@ -425,7 +413,7 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	req.AllowIPs = allow
 	var notEnforced []string
 	if mode == isolationModeSelective {
-		// The fabric is expanded here, before the authority signs, so the
+		// The fabric is expanded here, before the hub signs, so the
 		// signed list and the one the agent enforces are the same.
 		p, err := s.fabricPolicyFor(req.EndpointID, time.Now().UTC())
 		if err != nil {
@@ -454,7 +442,7 @@ func (s *Server) resolveIsolate(w http.ResponseWriter, r *http.Request, body []b
 	if req.Force {
 		summary += " (readiness gate overridden)"
 	}
-	return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}, Body: nb}, true
+	return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Isolate host", Summary: summary, Targets: []string{req.EndpointID}, Body: nb}, true
 }
 
 func (s *Server) resolveUnisolate(w http.ResponseWriter, r *http.Request, body []byte) (*actionPlan, bool) {
@@ -464,7 +452,7 @@ func (s *Server) resolveUnisolate(w http.ResponseWriter, r *http.Request, body [
 	if !decodeInto(w, body, &req) || !s.endpointInScope(w, r, req.EndpointID) {
 		return nil, false
 	}
-	return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Release isolation", Summary: "Return " + s.endpointLabels([]string{req.EndpointID}) + " to the network", Targets: []string{req.EndpointID}}, true
+	return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Release isolation", Summary: "Return " + s.endpointLabels([]string{req.EndpointID}) + " to the network", Targets: []string{req.EndpointID}}, true
 }
 
 // bulkScopeProblem refuses a bulk request that does not say what it covers.
@@ -539,9 +527,9 @@ func (s *Server) resolveBulkIsolation(isolate bool) actionResolver {
 			if len(monitor) > 0 {
 				summary += fmt.Sprintf(" (%d monitor-only host(s) left out: %s)", len(monitor), s.endpointLabels(monitor))
 			}
-			return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Isolate hosts", Summary: summary, Targets: allowed, Body: nb}, true
+			return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Isolate hosts", Summary: summary, Targets: allowed, Body: nb}, true
 		}
-		return &actionPlan{Kind: responseauth.ActionKindIsolation, Action: "Release isolation",
+		return &actionPlan{Kind: grants.ActionKindIsolation, Action: "Release isolation",
 			Summary: fmt.Sprintf("Return %d host(s) to the network: %s", len(targets), s.endpointLabels(targets)), Targets: targets}, true
 	}
 }
@@ -612,7 +600,6 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		scope = "the whole fleet (" + scope + ")"
 	}
 	summary := "Install agent " + version + " on " + scope
-	rk, _ := s.routineKeys()
 	if len(sortedTargets(targets)) > 1 && len(sortedTargets(req.Canary)) == 0 && s.releaseSignedByRoutine(version) {
 		writeJSONError(w, http.StatusConflict, "agent "+version+" was signed with a routine key, so it rolls out canaries first: name the canaries")
 		return nil, false
@@ -625,27 +612,8 @@ func (s *Server) resolveAgentUpdate(w http.ResponseWriter, r *http.Request, body
 		summary += fmt.Sprintf(": %s first; the other %d approved endpoint(s) only once every canary runs %s with a clean provenance check, otherwise the rollout halts (within %d minutes)",
 			s.endpointLabels(canary), len(sortedTargets(targets))-len(canary), version, int(rolloutCanaryDeadline/time.Minute))
 	}
-	return &actionPlan{Kind: responseauth.ActionKindAgentUpdate, Action: "Update agents",
-		Summary: summary, Targets: targets, Body: newBody, Release: s.releaseEvidence(version), RoutineKeys: rk}, true
-}
-
-// releaseEvidence is the published agent packages of version with their
-// release signatures, for the authority to verify; nil when any is missing
-// (the authority then reads no release for the rollout).
-func (s *Server) releaseEvidence(version string) []responseauth.ReleaseEvidence {
-	var out []responseauth.ReleaseEvidence
-	for _, pkg := range []string{"deb", "windows-native"} {
-		name, sha, ok := s.signedAgentPackage(version, pkg)
-		if !ok {
-			return nil
-		}
-		sig, err := os.ReadFile(filepath.Join(s.binaryDir, name+".release.sig"))
-		if err != nil || len(sig) == 0 || len(sig) > 512 {
-			return nil
-		}
-		out = append(out, responseauth.ReleaseEvidence{Package: name, SHA256: sha, Sig: base64.StdEncoding.EncodeToString(sig)})
-	}
-	return out
+	return &actionPlan{Kind: grants.ActionKindAgentUpdate, Action: "Update agents",
+		Summary: summary, Targets: targets, Body: newBody}, true
 }
 
 func (s *Server) resolveMesh(quarantine bool) actionResolver {
@@ -669,10 +637,10 @@ func (s *Server) resolveMesh(quarantine bool) actionResolver {
 				writeJSONError(w, http.StatusConflict, "target_ip: "+ip+" is this hub's own address ("+why+"). Quarantining it would cut every agent off from the only host that can lift the quarantine.")
 				return nil, false
 			}
-			return &actionPlan{Kind: responseauth.ActionKindMesh, Action: "Quarantine address",
+			return &actionPlan{Kind: grants.ActionKindMesh, Action: "Quarantine address",
 				Summary: "Every agent drops traffic to and from " + ip + " (" + strings.TrimSpace(req.Reason) + ")", Targets: []string{"mesh:" + ip}, Body: nb}, true
 		}
-		return &actionPlan{Kind: responseauth.ActionKindMesh, Action: "Lift quarantine",
+		return &actionPlan{Kind: grants.ActionKindMesh, Action: "Lift quarantine",
 			Summary: "Agents stop dropping traffic for " + ip, Targets: []string{"mesh:" + ip}, Body: nb}, true
 	}
 }
