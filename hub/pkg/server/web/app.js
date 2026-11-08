@@ -2356,7 +2356,7 @@
       else if (e.key === "Home") { e.preventDefault(); list[0].focus(); }
       else if (e.key === "End") { e.preventDefault(); list[list.length - 1].focus(); }
       else if (e.key === "Tab") { e.preventDefault(); }
-      else if (e.key === "Escape") { e.preventDefault(); closeCtx(); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeCtx(); }
     };
     document.addEventListener("keydown", menu._keys, true);
     var first = items()[0];

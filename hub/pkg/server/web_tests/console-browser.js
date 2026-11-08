@@ -434,7 +434,8 @@
   const more=[...route().querySelectorAll('.route-actions button')].find(b=>b.textContent==='More…');
   more.click(); await wait();
   assert(document.querySelector('[role=menu]'),'More… on a machine page does not open its menu');
-  document.body.click(); await wait();
+  document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); await wait();
+  assert(!document.querySelector('[role=menu]')&&route(),'Escape on the menu should close the menu and keep the machine page');
   assert(/None run here|Scripts the hub signs run here/.test(route().textContent),'The Scripts row does not say whether scripts run');
   inRoute('Change…').click(); await wait();
   const pick=document.querySelector('.sheet select');
