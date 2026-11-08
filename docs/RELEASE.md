@@ -21,6 +21,7 @@ cp -a agent/hubinput/vendor DIR/agent/hubinput/
 cp -a screen/helper/vendor DIR/screen/helper/
 cp -a screen/viewer/vendor DIR/screen/viewer/
 cp -p scripts/st_extension/production.local.json DIR/scripts/st_extension/
+ln -s "$PWD/.dev-tools" DIR/.dev-tools   # st browser writes its results to the registered checkout
 ```
 
 ## Order
