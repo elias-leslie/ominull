@@ -161,6 +161,36 @@ int main(void) {
     for (size_t i = 0; i < count; i++)
         assert(events[i].BytesMeasured && events[i].BytesIn == 7 &&
                events[i].BytesOut == 11);
+    /* Our own hub flow stays out of telemetry, also once closed or orphaned,
+     * when nothing says whose it was. Another live process still shows. */
+    g_SelfPid = GetCurrentProcessId();
+    g_HubPeers.port = 9443;
+    g_HubPeers.count = 1;
+    snprintf(g_HubPeers.addresses[0], sizeof(g_HubPeers.addresses[0]), "192.0.2.10");
+    FLOW_CANDIDATE_WIN hubFlow;
+    memset(&hubFlow, 0, sizeof(hubFlow));
+    hubFlow.row.key.family = 4;
+    inet_pton(AF_INET, "192.0.2.10", hubFlow.row.key.remote);
+    hubFlow.row.key.remotePort = htons(9443);
+    hubFlow.row.key.pid = g_SelfPid;
+    hubFlow.row.key.created = 100;
+    assert(IsOwnHubFlowWin(&hubFlow));
+    hubFlow.row.key.pid = 0;
+    hubFlow.row.key.created = 0;
+    assert(IsOwnHubFlowWin(&hubFlow));
+    hubFlow.row.key.pid = 4242;
+    assert(IsOwnHubFlowWin(&hubFlow));
+    hubFlow.row.key.created = 100;
+    assert(!IsOwnHubFlowWin(&hubFlow));
+    hubFlow.row.key.created = 0;
+    hubFlow.row.key.remotePort = htons(443);
+    assert(!IsOwnHubFlowWin(&hubFlow));
+    hubFlow.row.key.remotePort = htons(9443);
+    inet_pton(AF_INET, "192.0.2.11", hubFlow.row.key.remote);
+    assert(!IsOwnHubFlowWin(&hubFlow));
+    g_HubPeers.port = 0;
+    g_HubPeers.count = 0;
+
     TCP_KEY_WIN key = {0};
     key.family = 6;
     key.pid = 42;

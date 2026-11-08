@@ -395,6 +395,12 @@ static bool IsContactTcpStateWin(DWORD state) {
  * the exact configured hub endpoint is dropped, and only for this process: if
  * this binary ever connects anywhere else, that is the thing worth seeing.
  *
+ * A row with no provable owner at that endpoint counts as ours too. Windows
+ * gives TIME_WAIT rows no owner and a row outlives the process that opened it,
+ * so every agent restart left one, and on a lab host that paged as an unknown
+ * program escaping to the hub. Another program's finished contact with the hub
+ * goes unreported as a result; while it runs it still has an owner and shows.
+ *
  * Resolved once. HubAddressLiteral may consult DNS, which has no place on a
  * three-second polling path. */
 bool HubAddressLiteral(const AGENT_CONFIG* config, char* out, size_t cap);
@@ -410,7 +416,8 @@ static void ResolveSelfHubPeer(void) {
 }
 static bool IsOwnHubFlowWin(const FLOW_CANDIDATE_WIN *candidate) {
     const TCP_KEY_WIN *key = &candidate->row.key;
-    if (!g_HubPeers.port || key->pid != g_SelfPid || ntohs(key->remotePort) != g_HubPeers.port) return false;
+    if (!g_HubPeers.port || ntohs(key->remotePort) != g_HubPeers.port) return false;
+    if (key->pid != g_SelfPid && key->created) return false;
     char address[64];
     if (!inet_ntop(key->family == 6 ? AF_INET6 : AF_INET, key->remote, address, sizeof(address))) return false;
     for (size_t i = 0; i < g_HubPeers.count; i++)
