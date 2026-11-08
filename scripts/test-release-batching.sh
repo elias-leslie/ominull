@@ -59,6 +59,9 @@ expect "nothing to release" # a hub change deploys on its own (scripts/deploy-hu
 echo 'int z;' > agent/a.c
 git add -A && git commit -qm "agent change"
 expect "${passed}" # an agent change goes out at once, however recent the last release
+echo 'int wip;' > agent/wip.c
+expect "Uncommitted files would ship" # another session's work in a shared checkout
+rm agent/wip.c
 git add -A
 GIT_COMMITTER_DATE="$(date -d "-2 days" -R)" git commit -q --allow-empty -m "Release 1.0.1: older"
 expect "nothing to release"

@@ -10,9 +10,18 @@ BPFTOOL=/usr/sbin/bpftool \
 scripts/release.sh --version X.Y.Z [--canary IDS]
 ```
 
-`release.sh --help` lists its options. Run it from a clean checkout: the gates and
-package builds read the working tree. It refuses when nothing the agents ship
-changed since the last `Release X.Y.Z` commit.
+`release.sh --help` lists its options. It refuses when nothing the agents ship changed
+since the last `Release X.Y.Z` commit, and when anything uncommitted would ship, since the
+gates and package builds read the working tree. With other work in the checkout, release
+from a worktree, then commit the version bump `release.sh` leaves there:
+
+```bash
+git worktree add --detach DIR HEAD
+cp -a agent/hubinput/vendor DIR/agent/hubinput/
+cp -a screen/helper/vendor DIR/screen/helper/
+cp -a screen/viewer/vendor DIR/screen/viewer/
+cp -p scripts/st_extension/production.local.json DIR/scripts/st_extension/
+```
 
 ## Order
 

@@ -91,6 +91,19 @@ if [ "${DO_HUB}" -eq 1 ]; then
             exit 1
         fi
     fi
+    # The gates and package builds read the working tree, so another session's
+    # unfinished work would ship. A failed run leaves its one-line version bumps.
+    dirty="$(git -C "${ROOT_DIR}" status --porcelain -- agent hub packaging packages screen scripts)"
+    for f in agent/include/agent.h agent/linux/main.c hub/cmd/main.go; do
+        if [ "$(git -C "${ROOT_DIR}" diff --numstat -- "${f}" | cut -f1,2)" = "$(printf '1\t1')" ]; then
+            dirty="$(printf '%s\n' "${dirty}" | grep -vF " ${f}" || true)"
+        fi
+    done
+    if [ -n "${dirty}" ]; then
+        echo "[-] Uncommitted files would ship; release from a clean worktree (docs/RELEASE.md):" >&2
+        printf '%s\n' "${dirty}" >&2
+        exit 1
+    fi
 fi
 
 if [ -n "${VERSION}" ]; then
