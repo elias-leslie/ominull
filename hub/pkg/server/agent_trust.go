@@ -778,7 +778,11 @@ type fleetTrustRow struct {
 	TrustBundle  string   `json:"trust_bundle"` // signed | unsigned | unavailable (the tenant's)
 	MissingKeys  []string `json:"missing_keys,omitempty"`
 	Profile      string   `json:"profile,omitempty"`
-	Ceiling      string   `json:"ceiling,omitempty"`
+	// ProfileCaps is what the reported profile allows; SignedProfile is what the
+	// hub last signed, which differs from Profile until the agent checks in.
+	ProfileCaps   []string `json:"profile_caps,omitempty"`
+	SignedProfile string   `json:"signed_profile,omitempty"`
+	Ceiling       string   `json:"ceiling,omitempty"`
 	// Host authority: keys pinned on the host (ids and roles), the auto
 	// allow-list, and why a host file was not used.
 	HostAuthority   *bool                      `json:"host_authority,omitempty"` // set whenever the agent reported: false shows as false
@@ -818,6 +822,12 @@ func (s *Server) handleFleetTrust(w http.ResponseWriter, r *http.Request) {
 	for k, v := range s.trust.reports {
 		reports[k] = v
 	}
+	signed := make(map[string]string, len(s.trust.manifests))
+	for k, m := range s.trust.manifests {
+		if m != nil {
+			signed[k] = m.Profile
+		}
+	}
 	s.trust.mu.Unlock()
 	rows := []fleetTrustRow{}
 	counts := map[string]int{}
@@ -839,6 +849,7 @@ func (s *Server) handleFleetTrust(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		row.TrustBundle = bundles[tenant]
+		row.SignedProfile = signed[ep.ID]
 		if seen, ok := reports[ep.ID]; ok {
 			rep := seen.report
 			row.Verification = "agent"
@@ -853,6 +864,7 @@ func (s *Server) handleFleetTrust(w http.ResponseWriter, r *http.Request) {
 				row.MissingKeys = append(row.MissingKeys, "policy")
 			}
 			row.Profile, row.ManifestSeq, row.Ceiling = rep.Profile, rep.ManifestSeq, rep.Ceiling
+			row.ProfileCaps, _ = response.ProfileCaps(rep.Profile)
 			hostAuth := rep.HostAuthority
 			row.HostAuthority, row.HostKeys, row.HostAllow, row.HostError = &hostAuth, rep.HostKeys, rep.HostAllow, rep.HostError
 			iso := rep.Isolated

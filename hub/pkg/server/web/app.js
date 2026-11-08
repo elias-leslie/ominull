@@ -1391,12 +1391,18 @@
     if (!DEMO_REMOTE_OFF) DEMO_REMOTE_OFF = { "linux-prod-db-01": true };
     return DEMO_REMOTE_OFF;
   }
+  var DEMO_NETWORKS = [{ cidr: "10.0.4.0/24", label: "Office", kind: "physical" }];
+  var DEMO_PROFILES = {};
+  function demoEndpoint(id) { return arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.id === id; })[0]; }
+  function demoRefusal(status, message) { var e = new Error(message); e.status = status; return e; }
+  var DEMO_PROFILE_CAPS = { monitor: ["update"], "monitor-scripts": ["collect", "script", "update"],
+    respond: ["collect", "isolate", "mesh", "screen", "terminal", "update"], engagement: ["collect", "isolate", "mesh", "screen", "script", "terminal", "update"] };
   function demoFleetTrust() {
-    var eps = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]);
+    var eps = arrayOf(DEMO_CACHE && DEMO_CACHE["/api/v1/endpoints"]).filter(function (e) { return e.status !== "retired"; });
     var agoS = function (m) { return Math.round((Date.now() - m * 60000) / 1000); };
     return { endpoints: eps.map(function (e) {
       var row = { endpoint_id: e.id, hostname: e.hostname, agent_version: e.driver_version, verification: "agent", trust_bundle: "signed", keys: "all pinned",
-        profile: "engagement", ceiling: "", host_authority: false, hub_isolated: !!e.is_isolated, agent_isolated: !!e.is_isolated, reported_at: new Date(Date.now() - 40000).toISOString() };
+        profile: DEMO_PROFILES[e.id] || "engagement", ceiling: "", host_authority: false, hub_isolated: !!e.is_isolated, agent_isolated: !!e.is_isolated, reported_at: new Date(Date.now() - 40000).toISOString() };
       if (e.id === "linux-prod-db-01") {
         Object.assign(row, { ceiling: "signed-scripts", host_authority: true, host_keys: [{ id: "a1", role: "tap" }, { id: "b2", role: "auto" }],
           host_allow: [{ name: "btrfs-scrub", sha256: "x", modes: ["audit", "enforce"] }, { name: "cleanup", sha256: "y", modes: ["enforce"] }],
@@ -1407,6 +1413,7 @@
       } else if (e.id === "win11-fin-11") {
         row = { endpoint_id: e.id, hostname: e.hostname, agent_version: e.driver_version, verification: "hub-only", trust_bundle: "signed", hub_isolated: false };
       }
+      if (row.profile) row.profile_caps = DEMO_PROFILE_CAPS[row.profile];
       return row;
     }), counts: { agent: eps.length - 1, "hub-only": 1 } };
   }
@@ -1517,10 +1524,10 @@
     if (!DEMO_CACHE) DEMO_CACHE = demoData();
     var base = path.split("?")[0];
 
-    return new Promise(function (resolve) {
+    return new Promise(function (resolve, reject) {
       setTimeout(function () {
         if (method && method !== "GET") {
-          resolve(demoMutate(base, body, path, method));
+          try { resolve(demoMutate(base, body, path, method)); } catch (e) { reject(e); }
           return;
         }
         if (base === "/api/v1/baseline/endpoint") {
@@ -1537,6 +1544,7 @@
         if (base === "/api/v1/posture") { resolve(demoPosture(path)); return; }
         if (base === "/api/v1/maintenance/windows") { resolve(demoWindows(path)); return; }
         if (base === "/api/v1/fleet/trust") { resolve(demoFleetTrust()); return; }
+        if (base === "/api/v1/topology/networks") { resolve(DEMO_NETWORKS.slice()); return; }
         if (base === "/api/v1/remote-access/settings") { resolve({ off: Object.keys(demoRemoteOff()).filter(function (k) { return demoRemoteOff()[k]; }).sort() }); return; }
         if (base === "/api/v1/terminal/limits") { resolve(demoTerminalLimits()); return; }
         if (base === "/api/v1/maintenance/catalog") { resolve(JSON.parse(JSON.stringify(DEMO_CATALOG))); return; }
@@ -1791,6 +1799,52 @@
       }
       return Object.assign(demoWindows(wep ? "?endpoint_id=" + encodeURIComponent(wep) : ""), { changed: true });
     }
+    if (base === "/api/v1/endpoints/retire") {
+      demoEndpoint(body.endpoint_id).status = "retired";
+      DEMO_CACHE["/api/v1/assets"] = arrayOf(DEMO_CACHE["/api/v1/assets"]).filter(function (a) { return a.agent_endpoint_id !== body.endpoint_id; });
+      return { endpoint_id: body.endpoint_id, status: "retired" };
+    }
+    if (base === "/api/v1/endpoints/monitor-only" || base === "/api/v1/endpoints/allow-isolation") {
+      var held = demoEndpoint(body.endpoint_id), holding = base === "/api/v1/endpoints/monitor-only";
+      if (holding && held.is_isolated) throw demoRefusal(409, "the machine is isolated; setting monitor only would release the isolation without the owner");
+      if (!holding && body.revision !== (held.response_profile_rev || 0)) throw demoRefusal(409, "name the setting's current revision");
+      held.monitor_only = holding;
+      held.response_profile_rev = (held.response_profile_rev || 0) + 1;
+      if (holding) DEMO_PROFILES[body.endpoint_id] = "monitor";
+      return { endpoint_id: body.endpoint_id, monitor_only: holding, response_profile_rev: held.response_profile_rev };
+    }
+    if (base === "/api/v1/endpoints/capabilities") {
+      if (demoEndpoint(body.endpoint_id).monitor_only && body.profile !== "monitor" && body.profile !== "monitor-scripts") {
+        DEMO_PROFILES[body.endpoint_id] = "monitor";
+        return { endpoint_id: body.endpoint_id, profile: "monitor", still_monitor_only: "lift monitor-only with allow-isolation first" };
+      }
+      DEMO_PROFILES[body.endpoint_id] = body.profile;
+      return { endpoint_id: body.endpoint_id, profile: body.profile };
+    }
+    if (base === "/api/v1/topology/networks") {
+      arrayOf(body).forEach(function (n, i) {
+        if (!/^[0-9a-fA-F:.]+\/\d{1,3}$/.test(n.cidr || "")) throw demoRefusal(400, "network " + (i + 1) + " requires an explicit unicast IPv4 or IPv6 prefix");
+      });
+      DEMO_NETWORKS = arrayOf(body);
+      return DEMO_NETWORKS.slice();
+    }
+    if (base === "/api/v1/assets/correct") {
+      var fixed = arrayOf(DEMO_CACHE["/api/v1/assets"]).filter(function (a) { return a.id === body.asset_id; })[0];
+      if (!fixed) throw demoRefusal(404, "no such asset");
+      fixed.claims = arrayOf(fixed.claims).filter(function (c) { return !(c.field === body.field && c.source === "operator"); });
+      /* As the hub does: the winning claim is the asset's value. */
+      if (!body.withdraw) {
+        fixed.claims.forEach(function (c) { if (c.field === body.field) c.winner = false; });
+        fixed.claims.push({ field: body.field, source: "operator", value: body.value, confidence: 1, winner: true, rationale: body.reason });
+        fixed[body.field] = body.value;
+      } else {
+        var rest = fixed.claims.filter(function (c) { return c.field === body.field; })
+          .sort(function (x, y) { return (Number(y.confidence) || 0) - (Number(x.confidence) || 0); })[0];
+        fixed.claims.forEach(function (c) { if (c.field === body.field) c.winner = c === rest; });
+        fixed[body.field] = rest ? rest.value : "";
+      }
+      return fixed;
+    }
     if (base === "/api/v1/posture/attest") {
       DEMO_ATTEST = body.state === "clear" ? null : { state: body.state, note: body.note };
       return { control: body.control, state: body.state };
@@ -2031,7 +2085,6 @@
 
     var latest = (state.updateStatus && state.updateStatus.latest_version) || "";
     var graph = arrayOf(state.assetGraph);
-    if (!graph.length) graph = legacyAssetGraph();
 
     var rows = graph.map(function (a) {
       var ep = a.agent_endpoint_id ? epById[a.agent_endpoint_id] : null;
@@ -2114,46 +2167,6 @@
     state.assets = rows;
     state.assetByKey = {};
     rows.forEach(function (r) { state.assetByKey[r.key] = r; });
-  }
-
-  /* A hub older than this console has no /api/v1/assets. Rather than render
-     an empty fleet during a rolling upgrade, synthesise the same shape from
-     the two sources Pass 1 used. */
-  function legacyAssetGraph() {
-    var out = [];
-    var used = {};
-    var scanByIP = {};
-    var scanByEndpoint = {};
-    arrayOf(state.scanAssets).forEach(function (a) {
-      if (a.ip) scanByIP[a.ip] = a;
-      if (a.agent_endpoint_id) scanByEndpoint[a.agent_endpoint_id] = a;
-    });
-
-    arrayOf(state.endpoints).forEach(function (ep) {
-      var sc = scanByEndpoint[ep.id] || scanByIP[ep.ip] || null;
-      if (sc) used[sc.ip] = true;
-      var claims = [{ field: "os", source: "agent", value: ep.os || "", confidence: 1, winner: true }];
-      if (sc && sc.os_guess) claims.push({ field: "os", source: "scan", value: sc.os_guess, confidence: Number(sc.confidence) || 0, winner: false });
-      out.push({
-        id: ep.id, agent_endpoint_id: ep.id, ip: ep.ip || "", mac: ep.mac || "",
-        hostname: ep.hostname, os: ep.os, vendor: sc ? sc.vendor : "", category: ep.role_tag,
-        role: ep.role_tag, risk_score: sc ? sc.risk_score : "", tenant_id: ep.tenant_id,
-        location_id: ep.location_id, last_seen_at: ep.last_seen_at,
-        ports: sc ? arrayOf(sc.open_ports) : [], claims: claims
-      });
-    });
-
-    arrayOf(state.scanAssets).forEach(function (a) {
-      if (used[a.ip]) return;
-      out.push({
-        id: "ip:" + a.ip, agent_endpoint_id: "", ip: a.ip, mac: a.mac || "",
-        hostname: a.hostname, os: a.os_guess, vendor: a.vendor, category: a.category,
-        role: "", risk_score: a.risk_score, tenant_id: "", location_id: "",
-        last_seen_at: a.last_seen, ports: arrayOf(a.open_ports),
-        claims: [{ field: "os", source: "scan", value: a.os_guess || "", confidence: Number(a.confidence) || 0, winner: true }]
-      });
-    });
-    return out;
   }
 
   /* -------------------------------------------------------------- filters */
@@ -2447,6 +2460,9 @@
       menu.appendChild(menuItem("Collect Forensics\u2026", "i-search", null, function () {
         launchForensicsSheet(asset);
       }));
+      menu.appendChild(h("div", { cls: "sep" }));
+      menu.appendChild(menuItem("Retire…", "i-close", null, function () { openRetireSheet(asset); }, { danger: true, disabled: !IS_ADMIN || READ_ONLY,
+        why: "Takes this machine out of the fleet. Its telemetry and history stay" }));
     } else {
       // ----------------- Unassigned / Discovered asset menu
       menu.appendChild(h("div", { cls: "lbl", text: "Unmanaged Asset (" + (asset.ip || asset.name) + ")" }));
@@ -2898,6 +2914,7 @@
     });
     if (!order.length) {
       wrap.appendChild(claimRow("\u2014", "No identity claim yet", null, false));
+      if (IS_ADMIN && !READ_ONLY) wrap.appendChild(correctButton(asset));
       return wrap;
     }
     order.sort(function (a, b) {
@@ -2910,9 +2927,34 @@
         var row = claimRow(c.source, c.value, c.field.indexOf("dhcp_") === 0 ? null : Number(c.confidence) || 0, !!c.winner);
         row.title = (c.rationale || "") + (c.observed_at ? " · Observed " + c.observed_at : "");
         wrap.appendChild(row);
+        if (c.source === "operator" && IS_ADMIN && !READ_ONLY) wrap.appendChild(h("button", { cls: "btn mini", type: "button", text: "Withdraw",
+          title: "Drop this correction and let the other evidence decide", "aria-label": "Withdraw the correction to " + (FIELD_LABEL[field] || field),
+          on: { click: function () { withdrawCorrection(asset, field); } } }));
       });
     });
+    if (IS_ADMIN && !READ_ONLY) wrap.appendChild(correctButton(asset));
     return wrap;
+  }
+  function correctButton(asset) {
+    return h("button", { cls: "btn mini", type: "button", text: "Correct…", title: "Say what this machine really is. A device class also teaches the scanner",
+      on: { click: function () { openCorrectSheet(asset); } } });
+  }
+  function afterCorrection(words) { toast(words, "ok"); refresh(); }
+  function withdrawCorrection(asset, field) {
+    request("/api/v1/assets/correct", "POST", { asset_id: asset.assetId, ip: asset.ip, field: field, withdraw: true })
+      .then(function () { afterCorrection("Correction withdrawn on " + asset.name); }, function (e) { toast((e && e.message) || "Could not withdraw", "crit"); });
+  }
+  function openCorrectSheet(asset) {
+    var check;
+    var field = h("select", { "aria-label": "What to correct" }, ["hostname", "os", "vendor", "category", "role", "risk"].map(function (f) {
+      return h("option", { value: f, text: FIELD_LABEL[f] });
+    }));
+    var value = h("input", { type: "text", maxlength: "128", "aria-label": "Correct value", on: { input: function () { check(); } } });
+    check = openReasonSheet({ title: "Correct " + asset.name, label: "Save",
+      extra: h("div", { cls: "stack" }, h("label", { cls: "field" }, h("span", { text: "What" }), field), h("label", { cls: "field" }, h("span", { text: "Correct value" }), value)),
+      ready: function () { return !!value.value.trim(); },
+      send: function (why) { return request("/api/v1/assets/correct", "POST", { asset_id: asset.assetId, ip: asset.ip, field: field.value, value: value.value.trim(), reason: why }); },
+      done: function () { afterCorrection("Corrected " + asset.name); } });
   }
 
   function roleLabel(role) {
@@ -4585,6 +4627,40 @@
     }, Promise.resolve()).catch(function (error) { delete featureLoads[name]; throw error; });
     return featureLoads[name];
   }
+  function openNetworksSheet() {
+    request("/api/v1/topology/networks").then(function (list) {
+      var rows = h("div", { cls: "stack" });
+      function addRow(n) {
+        n = n || {};
+        var cidr = h("input", { type: "text", maxlength: "43", value: n.cidr || "", placeholder: "10.0.0.0/24", "aria-label": "Address range" });
+        var label = h("input", { type: "text", maxlength: "128", value: n.label || "", placeholder: "Name", "aria-label": "Name" });
+        var kind = h("select", { "aria-label": "Kind" }, h("option", { value: "physical", text: "Physical", selected: n.kind !== "virtual" }), h("option", { value: "virtual", text: "Virtual", selected: n.kind === "virtual" }));
+        var row = h("div", { cls: "uf uf-wrap uf-g1" }, cidr, label, kind,
+          h("button", { cls: "btn mini", type: "button", text: "Remove", "aria-label": "Remove this network", on: { click: function () { row.parentNode.removeChild(row); sheetEl._dirty = true; } } }));
+        row.readNetwork = function () { return { cidr: cidr.value.trim(), label: label.value.trim(), kind: kind.value }; };
+        rows.appendChild(row);
+      }
+      arrayOf(list).forEach(addRow);
+      if (!arrayOf(list).length) addRow();
+      var save = h("button", { cls: "btn btn-primary", type: "button", text: "Save", on: { click: function () {
+        var read = Array.prototype.map.call(rows.children, function (r) { return r.readNetwork(); });
+        var noRange = read.filter(function (n) { return n.label && !n.cidr; })[0];
+        if (noRange) { toast(noRange.label + " needs an address range", "warn"); return; }
+        var nets = read.filter(function (n) { return n.cidr; });
+        request("/api/v1/topology/networks", "PUT", nets).then(function () {
+          closeSheet(); toast("Networks saved", "ok");
+          loadTopology().then(function () { if (topologyUI) topologyUI.update(state.topology, state.topologyError); });
+        }, function (e) { toast((e && e.message) || "Could not save", "crit"); });
+      } } });
+      openSheet("Networks on the map", h("div", { cls: "stack" }, rows,
+        h("button", { cls: "btn mini", type: "button", text: "Add a network", on: { click: function () { addRow(); sheetEl._dirty = true; } } })),
+        [save, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })], "sheet-wide");
+    }, function (e) {
+      /* A failed read here says nothing about the fleet's data. */
+      if (resources["/api/v1/topology/networks"]) delete resources["/api/v1/topology/networks"].error;
+      toast((e && e.message) || "Could not read the networks", "crit");
+    });
+  }
   function renderTopology() {
     if (!window.OminullTopology) {
       clear($("view"));
@@ -4597,7 +4673,8 @@
     if (!topologyUI) topologyUI = window.OminullTopology.mount($("view"), {
       version: CFG.version, window: state.topoWindow, draft: topologyDraft,
       onWindow: function (w) { state.topoWindow = w; loadTopology().then(function () { if (topologyUI) topologyUI.update(state.topology, state.topologyError); }); },
-      onAsset: function (n) { var a = state.assets.find(function (a) { return a.key === n.asset_id || a.ip === n.ip; }); if (a) openRoute(a.key); else toast("No asset record for this address."); },
+      onAsset: function (n) { var a = state.assets.find(function (a) { return a.key === n.asset_id || a.ip === n.ip; }); if (a) openRoute(a.key); else toast(state.assetsLoaded ? "No asset record for this address." : "The asset list could not be read, so this address can't be opened yet.", state.assetsLoaded ? undefined : "warn"); },
+      onNetworks: IS_ADMIN && !READ_ONLY ? openNetworksSheet : null,
       onTraffic: function (f) { state.trafficFilter = { range: state.topoWindow, src_ip: f.src_ip || "", dst_ip: f.dst_ip || "", process: f.process || "", endpoint_id: f.endpoint_id || "" }; go("traffic"); }
     });
     topologyUI.update(state.topology, state.topologyError);
@@ -7445,7 +7522,7 @@
   function openLaunchForensicsPicker() {
     var managed = (state.assets || []).filter(function (a) { return a.endpoint; });
     if (!managed.length) {
-      toast("No agent-managed endpoints online.", "warn");
+      toast(state.assetsLoaded ? "No agent-managed endpoints online." : "The asset list could not be read.", "warn");
       return;
     }
 
@@ -9813,13 +9890,17 @@
     if (t.host_error) return "Scripts are refused here: the host's key file could not be used (" + t.host_error + ").";
     var keys = arrayOf(t.host_keys);
     var scriptsOk = !t.ceiling || /scripts|engagement/.test(t.ceiling);
+    /* The report's own list, so a profile this console predates still reads right. */
+    var profileOff = t.profile && t.profile_caps && t.profile_caps.indexOf("script") < 0;
     if (t.host_authority) {
       return "Only scripts signed by a key pinned here run" + (keys.length ? " (" + keys.length + (keys.length === 1 ? " key" : " keys") + " pinned: " + keys.map(function (k) { return k.role; }).join(", ") + ")" : "") + "." +
-        (scriptsOk ? "" : " The lock level holds them back anyway.");
+        (scriptsOk ? "" : " The lock level holds them back anyway.") +
+        (profileOff ? " The " + t.profile + " profile holds them back anyway." : "");
     }
     if (t.ceiling === "signed-scripts" || t.ceiling === "monitor-signed-scripts") return "Refused until a signing key is pinned on the machine.";
     if (!scriptsOk) return "None run here: the lock level does not allow scripts.";
-    return "Scripts the hub signs run here, inside what the permission profile allows.";
+    if (profileOff) return "None run here: the " + t.profile + " profile does not allow scripts.";
+    return "Scripts the hub signs run here.";
   }
 
   function setRemoteAccessOff(asset, off) {
@@ -9868,6 +9949,7 @@
       facts = fact("Lock level", t.verification === "hub-only"
         ? "This agent is too old to check signatures or report a lock level itself (it needs 1.8.59 or newer)."
         : "The agent has not reported its lock level yet.");
+      facts = facts.concat(fact("Permission profile", profileControls(asset, t)));
     } else {
       var lv = LOCK_LEVELS[t.ceiling];
       var refusedAt = t.refused_at ? new Date(t.refused_at * 1000) : null;
@@ -9882,7 +9964,7 @@
         fact("Isolation", t.disagrees
           ? h("span", {}, chip("crit", "Hub and agent disagree"), " The hub says " + (t.hub_isolated ? "isolated" : "not isolated") + "; the agent says " + (t.agent_isolated ? "isolated" : "not isolated") + (t.isolation_source ? " (" + t.isolation_source + ")" : "") + ".")
           : (t.agent_isolated ? "Isolated" : "Not isolated") + ", and the hub agrees."),
-        t.profile ? fact("Permission profile", t.profile) : [],
+        fact("Permission profile", profileControls(asset, t)),
         t.reported_at ? fact("Reported", stamp(parseTime(t.reported_at))) : []);
     }
     var remote = null;
@@ -9901,6 +9983,87 @@
       "The lock level is set on the machine itself, as root or Administrator, and the hub cannot change it. A host-locked machine takes scripts only from keys pinned on it. Refusals are what the agent last turned down.");
   }
 
+  /* A change to one machine that needs a reason. send(reason) returns the
+     request; ready() can hold the button; failed(e) can take over a refusal. */
+  function openReasonSheet(o) {
+    var reason = h("input", { type: "text", maxlength: "300", "aria-label": "Reason", on: { input: function () { check(); } } });
+    var go = h("button", { cls: o.danger ? "btn btn-crit" : "btn btn-primary", type: "button", text: o.label, disabled: true, on: { click: function () {
+      go.disabled = true;
+      o.send(reason.value.trim()).then(function (r) { closeSheet(); if (o.done) o.done(r); },
+        function (e) { if (o.failed && o.failed(e)) return; check(); toast((e && e.message) || "Could not save", "crit"); });
+    } } });
+    function check() { go.disabled = !reason.value.trim() || (o.ready ? !o.ready() : false); }
+    openSheet(o.title, h("div", { cls: "stack" },
+      o.why ? h("p", { text: o.why }) : null,
+      o.extra || null,
+      h("label", { cls: "field" }, h("span", { text: "Reason" }), reason)),
+      [go, h("button", { cls: "btn", type: "button", text: "Cancel", on: { click: function () { requestCloseSheet(); } } })]);
+    reason.focus();
+    return check;
+  }
+  function openRetireSheet(asset) {
+    openReasonSheet({ title: "Retire " + asset.name, danger: true, label: "Retire",
+      why: asset.name + " leaves the fleet and is no longer watched. Its agent loses its credentials, so bringing it back means installing the agent again. Its telemetry and history stay." +
+        (asset.isolated ? " It is isolated now: retiring drops the hub's record of that, and the hub can't release it afterward." : ""),
+      send: function (why) { return request("/api/v1/endpoints/retire", "POST", { endpoint_id: asset.endpoint.id, reason: why }); },
+      done: function () { closeRoute(); toast(asset.name + " retired", "ok"); refresh(); } });
+  }
+  var PROFILE_WORDS = {
+    monitor: "Agent updates only",
+    "monitor-scripts": "Evidence, scripts and updates. No isolation, terminal or screen",
+    respond: "Everything except scripts",
+    engagement: "Everything, scripts included"
+  };
+  function openProfileSheet(asset, current) {
+    var ep = asset.endpoint, check;
+    var pick = h("select", { "aria-label": "Permission profile", on: { change: function () { check(); } } }, Object.keys(PROFILE_WORDS).map(function (p) {
+      return h("option", { value: p, text: p + ": " + PROFILE_WORDS[p], selected: p === current });
+    }));
+    check = openReasonSheet({ title: "Permission profile on " + asset.name, label: "Change",
+      extra: h("label", { cls: "field" }, h("span", { text: "Profile" }), pick),
+      ready: function () { return pick.value !== current; },
+      send: function (why) { return request("/api/v1/endpoints/capabilities", "POST", { endpoint_id: ep.id, profile: pick.value, reason: why }); },
+      done: function (r) {
+        if (r && r.still_monitor_only) toast(asset.name + " stays on " + r.profile + ": " + r.still_monitor_only, "warn");
+        else toast(asset.name + " takes " + pick.value + " at its next check-in", "ok");
+        refresh();
+      } });
+  }
+  function openMonitorOnlySheet(asset) {
+    var ep = asset.endpoint, on = !ep.monitor_only;
+    openReasonSheet({ title: (on ? "Refuse isolation: " : "Allow isolation: ") + asset.name, danger: on, label: on ? "Refuse isolation" : "Allow isolation",
+      why: on ? "The hub stops isolating " + asset.name + " and holds it to a monitor profile, so the terminal and screen go too."
+        : "The hub can isolate " + asset.name + " again. Its profile stays as it is until you change it.",
+      send: function (why) {
+        return on ? request("/api/v1/endpoints/monitor-only", "POST", { endpoint_id: ep.id, reason: why })
+          : request("/api/v1/endpoints/allow-isolation", "POST", { endpoint_id: ep.id, reason: why, revision: ep.response_profile_rev || 0 });
+      },
+      /* Someone else changed the setting; a retry would send the same old revision. */
+      failed: function (e) {
+        if (on || !e || e.status !== 409) return false;
+        closeSheet(); toast("This setting changed while the sheet was open. Check it and try again.", "warn"); refresh();
+        return true;
+      },
+      done: function () { toast((on ? "Isolation is refused on " : "Isolation is allowed on ") + asset.name, "ok"); refresh(); } });
+  }
+  function profileControls(asset, t) {
+    var ep = asset.endpoint, can = IS_ADMIN && !READ_ONLY;
+    var current = t.signed_profile || t.profile;
+    var pending = t.profile && t.signed_profile && t.signed_profile !== t.profile;
+    var empty = !current && !ep.monitor_only && !can;
+    return h("span", { cls: "uf uf-wrap uf-g1" },
+      empty ? "\u2014" : null,
+      t.profile ? tipped(chip("idle", t.profile), PROFILE_WORDS[t.profile] || "A profile this console does not know") : null,
+      pending ? tipped(chip("info", "\u2192 " + t.signed_profile), "The hub has signed this; it applies when the agent next checks in") : null,
+      !t.profile && t.signed_profile ? tipped(chip("info", "\u2192 " + t.signed_profile), "The hub has signed this; the agent has not reported since") : null,
+      ep.monitor_only ? tipped(chip("warn", "Monitor only"), "The hub refuses to isolate this machine and holds its profile down") : null,
+      can && current ? h("button", { cls: "btn mini", type: "button", text: "Change…", title: "Change what the hub may do here", "aria-label": "Change the permission profile on " + asset.name,
+        on: { click: function () { openProfileSheet(asset, current); } } }) : null,
+      can ? h("button", { cls: "btn mini", type: "button", text: ep.monitor_only ? "Allow isolation…" : "Refuse isolation…",
+        title: ep.monitor_only ? "Lift monitor only" : "Set monitor only: the hub refuses to isolate this machine and holds it to a monitor profile",
+        on: { click: function () { openMonitorOnlySheet(asset); } } }) : null);
+  }
+
   function routeHeadChips(asset) {
     var ep = asset.endpoint;
     if (!ep) return null;
@@ -9917,7 +10080,7 @@
   function routeActions(asset) {
     var ep = asset.endpoint;
     var more = h("button", { cls: "btn", type: "button", text: "More\u2026", "aria-haspopup": "menu",
-      on: { click: function (e) { var r = e.currentTarget.getBoundingClientRect(); openAssetMenu(asset, r.left - 60, r.bottom + 4, null); } } });
+      on: { click: function (e) { e.stopPropagation(); var r = e.currentTarget.getBoundingClientRect(); openAssetMenu(asset, r.left - 60, r.bottom + 4, null); } } });
     if (!ep || !asset.evidence.agent) {
       return h("div", { cls: "route-actions" },
         h("button", { cls: "btn btn-primary", type: "button", text: "Install agent", on: { click: function () { installAgent(asset); } } }),
@@ -9962,7 +10125,7 @@
     if (!state.routeKey) return;
 
     var asset = state.assetByKey[state.routeKey];
-    if (!asset) { state.routeKey = ""; return; }
+    if (!asset) { if (state.assetsLoaded) state.routeKey = ""; return; }
     loadRouteDetail(state.routeKey);
 
     var ep = asset.endpoint;
@@ -10887,11 +11050,11 @@
     else renderAssets();
 
     if (!state.demo) {
-      var failed = Object.keys(resources).filter(function (key) { return resources[key].error && resources[key].updated; });
+      var failed = Object.keys(resources).filter(function (key) { return resources[key].error && (resources[key].updated || key === "/api/v1/assets"); });
       /* Topology and Traffic keep their DOM between renders. */
       Array.prototype.slice.call(view.children).forEach(function (n) { if (n.classList.contains("pending")) n.remove(); });
       if (failed.length) view.prepend(h("div", {cls:"pending", role:"status"},
-        h("span", {text:failed.map(function (key) { return key.split("?")[0].replace("/api/v1/", "") + ": " + resources[key].error.message + " (last success " + new Date(resources[key].updated).toLocaleString() + ")"; }).join(" · ")}),
+        h("span", {text:failed.map(function (key) { return key.split("?")[0].replace("/api/v1/", "") + ": " + resources[key].error.message + (resources[key].updated ? " (last success " + new Date(resources[key].updated).toLocaleString() + ")" : " (no read has worked yet)"); }).join(" · ")}),
         h("button", {cls:"btn", type:"button", text:"Retry delayed data", on:{click:function () { failed.forEach(function (key) { resources[key].retryAt=0; }); refresh(); }}})));
     }
     /* What the view now holds, so a guard that skips a redundant rebuild can
@@ -11032,7 +11195,7 @@
     var jobs = [
       request("/api/v1/hierarchy").then(function (d) { state.hierarchy = arrayOf(d); }),
       request("/api/v1/endpoints").then(function (d) { state.endpoints = arrayOf(d); }),
-      request("/api/v1/assets").then(function (d) { state.assetGraph = arrayOf(d); }),
+      request("/api/v1/assets").then(function (d) { state.assetGraph = arrayOf(d); state.assetsLoaded = true; }),
       request("/api/v1/scanner/results").then(function (d) { state.scanAssets = arrayOf(d); }),
       request("/api/v1/scanner/coverage").then(function (d) { state.coverage = d || null; }),
       request("/api/v1/locations").then(function (d) { state.locations = arrayOf(d); }),
@@ -11162,7 +11325,7 @@
     }
     if (state.section === "audit") {
       var auditScopeQuery = auditQuery();
-      jobs.push(request("/api/v1/audit/logs" + auditScopeQuery).then(function (d) { if (auditScopeQuery !== auditQuery()) return; state.audit = arrayOf(d && d.entries || d); auditHistory.next = d && d.next_cursor || ""; }));
+      jobs.push(request("/api/v1/audit/logs" + auditScopeQuery).then(function (d) { if (auditScopeQuery !== auditQuery()) return; state.audit = arrayOf(Array.isArray(d) ? d : d && d.entries); auditHistory.next = d && d.next_cursor || ""; }));
       jobs.push(request("/api/v1/events?limit=200").then(function (d) { state.events = arrayOf(d); }));
       jobs.push(request("/api/v1/storage/report").then(function (d) { state.storageReport = d || null; }).catch(function (e) { state.storageReport = { error: e.message || "request failed", status: e.status }; }));
       /* The strip's blocked-flow total; it used to load only on Traffic, so
@@ -11210,7 +11373,9 @@
       });
       if (state.expandedKey && !state.assetByKey[state.expandedKey]) state.expandedKey = "";
       if (state.cursorKey && !state.assetByKey[state.cursorKey]) state.cursorKey = "";
-      if (state.routeKey && !state.assetByKey[state.routeKey]) closeRoute();
+      /* A link stays open through a failed first read; the list has not said
+         the machine is gone. */
+      if (state.routeKey && state.assetsLoaded && !state.assetByKey[state.routeKey]) closeRoute();
 
       /* Do not rebuild the view out from under someone who is typing or has
          text selected - but do keep saying that the data behind it is moving.

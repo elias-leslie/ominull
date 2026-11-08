@@ -322,6 +322,7 @@
       chipRegions.node,
       el("span", { class: "tg-fill" }),
       shown,
+      api.onNetworks ? button("Networks", api.onNetworks, "Name the address ranges on the map") : null,
       clear,
     );
     function toggle(key, value) {
