@@ -247,8 +247,7 @@ static void FollowsAMovedHub(const char *path) {
     assert(setenv("OMINULL_FIXTURE_FAIL", "-j DROP$", 1) == 0);
     FollowHubAddress(&config);
     unsetenv("OMINULL_FIXTURE_FAIL");
-    assert(!strcmp(appliedHubTargets.addresses[0], "198.51.100.8") && appliedHubTargets.count == 1 && g_ForgetApplied);
-    g_ForgetApplied = false;
+    assert(!strcmp(appliedHubTargets.addresses[0], "198.51.100.8") && appliedHubTargets.count == 1 && g_FollowPending.count == 2);
 
     ResetCommands(path);
     FollowHubAddress(&config);
@@ -292,14 +291,13 @@ static void FollowsAMovedHub(const char *path) {
     FollowHubAddress(&config);
     unsetenv("OMINULL_FIXTURE_FAIL");
     unsetenv("OMINULL_FIXTURE_FAIL_CODE");
-    assert(appliedHubTargets.count == 2 && g_ForgetApplied);
+    assert(appliedHubTargets.count == 2 && g_FollowPending.count == 3);
     strcpy(config.hub_url, "ftp://host");
     ResetCommands(path);
     FollowHubAddress(&config);
     data = ReadCommands(path);
     assert(strstr(data, "198.51.100.53") && strstr(data, "198.51.100.10") && appliedHubTargets.count == 3);
-    assert(!g_FollowPending.count);
-    g_ForgetApplied = false;
+    assert(!g_FollowPending.count && !g_ForgetApplied);
 
     known = false;
     appliedIsolated = false;

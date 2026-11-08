@@ -105,10 +105,47 @@ static ULONG Set6(PMIB_TCP6ROW row, TCP_ESTATS_TYPE type, PUCHAR rw,
 #define SetPerTcpConnectionEStats Set4
 #define SetPerTcp6ConnectionEStats Set6
 #define GetExtendedTcpTable FixtureTable
+#define Wfp_ApplyState FixtureApply
 #include "../src/service.c"
+static unsigned applied_calls;
+static OMINULL_HUB_TARGETS applied_hub;
+DWORD FixtureApply(const OMINULL_HUB_TARGETS *hub, int isolate, const char *const *blockedIPs, int blockedCount,
+                   const char *const *allowIPs, int allowCount, const OMINULL_BASELINE_RULE *baseline,
+                   int baselineCount, int anyDhcp) {
+    (void)blockedIPs, (void)blockedCount, (void)allowIPs, (void)allowCount, (void)baseline, (void)baselineCount, (void)anyDhcp;
+    assert(isolate && hub);
+    applied_calls++;
+    applied_hub = *hub;
+    return ERROR_SUCCESS;
+}
+/* A silent hub is followed answer after answer: a beat with no reply goes through
+ * SyncEnforcement too, and it must not stop the next one. Each new address joins the
+ * old ones limited. */
+static void KeepsFollowingAMovedHub(void) {
+    AGENT_CONFIG config;
+    memset(&config, 0, sizeof(config));
+    known = appliedIsolated = engineReady = engineTried = true;
+    memset(&appliedHubTargets, 0, sizeof(appliedHubTargets));
+    strcpy(appliedHubTargets.addresses[0], "198.51.100.8");
+    appliedHubTargets.count = 1;
+    appliedHubTargets.port = 443;
+    strcpy(config.hub_url, "https://198.51.100.9:443");
+    FollowHubAddress(&config);
+    assert(applied_calls == 1 && appliedHubTargets.count == 2 && !applied_hub.agent_only[0] && applied_hub.agent_only[1]);
+    FollowHubAddress(&config);
+    assert(applied_calls == 1);
+    SyncEnforcement(&config, "");
+    assert(known);
+    strcpy(config.hub_url, "https://198.51.100.10:443");
+    FollowHubAddress(&config);
+    assert(applied_calls == 2 && appliedHubTargets.count == 3 && !strcmp(applied_hub.addresses[2], "198.51.100.10"));
+    known = appliedIsolated = false;
+    memset(&appliedHubTargets, 0, sizeof(appliedHubTargets));
+}
 int main(void) {
     WSADATA data;
     assert(WSAStartup(MAKEWORD(2, 2), &data) == 0);
+    KeepsFollowingAMovedHub();
     OMINULL_EVENT events[64];
     size_t count = PollTCPObservations(events, 64);
     unsigned v4 = 0, v6 = 0;

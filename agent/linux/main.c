@@ -2034,7 +2034,8 @@ static int appliedThreatCount = 0;
 static BASELINE_RULE appliedBaseline[MAX_BASELINE_RULES];
 static int appliedBaselineCount = 0;
 static bool g_ForgetApplied = false;
-/* A followed list a failed or partial rebuild hasn't finished writing. */
+/* A followed list a failed or partial rebuild hasn't finished writing: tried every
+ * beat, hub or no hub, until it lands or a rebuild from policy replaces it. */
 static OMINULL_HUB_TARGETS g_FollowPending;
 static bool g_DeadmanReleased = false;
 
@@ -2073,7 +2074,6 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     if (g_ForgetApplied) {
         known = false;
         g_ForgetApplied = false;
-        g_FollowPending.count = 0;
     }
 
     const char* p = strstr(respJson, "\"is_isolated\":");
@@ -2095,7 +2095,8 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     int threatCount = ParseAddressList(respJson, "threat_indicators", threats, MAX_QUARANTINED_PEERS);
     {
         /* Unsigned indicators: public addresses only, never a local resolver
-         * (the hub's own addresses are permitted ahead of any drop). */
+         * (the hub's own addresses are permitted ahead of any drop, bar one
+         * followed on a lookup alone). */
         char resolvers[8][64];
         int nres = LocalResolvers(resolvers, 8);
         int kept = 0;
@@ -2150,6 +2151,7 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
         if (!g_PermitsMissing) g_ApplyNote = "";
         return;
     }
+    g_FollowPending.count = 0;
 
     OMINULL_HUB_TARGETS hubTargets = {0};
     bool haveHub = OminullResolveHub(config->hub_url, &hubTargets);
@@ -2259,7 +2261,10 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
  * rebuilds from a fresh lookup as ever.
  * Needs rules this run built: after a restart the lists aren't known. */
 static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
-    if (!known || !appliedIsolated || appliedHubTargets.count == 0) return;
+    if (!known || !appliedIsolated || appliedHubTargets.count == 0) {
+        g_FollowPending.count = 0;
+        return;
+    }
     OMINULL_HUB_TARGETS next = appliedHubTargets;
     if (g_FollowPending.count) {
         /* First, as the permit lost may be the one that lets the lookup work. */
@@ -2279,7 +2284,6 @@ static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
     /* One family may hold the new rules: the hub's next answer rebuilds whatever
      * happens here, and the next beat tries again if it doesn't come. */
     if (!built) {
-        g_ForgetApplied = true;
         g_FollowPending = next;
         printf("[-] The hub's address changed to %s but the firewall refused the new rules; "
                "trying again next beat.\n", moved);
@@ -2289,8 +2293,15 @@ static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
     printf("[!] Isolated, and the hub isn't answering at its old address: it now resolves to %s, "
            "so this agent may try it too.\n", moved);
     fflush(stdout);
+    for (int i = 0; i < appliedPeerCount + appliedThreatCount; i++) {
+        const char *block = i < appliedPeerCount ? appliedPeers[i] : appliedThreats[i - appliedPeerCount];
+        if (OminullHubTargetsHas(&next, block) && !OminullHubTargetsHas(&appliedHubTargets, block)) {
+            printf("[-] The hub's new address %s is blocked on this host, so the agent can't reach it there. "
+                   "The block stays; a local administrator can run --cleanup.\n", block);
+            fflush(stdout);
+        }
+    }
     if (g_PermitsRetry) {               /* a held lock passes; rebuild next beat */
-        g_ForgetApplied = true;
         g_FollowPending = next;
         return;
     }
@@ -3409,7 +3420,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         SyncEnforcement(config, respBuf);
         ProcessResponseOffers(config, respBuf);
     }
-    if (!accepted) FollowHubAddress(config);
+    if (!accepted || g_FollowPending.count) FollowHubAddress(config);
     HubContact(accepted);
     UPLOAD_LOSS loss = {0};
     if (accepted) {
