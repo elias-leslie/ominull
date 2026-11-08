@@ -26,6 +26,8 @@ DIST_DIR="${OMINULL_DIST_DIR:-${ROOT_DIR}/dist}"
 VERSION="${OMINULL_RELEASE_VERSION:-$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")}"
 # shellcheck source=lib/signing-backend.sh
 . "${SCRIPT_DIR}/lib/signing-backend.sh"
+# shellcheck source=lib/native-sign.sh
+. "${SCRIPT_DIR}/lib/native-sign.sh"
 
 agent_deb="${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb"
 hub_deb="${DIST_DIR}/ominull-hub_${VERSION}_amd64.deb"
@@ -34,6 +36,12 @@ packages=("${agent_deb}" "${hub_deb}" "${windows_msi}")
 for pkg in "${packages[@]}"; do
     [ -f "${pkg}" ] || { echo "[-] Missing $(basename "${pkg}"); run scripts/build-packages.sh first." >&2; exit 1; }
 done
+
+# Native signatures change the bytes, so they go on before the release key signs.
+echo "[*] Applying platform-native signatures..."
+native_sign_deb "${agent_deb}"
+native_sign_windows "${windows_msi}"
+native_check_msi_contents "${windows_msi}"
 
 # One signing session for the whole release: the endpoint packages by digest, the hub
 # by name (it is rebuilt below with the endpoint signatures inside).
@@ -88,6 +96,7 @@ done
 bundled_hub="${bundle_dir}/ominull-hub_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "${bundle_dir}/root" "${bundled_hub}" >/dev/null
 mv "${bundled_hub}" "${hub_deb}"
+native_sign_deb "${hub_deb}"
 
 echo "[*] Signing bundled hub package..."
 sign_package "${hub_deb}"

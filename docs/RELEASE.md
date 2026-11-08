@@ -33,7 +33,8 @@ ln -s "$PWD/.dev-tools" DIR/.dev-tools   # st browser writes its results to the 
 2. `scripts/build-packages.sh` builds the agents and hub and the three native
    packages, and checks ownership and writable modes.
 3. `scripts/sign-release.sh` signs every package and sidecar with the release key
-   and bundles the signed endpoint packages into the hub package.
+   and bundles the signed endpoint packages into the hub package. Platform-native
+   signatures (below) go on first, so the release key covers the final bytes.
 4. The fresh-install check (`TestPublishedPackagesVerifyForFreshInstall`) runs both
    bootstrap scripts' verification on `dist/`; `scripts/test-package-lifecycle.sh`
    runs install, upgrade, downgrade refusal, remove, reinstall and purge in an
@@ -41,6 +42,23 @@ ln -s "$PWD/.dev-tools" DIR/.dev-tools   # st browser writes its results to the 
 5. `scripts/deploy-hub.sh`, then `scripts/publish-agents.sh`.
 6. `scripts/update-linux-agents.sh` installs on the Linux machines.
 7. The hub rolls the Windows agents, canaries first when named.
+
+Platform-native signing is optional and sits under the release signature, which is
+what agents and installers check. Authenticode covers the Windows executables and
+the MSI, so Windows and SmartScreen can name the publisher; a debsigs origin
+signature covers the Debian packages. Set `OMINULL_AUTHENTICODE_COMMAND` (a token,
+HSM or signing service that timestamps for itself) or `OMINULL_AUTHENTICODE_PFX`,
+`OMINULL_AUTHENTICODE_PASSFILE` and `OMINULL_AUTHENTICODE_TIMESTAMP_URL`; and
+`OMINULL_DEB_GPG_KEY`. `OMINULL_AUTHENTICODE_CAFILE` names the roots a result is
+verified against when the system's don't include the CA's. Set them for both
+`build-packages.sh` and `sign-release.sh`, which sign the programs and the MSI
+separately; `release.sh` runs both. Needs `osslsigncode`, `msitools` and `gpg`.
+Unset, the packages are left as built and the build says so. Once set, any signing
+or verification failure stops the release, as does a half-made setup or a signed
+MSI holding an unsigned program. A signed build no
+longer matches an unsigned one byte for byte, and a timestamped one differs each
+run, so a reproducibility comparison needs the signing variables unset.
+`scripts/lib/native-sign.sh` holds the details.
 
 When `OMINULL_HUB_URL` or `OMINULL_ADMIN_KEY` is unset, `scripts/lib/hub-admin-key.sh`
 fills them in: the URL from `hub_base_url` in the ignored

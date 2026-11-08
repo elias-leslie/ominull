@@ -149,7 +149,7 @@ Ominull separates operational concerns into three independent, non-interchangeab
   - **Artifact name pinned:** the statement must name the agent's own artifact (`ominull-agent-windows-<version>.msi`), so a signed hub package or another platform's package is never installed as an agent update.
   - **No downgrades:** the agent installs only a strictly newer version than it runs, and only with a signed `agent_update` grant naming that version, so an older, genuinely signed package cannot be replayed onto the fleet.
   - **Signing custody:** `scripts/sign-release.sh` has swappable backends: `file` (including an AES-256 encrypted PEM on removable media, written by `scripts/release-key-offline.sh`) and `command` (a token or HSM that never exports the key). Manifests are signed by the separate policy key, never the release key; the release key also signs each tenant's trust bundle (`scripts/sign-trust-bundle.sh`, same backends). `release-key-offline.sh export` refuses a destination on the key's or the root filesystem (device ids).
-  - Package builds require byte-for-byte reproducibility against published SHA-256 release manifests.
+  - Package builds require byte-for-byte reproducibility against published SHA-256 release manifests, with platform-native signing unset (`docs/RELEASE.md`); a native signature changes the bytes.
 
 ---
 

@@ -6,6 +6,8 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 BUILD_DIR="${ROOT_DIR}/build"
 VERSION="${OMINULL_RELEASE_VERSION:-$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")}"
+# shellcheck source=lib/native-sign.sh
+. "${SCRIPT_DIR}/lib/native-sign.sh"
 
 case "${VERSION}" in
     ''|*[!0-9.]*|.*|*.)
@@ -69,11 +71,14 @@ fi
 # Reproducible: the helper's workspace root (screen/Cargo.toml) keeps the wire
 # path dependency's hash relative, the remaps strip the checkout and cargo home
 # paths rustc embeds, and the linker leaves out the PE timestamp, so the same
-# commit gives the same SHA-256 from any checkout.
+# commit gives the same SHA-256 from any checkout (unless native signing is on).
 (cd "${ROOT_DIR}/screen/helper" && \
     RUSTFLAGS="--remap-path-prefix=${ROOT_DIR}=/ominull --remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=/cargo -C link-arg=-Wl,--no-insert-timestamp" \
     cargo build --release --locked --offline --target x86_64-pc-windows-gnu)
 cp "${ROOT_DIR}/screen/target/x86_64-pc-windows-gnu/release/ominull-screen-helper.exe" "${BUILD_DIR}/ominull-screen-helper.exe"
+# Signed before hashing: the agent pins the helper's digest, so it must be the
+# digest of the file the MSI ships.
+native_sign_windows "${BUILD_DIR}/ominull-screen-helper.exe"
 SCREEN_HELPER_SHA256="$(sha256sum "${BUILD_DIR}/ominull-screen-helper.exe" | cut -d' ' -f1)"
 
 echo "[*] Building Windows user-mode agent and recovery tool."
@@ -170,6 +175,8 @@ for deb in "${DIST_DIR}/ominull-agent_${VERSION}_amd64.deb" "${DIST_DIR}/ominull
 done
 
 echo "[*] Packaging Windows MSI."
+native_sign_windows "${BUILD_DIR}/ominulld.exe"
+native_sign_windows "${BUILD_DIR}/ominull_wfp_user.exe"
 wixl --arch x64 \
     -o "${DIST_DIR}/ominull-agent-windows-${VERSION}.msi" \
     <(sed -e "s|@VERSION@|${VERSION}|g" \

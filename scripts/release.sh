@@ -90,7 +90,7 @@ if [ "${DO_HUB}" -eq 1 ]; then
             built_from="${last_sha}"
         fi
         shipped="$(git -C "${ROOT_DIR}" diff --name-only "${built_from}" HEAD -- agent packaging screen \
-            scripts/build.sh scripts/build-packages.sh scripts/build-linux-agent.sh scripts/build-bpf.sh scripts/build-hub-input.sh \
+            scripts/build.sh scripts/build-packages.sh scripts/lib/native-sign.sh scripts/build-linux-agent.sh scripts/build-bpf.sh scripts/build-hub-input.sh \
             ':(exclude)*_test.go' ':(exclude)agent/tests' ':(exclude,glob)hub/**/testdata/**' ':(exclude)*.md')"
         if [ -z "${shipped}" ]; then
             echo "[-] Nothing the agents ship has changed since ${last_name}; nothing to release (a hub change: scripts/deploy-hub.sh)." >&2
@@ -143,8 +143,9 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     bash "${ROOT_DIR}/scripts/test-release-batching.sh"
     bash "${ROOT_DIR}/scripts/test-install-agent-deb.sh"
     bash "${ROOT_DIR}/scripts/test-update-linux-agents.sh"
+    bash "${ROOT_DIR}/scripts/test-native-sign.sh"
     # bash -n reads only its first file.
-    for script in build-packages.sh sign-release.sh sign-trust-bundle.sh update-linux-agents.sh lib/install-agent-deb.sh \
+    for script in build-packages.sh sign-release.sh lib/native-sign.sh sign-trust-bundle.sh update-linux-agents.sh lib/install-agent-deb.sh \
         deploy-hub.sh publish-agents.sh pve/install.sh lib/hub-admin-key.sh retire-macos-agent.sh retire-hub-host-agent.sh \
         test-package-lifecycle.sh; do
         bash -n "${ROOT_DIR}/scripts/${script}"
