@@ -62,6 +62,14 @@ expect "${passed}" # an agent change goes out at once, however recent the last r
 echo 'int wip;' > agent/wip.c
 expect "Uncommitted files would ship" # another session's work in a shared checkout
 rm agent/wip.c
+mkdir -p hub/cmd && printf 'defaultAgentVersion = "1.0.1"\nint work;\n' > hub/cmd/main.go
+git add -A && git commit -qm "hub main"
+sed -i 's/int work;/int more;/' hub/cmd/main.go
+expect "Uncommitted files would ship" # one changed line, but not the version
+git checkout -q hub/cmd/main.go
+sed -i 's/1.0.1/1.0.2/' hub/cmd/main.go
+expect "${passed}" # a failed run's version bump does not stop the next
+git checkout -q hub/cmd/main.go
 git add -A
 GIT_COMMITTER_DATE="$(date -d "-2 days" -R)" git commit -q --allow-empty -m "Release 1.0.1: older"
 expect "nothing to release"

@@ -262,6 +262,14 @@ static void test_grants(int64_t now) {
     /* Start from a released host so each step is visible. */
     Trust_LocalRelease(&T);
     expect("local release clears isolation", !T.state.isolated && strcmp(T.state.source, "local") == 0);
+    {
+        /* Another process recorded it: the running agent reads the file once. */
+        TrustContext running = T;
+        running.state.isolated = true;
+        expect("the running agent is told once", Trust_TakeLocalRelease(&running) && !running.state.isolated
+               && strcmp(running.state.source, "local") == 0);
+        expect("and only once", !Trust_TakeLocalRelease(&running));
+    }
 
     one(now, FX_G_ISO_EXPIRED);
     expect("expired grant refused", !T.state.isolated && refused_with("expired"));

@@ -886,6 +886,26 @@ static void FollowHubAddress(const AGENT_CONFIG *config) {
     g_HubPeerResolved = true;
 }
 
+/* ReinstateIsolation: filters are gone after a reboot, and the hub may not be there to
+ * say so again. With no answer, the authorized state alone puts them back. A dead-man
+ * release stands until the hub answers. */
+static void ReinstateIsolation(const AGENT_CONFIG* config) {
+    if (known || g_DeadmanNote[0] || !Agent_TrustIsolated()) return;
+    SyncEnforcement(config, "{\"is_isolated\":true}");
+}
+
+/* VerifyRulesInForce: whatever SyncEnforcement built may since have been removed, and
+ * comparing the hub's answer with memory would never notice. Asked every 12th flush. */
+static void VerifyRulesInForce(void) {
+    static unsigned flushes = 0;
+    if (++flushes % 12 != 0 || !known || !appliedIsolated || !engineReady) return;
+    if (Wfp_IsolationInForce() != 0) return;
+    printf("[!] This host's filtering engine no longer holds the isolation this agent put there; "
+           "putting it back.\n");
+    fflush(stdout);
+    known = false;
+}
+
 static void HubContact(bool accepted) {
     static int64_t missedMs = 0, lastMissMs = 0;
 
@@ -1010,6 +1030,8 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             char* reply = hubResponse ? hubResponse : hubResponseFallback;
             size_t replyCap = hubResponse ? HUB_REPLY_BYTES : sizeof(hubResponseFallback);
             reply[0] = '\0';
+            if (Agent_TrustTakeLocalRelease()) known = false;
+            VerifyRulesInForce();
             uint64_t lostTcp = 0, lostUdp = 0;
             bool accepted = Hub_SendTelemetryBatch(config, eventBatch, batchCount,
                                                    reply, replyCap, &lostTcp, &lostUdp);
@@ -1019,6 +1041,7 @@ void RunAgentLoop(AGENT_CONFIG* config) {
             g_TCPDrops += lostTcp;
             batchCount = 0;
             lastFlush = now;
+            if (!accepted) ReinstateIsolation(config);
             if (!accepted) FollowHubAddress(config);
             HubContact(accepted);
 

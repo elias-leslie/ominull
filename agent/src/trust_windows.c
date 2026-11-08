@@ -143,6 +143,10 @@ int Agent_TrustRepin(void) {
     return g_TrustLoaded ? Trust_Repin(&g_Trust) : 0;
 }
 
+bool Agent_TrustTakeLocalRelease(void) {
+    return g_TrustLoaded && Trust_TakeLocalRelease(&g_Trust);
+}
+
 bool Agent_TrustLocalRelease(void) {
     return g_TrustLoaded && g_Trust.state.exists && Trust_LocalRelease(&g_Trust);
 }

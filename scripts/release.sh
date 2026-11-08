@@ -101,7 +101,9 @@ if [ "${DO_HUB}" -eq 1 ]; then
     # unfinished work would ship. A failed run leaves its one-line version bumps.
     dirty="$(git -C "${ROOT_DIR}" status --porcelain -- agent hub packaging packages screen scripts)"
     for f in agent/include/agent.h agent/linux/main.c hub/cmd/main.go; do
-        if [ "$(git -C "${ROOT_DIR}" diff --numstat -- "${f}" | cut -f1,2)" = "$(printf '1\t1')" ]; then
+        if [ "$(git -C "${ROOT_DIR}" diff --numstat -- "${f}" | cut -f1,2)" = "$(printf '1\t1')" ] &&
+            # Only the version line: any other one-line change is someone's work.
+            ! git -C "${ROOT_DIR}" diff -U0 -- "${f}" | grep -E '^[-+][^-+]' | grep -qvE 'VERSION|defaultAgentVersion'; then
             dirty="$(printf '%s\n' "${dirty}" | grep -vF " ${f}" || true)"
         fi
     done
@@ -142,6 +144,7 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
     python3 "${ROOT_DIR}/scripts/test-release-convergence.py"
     bash "${ROOT_DIR}/scripts/test-release-batching.sh"
     bash "${ROOT_DIR}/scripts/test-install-agent-deb.sh"
+    bash "${ROOT_DIR}/scripts/test-deploy-hub-rollback.sh"
     bash "${ROOT_DIR}/scripts/test-update-linux-agents.sh"
     bash "${ROOT_DIR}/scripts/test-posture-collect.sh"
     bash "${ROOT_DIR}/scripts/test-native-sign.sh"
@@ -194,7 +197,8 @@ if [ "${DO_HUB}" -eq 1 ] && [ "${SKIP_TESTS}" -eq 0 ]; then
         -o "${ROOT_DIR}/build/test_cert_renewal" "${ROOT_DIR}/agent/tests/test_cert_renewal.c"
     "${ROOT_DIR}/build/test_cert_renewal"
     echo "[*] Replaying the hub-input fuzz seeds and fixed crashes under ASan/UBSan."
-    "${ROOT_DIR}/scripts/fuzz-agent.sh" --regress
+    # With the Rust library switched in, as the agent ships.
+    FUZZ_HUB_INPUT=1 "${ROOT_DIR}/scripts/fuzz-agent.sh" --regress
     echo "[*] Comparing the Rust hub-input library with the C readers, and running the agent tests on it."
     "${ROOT_DIR}/scripts/test-agent-hub-input.sh"
 fi

@@ -275,6 +275,7 @@ int Agent_TrustReleaseStatement(const char* package, const char* version, const 
 size_t Agent_TrustBase64Decode(const char* in, unsigned char* out, size_t cap);
 int Agent_TrustRepin(void);
 bool Agent_TrustLocalRelease(void);
+bool Agent_TrustTakeLocalRelease(void);
 bool Agent_TrustArtifactName(const char* version, char* out, size_t cap);
 /* Agent_TrustRules copies the authorized isolation's exceptions (none when
  * not isolated). */

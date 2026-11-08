@@ -2122,7 +2122,22 @@ static inline bool Trust_LocalRelease(TrustContext* t) {
     t->state.allowCount = 0;
     for (int i = 0; i < t->state.meshCount; i++) t->state.mesh[i].on = false;
     snprintf(t->state.source, sizeof(t->state.source), "local");
-    return Trust_SaveState(t);
+    if (!Trust_SaveState(t)) return false;
+    /* The running agent holds the old state in memory and would write it back and
+     * re-apply it, so this tells it to read the file again. */
+    char path[260];
+    Trust_Path(t, true, "local-release", path, sizeof(path));
+    return Trust_WriteFile(t, path, "1\n", true);
+}
+
+/* Trust_TakeLocalRelease: true once after another process recorded a local
+ * release; this process's state then matches the file. */
+static inline bool Trust_TakeLocalRelease(TrustContext* t) {
+    char path[260];
+    Trust_Path(t, true, "local-release", path, sizeof(path));
+    if (!Trust_PathExists(path)) return false;
+    Trust_LoadState(t);
+    return remove(path) == 0;
 }
 
 /* Release statement: what the release key signs besides the package bytes,

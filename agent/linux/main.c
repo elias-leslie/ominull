@@ -2350,6 +2350,44 @@ static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
     appliedHubTargets = next;
 }
 
+/* ReinstateIsolation: an isolation lives in the kernel only until a reboot or a
+ * firewall flush, and the hub may not be there to say so again. With no answer, the
+ * authorized state alone puts it back. A dead-man release stands until the hub answers. */
+static void ReinstateIsolation(const LINUX_AGENT_CONFIG* config) {
+    if (known || g_DeadmanReleased || !Trust_EffectiveIsolated(&g_Trust)) return;
+    SyncEnforcement(config, "{\"is_isolated\":true}");
+}
+
+/* VerifyRulesInForce: whatever SyncEnforcement built may since have been flushed, and
+ * comparing the hub's answer with memory would never notice. Asked every 10th beat. */
+static void VerifyRulesInForce(void) {
+    static unsigned beats = 0;
+    if (++beats % 10 != 0 || !known || !(appliedIsolated || appliedPeerCount || appliedThreatCount)) return;
+    const char* tools[] = { "iptables", "ip6tables" };
+    bool lost = false;
+    for (int i = 0; i < 2 && !lost; i++) {
+        if (NoIPv6Here(tools[i])) continue;
+        int out = HookState(tools[i], "OUTPUT", OMINULL_CHAIN_OUT);
+        const char* chain = OMINULL_CHAIN_OUT;
+        if (out == 0) {         /* a failed promote leaves the rules under the other name */
+            out = HookState(tools[i], "OUTPUT", OMINULL_NEXT_OUT);
+            chain = OMINULL_NEXT_OUT;
+        }
+        int in = HookState(tools[i], "INPUT", OMINULL_CHAIN_IN);
+        if (in == 0) in = HookState(tools[i], "INPUT", OMINULL_NEXT_IN);
+        lost = out == 0 || in == 0;
+        if (!lost && out == 1 && appliedIsolated) {
+            const char* deny[] = { tools[i], "-C", chain, "-j", "DROP", NULL };
+            int rc = RunFw(deny);
+            lost = rc != 0 && FwSaysAbsent(rc);
+        }
+    }
+    if (!lost) return;
+    printf("[!] This host's firewall no longer holds the rules this agent put there; putting them back.\n");
+    fflush(stdout);
+    known = false;
+}
+
 static void HubContact(bool accepted) {
     static int64_t missedMs = 0, lastMissMs = 0;
 
@@ -3455,6 +3493,8 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
             free(packed);
         }
     }
+    if (Trust_TakeLocalRelease(&g_Trust)) known = false;
+    VerifyRulesInForce();
     bool accepted = false;
     long status = 0;
     if (PostTelemetryBody(config, url, body, bodyLength, gzipped, false, respBuf, respCap, &status) &&
@@ -3470,6 +3510,7 @@ static void SendTelemetryBatch(LINUX_AGENT_CONFIG* config, const LINUX_FLOW_EVEN
         SyncSessionBlocks(respBuf);
         ProcessResponseOffers(config, respBuf);
     }
+    if (!accepted) ReinstateIsolation(config);
     if (!accepted || g_FollowPending.count) FollowHubAddress(config);
     HubContact(accepted);
     UPLOAD_LOSS loss = {0};

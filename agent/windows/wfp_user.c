@@ -833,9 +833,11 @@ int main(int argc, char* argv[]) {
         Wfp_UnisolateHost();
     } else if (strcmp(argv[1], "uninstall") == 0) {
         status = Wfp_UnisolateHost();
-        if (status == ERROR_SUCCESS && !RemoveAgentData()) {
+        if (status != ERROR_SUCCESS) {
+            printf("[-] The isolation could not be lifted (0x%08lx); this host may stay cut off.\n", (unsigned long)status);
+        } else if (!RemoveAgentData()) {
+            /* Left-over files shouldn't block an uninstall; rules left behind should. */
             printf("[-] WFP was cleared but some package-owned agent data could not be removed.\n");
-            status = ERROR_ACCESS_DENIED;
         }
     } else if (strcmp(argv[1], "block-ip") == 0) {
         if (argc < 3) {
@@ -852,6 +854,6 @@ int main(int argc, char* argv[]) {
     }
 
     Wfp_Close();
-    return 0;
+    return status == ERROR_SUCCESS ? 0 : 1;
 }
 #endif /* OMINULL_WFP_EMBEDDED */
