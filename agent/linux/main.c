@@ -2469,8 +2469,8 @@ static int AppendObservations(const LINUX_AGENT_CONFIG* config, char* buf, size_
                     EnforcementEngineStatus(),
                     haveHub ? hubIP : "",
                     haveDHCP ? "dhcp" : "static",
-                    g_ApplyNote[0] ? g_ApplyNote
-                    : rolledBack ? "released by the dead-man timer after losing contact with the hub" : "");
+                    rolledBack ? "released by the dead-man timer after losing contact with the hub"
+                    : g_ApplyNote);
     return off;
 }
 

@@ -1664,7 +1664,7 @@
         observed: observed, uncovered: uncovered,
         readiness: {
           enforcement_engine: "ok", hub_literal: "10.0.4.2", address_origin: "dhcp",
-          last_applied: "clear", reported_at: new Date().toISOString()
+          last_applied: "", reported_at: new Date().toISOString()
         },
         readiness_reported: true
       },
@@ -5900,9 +5900,14 @@
 
     var body = h("div", { cls: "card-body stack" });
 
+    var applied = (res.readiness || {}).last_applied;
+    if (applied) {
+      body.appendChild(h("p", { cls: "note note-crit", role: "alert", text: "From the agent: " + applied,
+        title: "Reported " + (res.readiness.reported_at || "at an unknown time") }));
+    }
     if (info.blocker) body.appendChild(h("p", { cls: "note note-crit", role: "alert", text: info.blocker }));
     else if (info.warning) body.appendChild(h("p", { cls: "note note-warn", role: "alert", text: info.warning }));
-    else body.appendChild(h("p", { cls: "note note-ok", text: "This host reported that it can still be released after an isolation, and the baseline covers everything it is using." }));
+    else if (!applied) body.appendChild(h("p", { cls: "note note-ok", text: "This host reported that it can still be released after an isolation, and the baseline covers everything it is using." }));
 
     body.appendChild(simpleTable(["Permitted", "Destination", "Wire"], wireRows(info.wire, info.always_permitted)));
 

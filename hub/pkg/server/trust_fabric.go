@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"ominull/hub/pkg/storage"
 	"ominull/hub/pkg/trustfabric"
 )
@@ -63,6 +65,9 @@ const (
 	maxAllowEntries = 32
 	// allowPrefixesAgentVersion is the first agent that enforces ranges.
 	allowPrefixesAgentVersion = "1.8.65"
+	// allowPrefixesWindowsVersion is the first Windows agent that does. Earlier
+	// ones report allow_prefixes and then drop every range without a word.
+	allowPrefixesWindowsVersion = "1.8.120"
 	// addressOnlyMaxRange is the biggest range spelled out as addresses for an
 	// agent that takes no ranges; the agent's list holds few more than this.
 	addressOnlyMaxRange = 16
@@ -140,10 +145,32 @@ func (s *Server) takesAllowRanges(endpointID string) bool {
 }
 
 func agentTakesAllowRanges(ep *storage.Endpoint) bool {
-	if ep.DriverVersion != "" && compareVersions(ep.DriverVersion, allowPrefixesAgentVersion) < 0 {
+	first := allowPrefixesAgentVersion
+	// Getting this wrong only spells ranges out, so the OS label may stand in
+	// for an agent that does not report its package format.
+	if ep.UpdateCapability == "msi" || strings.Contains(strings.ToLower(ep.OS), "windows") {
+		first = allowPrefixesWindowsVersion
+	}
+	if ep.DriverVersion != "" && compareVersions(ep.DriverVersion, first) < 0 {
 		return false
 	}
 	return parseResponseCapabilities(ep.ResponseCapabilities).AllowPrefixes
+}
+
+// recordApplyReport audits a change in what the agent says about its last
+// enforcement: a grant the hub signed may not be what the host is doing. A
+// report can end because the fault is fixed or because a dead-man release was
+// followed by the hub's answer, so the closing row says only that it ended.
+func (s *Server) recordApplyReport(ep *storage.Endpoint, prev, note string) {
+	if prev == note {
+		return
+	}
+	details := note
+	if note == "" {
+		details = "no longer reporting: " + prev
+	}
+	_ = s.store.RecordAudit(storage.AuditEntry{ID: uuid.New().String(), TenantID: ep.TenantID, Username: "agent", Action: "AGENT_APPLY_REPORT",
+		Resource: ep.ID, Details: details, Timestamp: time.Now().UTC()})
 }
 
 // allowRangesProblem refuses ranges for an agent that would reject the grant.
@@ -526,6 +553,13 @@ func (s *Server) handleTrustEffective(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{"endpoint_id": id, "policy": p}
+	// The lists above are what the hub would sign; this is what the agent said
+	// about the last one it tried to apply.
+	if ep, err := s.store.GetEndpoint(id); err == nil && ep != nil {
+		if note, err := s.store.LastAppliedReport(ep.ID); err == nil && note != "" {
+			resp["agent_report"] = note
+		}
+	}
 	if raw := strings.TrimSpace(q.Get("addr")); raw != "" {
 		addr, err := netip.ParseAddr(raw)
 		if err != nil {

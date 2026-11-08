@@ -102,8 +102,13 @@ func (s *Server) ingestTelemetry(r *http.Request, tenantID string, batch Telemet
 		return nil, fmt.Errorf("record endpoint certificate identity: %w", err)
 	}
 	if batch.Readiness != nil {
+		batch.Readiness.LastApplied = storage.CleanApplyNote(batch.Readiness.LastApplied)
+		prevNote, prevErr := s.store.LastAppliedReport(batch.EndpointID)
 		if err := s.store.SetEndpointObservations(batch.EndpointID, batch.ObservedServices, *batch.Readiness); err != nil {
 			return nil, fmt.Errorf("record endpoint readiness: %w", err)
+		}
+		if prevErr == nil {
+			s.recordApplyReport(persisted, prevNote, batch.Readiness.LastApplied)
 		}
 	}
 

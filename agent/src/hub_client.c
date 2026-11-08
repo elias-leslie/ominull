@@ -30,6 +30,9 @@ typedef struct {
     BOOL isHttps;
 } HUB_HTTP_CONTEXT;
 
+/* Room left for the readiness object after the observed services. */
+#define OBSERVATION_TAIL_RESERVE 512
+
 static HUB_HTTP_CONTEXT g_http;
 static INIT_ONCE g_httpInit = INIT_ONCE_STATIC_INIT;
 
@@ -323,11 +326,11 @@ static int AppendObservations(const AGENT_CONFIG* config, char* buf, size_t cap)
             }
         }
         if (rc == NO_ERROR) {
-            for (IP_ADAPTER_ADDRESSES* a = aa; a && off < (int)cap - 256; a = a->Next) {
+            for (IP_ADAPTER_ADDRESSES* a = aa; a && off < (int)cap - OBSERVATION_TAIL_RESERVE; a = a->Next) {
                 if (a->OperStatus != IfOperStatusUp) continue;
                 if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
                 for (IP_ADAPTER_DNS_SERVER_ADDRESS* d = a->FirstDnsServerAddress;
-                     d && off < (int)cap - 256; d = d->Next) {
+                     d && off < (int)cap - OBSERVATION_TAIL_RESERVE; d = d->Next) {
                     char ip[64] = {0};
                     if (getnameinfo(d->Address.lpSockaddr, d->Address.iSockaddrLength,
                                     ip, sizeof(ip), NULL, 0, NI_NUMERICHOST) != 0) continue;
@@ -351,7 +354,7 @@ static int AppendObservations(const AGENT_CONFIG* config, char* buf, size_t cap)
         IP_ADAPTER_INFO* info = (IP_ADAPTER_INFO*)malloc(infoSize);
         if (info) {
             if (GetAdaptersInfo(info, &infoSize) == NO_ERROR) {
-                for (IP_ADAPTER_INFO* a = info; a && off < (int)cap - 256; a = a->Next) {
+                for (IP_ADAPTER_INFO* a = info; a && off < (int)cap - OBSERVATION_TAIL_RESERVE; a = a->Next) {
                     if (!a->DhcpEnabled) continue;
                     const char* server = a->DhcpServer.IpAddress.String;
                     if (!server || !server[0] || strcmp(server, "0.0.0.0") == 0) continue;

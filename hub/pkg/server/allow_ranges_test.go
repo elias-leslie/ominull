@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -87,4 +90,99 @@ func TestAllowRangesNeedAnAgentThatEnforcesThem(t *testing.T) {
 	if w := postJSON(t, srv, "/api/v1/endpoints/isolate-bulk", `{"scope":"ids","ids":["pos-new"],"allow_ips":["10.0.8.0/22"]}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("bulk range: %d %s", w.Code, w.Body.String())
 	}
+}
+
+// Windows agents before 1.8.120 report allow_prefixes and drop every range, so
+// the hub spells ranges out for them; from 1.8.120 they take the range.
+func TestWindowsAgentsTakeRangesFrom1_8_120(t *testing.T) {
+	t.Parallel()
+	caps := `{"isolate":true,"allow_prefixes":true}`
+	for _, c := range []struct {
+		ep   storage.Endpoint
+		want bool
+	}{
+		{storage.Endpoint{UpdateCapability: "msi", DriverVersion: "1.8.119", ResponseCapabilities: caps}, false},
+		{storage.Endpoint{UpdateCapability: "msi", DriverVersion: "1.8.120", ResponseCapabilities: caps}, true},
+		{storage.Endpoint{OS: "Windows 11", DriverVersion: "1.8.65", ResponseCapabilities: caps}, false},
+		{storage.Endpoint{OS: "Linux", UpdateCapability: "deb", DriverVersion: "1.8.65", ResponseCapabilities: caps}, true},
+		{storage.Endpoint{OS: "Linux", DriverVersion: "1.8.64", ResponseCapabilities: caps}, false},
+	} {
+		if got := agentTakesAllowRanges(&c.ep); got != c.want {
+			t.Errorf("%s %s: got %v", c.ep.OS+c.ep.UpdateCapability, c.ep.DriverVersion, got)
+		}
+	}
+}
+
+// What an agent says it could not apply is audited once per change, through the
+// real telemetry path, and shown next to the policy the hub would sign.
+func TestAgentApplyReportIsAuditedAndShown(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	seedEndpointRow(t, store, storage.Endpoint{ID: "rep-1", TenantID: "t-rep", ResponseCapabilities: `{"isolate":true}`})
+	report := func(note string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"type": "telemetry", "endpoint_id": "rep-1", "hostname": "host-rep-1", "os": "Linux", "events": []any{},
+			"isolation_readiness": map[string]any{"enforcement_engine": "ok", "hub_literal": "10.0.0.2", "last_applied": note}})
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/events", bytes.NewReader(body))
+		r.Header.Set(deviceCredentialHeader, issueTestCredential(t, store, "rep-1"))
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("telemetry: %d %s", w.Code, w.Body.String())
+		}
+	}
+	rows := func() (out []storage.AuditEntry) {
+		t.Helper()
+		entries, err := store.ListAuditLogs("", 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.Action == "AGENT_APPLY_REPORT" && e.Resource == "rep-1" {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	report("")
+	if n := len(rows()); n != 0 {
+		t.Fatalf("nothing to say was audited: %d", n)
+	}
+	note := "policy not applied: WFP error 0x00000005"
+	report(note)
+	report(note)
+	got := rows()
+	if len(got) != 1 || got[0].Details != note || got[0].TenantID != "t-rep" {
+		t.Fatalf("one report wanted: %+v", got)
+	}
+	for _, id := range []string{"rep-1", "host-rep-1"} {
+		w := httptest.NewRecorder()
+		srv.handleTrustEffective(w, httptest.NewRequest("GET", "/api/v1/trust/effective?endpoint_id="+id, nil))
+		if !strings.Contains(w.Body.String(), note) {
+			t.Fatalf("effective by %s: %s", id, w.Body.String())
+		}
+	}
+	report("")
+	if got := rows(); len(got) != 2 || !strings.HasPrefix(firstRow(got, note), "no longer reporting") {
+		t.Fatalf("the end of a report is a change too: %+v", got)
+	}
+	long := strings.Repeat("x\n", 400)
+	report(long)
+	report(long)
+	if got := rows(); len(got) != 3 {
+		t.Fatalf("a long note must compare equal once stored: %d rows", len(got))
+	}
+	if stored, _ := store.LastAppliedReport("rep-1"); len(stored) != 240 || strings.Contains(stored, "\n") {
+		t.Fatalf("note not bounded: %d bytes", len(stored))
+	}
+}
+
+func firstRow(rows []storage.AuditEntry, not string) string {
+	for _, e := range rows {
+		if e.Details != not {
+			return e.Details
+		}
+	}
+	return ""
 }

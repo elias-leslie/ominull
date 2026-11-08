@@ -30,11 +30,21 @@ static DWORD Abort(HANDLE h) {
     transaction = false;
     return 0;
 }
+/* The range conditions Add was given, to check what the filter says. */
+static FWP_V4_ADDR_AND_MASK seen_v4[8];
+static FWP_V6_ADDR_AND_MASK seen_v6[8];
+static unsigned seen_v4_n, seen_v6_n;
 static DWORD Add(HANDLE h, const FWPM_FILTER0 *f, PSECURITY_DESCRIPTOR sd,
                  UINT64 *id) {
     (void)h;
-    (void)f;
     (void)sd;
+    for (UINT32 i = 0; f && i < f->numFilterConditions; i++) {
+        const FWP_CONDITION_VALUE0 *v = &f->filterCondition[i].conditionValue;
+        if (v->type == FWP_V4_ADDR_MASK && seen_v4_n < 8)
+            seen_v4[seen_v4_n++] = *v->v4AddrMask;
+        if (v->type == FWP_V6_ADDR_MASK && seen_v6_n < 8)
+            seen_v6[seen_v6_n++] = *v->v6AddrMask;
+    }
     (void)id;
     if (++add_calls == fail_add)
         return ERROR_ACCESS_DENIED;
@@ -113,5 +123,21 @@ int main(void) {
     assert(Wfp_CanAllow("2001:db8::7") && Wfp_CanAllow("2001:db8::/48"));
     assert(!Wfp_CanAllow("fe80::1%11") && !Wfp_CanAllow("fe80::/64"));
     assert(!Wfp_CanAllow("example.com") && !Wfp_CanAllow("198.51.100.0/99"));
+    /* The filter has to say the range, in both directions: the IPv4 address and
+     * mask in host order with host bits off, the IPv6 bytes and prefix length. */
+    {
+        const char *ranges[] = {"198.51.100.77/25", "2001:db8:1::/48"};
+        const unsigned char want6[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 1};
+        add_calls = 0;
+        seen_v4_n = seen_v6_n = 0;
+        OMINULL_HUB_TARGETS hub = {.count = 1, .port = 9443, .addresses = {"203.0.113.1"}};
+        assert(Wfp_ApplyState(&hub, 1, NULL, 0, ranges, 2, NULL, 0, 0) == 0);
+        assert(seen_v4_n == 2 && seen_v6_n == 2);
+        for (unsigned i = 0; i < 2; i++) {
+            assert(seen_v4[i].addr == 0xC6336400u && seen_v4[i].mask == 0xFFFFFF80u);
+            assert(seen_v6[i].prefixLength == 48);
+            assert(memcmp(seen_v6[i].addr, want6, 16) == 0);
+        }
+    }
     return 0;
 }

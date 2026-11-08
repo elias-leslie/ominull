@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -162,8 +163,9 @@ type Readiness struct {
 	// AddressOrigin is "dhcp" or "static" - whether the DHCP permit is on the
 	// critical path for this host at all.
 	AddressOrigin string `json:"address_origin,omitempty"`
-	// LastApplied is what the agent read back out of the kernel, not what it
-	// believes it wrote. The distinction is the whole point of the check.
+	// LastApplied is the agent's own word on its last enforcement, empty when
+	// nothing is wrong: an isolation or entry it could not apply, or a dead-man
+	// release. Surfaced by recordApplyReport, trust/effective and the console.
 	LastApplied string    `json:"last_applied,omitempty"`
 	ReportedAt  time.Time `json:"reported_at"`
 }
@@ -474,7 +476,37 @@ func (s *Store) DeleteBaselinePolicy(id string) error {
 // SetEndpointObservations records what an endpoint reports about itself: the
 // services it actually uses, and whether it believes it could still be released
 // after an isolation. Both arrive on the heartbeat the agent already sends.
+// CleanApplyNote bounds an agent's last_applied note: an endpoint is not a
+// trusted author. Notes the agents write are under 160 bytes.
+func CleanApplyNote(note string) string {
+	note = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(note, ""))
+	if r := []rune(note); len(r) > 240 {
+		note = string(r[:240])
+	}
+	return note
+}
+
+// LastAppliedReport returns the endpoint's stored last_applied note.
+func (s *Store) LastAppliedReport(endpointID string) (string, error) {
+	var raw string
+	err := s.db.QueryRow("SELECT COALESCE(readiness,'') FROM endpoints WHERE id = ?", endpointID).Scan(&raw)
+	if err != nil || raw == "" || raw == "null" {
+		return "", err
+	}
+	var r Readiness
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return "", err
+	}
+	return r.LastApplied, nil
+}
+
 func (s *Store) SetEndpointObservations(endpointID string, services []ObservedService, r Readiness) error {
+	r.LastApplied = CleanApplyNote(r.LastApplied)
 	if services == nil {
 		services = []ObservedService{}
 	}
