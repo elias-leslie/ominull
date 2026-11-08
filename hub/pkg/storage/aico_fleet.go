@@ -150,7 +150,7 @@ func (f AicoFleet) Word(hostname string, now time.Time, t DetectionTuning) (Aico
 			}
 			return m, AicoSaysOff
 		}
-		if (m.Intent == "on-demand" || m.Intent == "off") && !m.OffAt.IsZero() &&
+		if m.Intent != "always" && !m.OffAt.IsZero() &&
 			now.Sub(m.OffAt) <= time.Duration(t.AicoFleetOffMemoryHours)*time.Hour {
 			return m, AicoSaysOff
 		}

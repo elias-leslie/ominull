@@ -298,11 +298,11 @@ func TestAMachineJustUpGetsItsGrace(t *testing.T) {
 // A stale view is not acted on: Aico stopped answering, so a machine it last
 // called off may be running. The hub goes back to what it knows.
 func TestAStaleAicoViewFallsBackToPresence(t *testing.T) {
-	no := false
+	no := false // an always-on machine; anything else is remembered as off for a while
 	engine, store := silentEngine(t)
 	now := time.Now().UTC()
 	addEndpoint(t, store, "server", now.Add(-40*time.Minute))
-	if err := store.SaveAicoFleet([]storage.AicoMachine{{Machine: "server", Up: &no}}, now.Add(-time.Hour)); err != nil {
+	if err := store.SaveAicoFleet([]storage.AicoMachine{{Machine: "server", Intent: "always", Up: &no}}, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	engine.SweepSilence(now)
