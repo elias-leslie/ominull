@@ -3,7 +3,6 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 
 ## Now
 ## Next
-- M8 rest: confirm the abuse.ch ThreatFox and URLhaus feeds load once the owner puts an abuse.ch Auth-Key in /etc/ominull/abusech.key on the hub (asked in Aico); decoys, decoy names and planted credentials are live (plan: docs/audit-2026-11-06.md)
 - M12: Go Linux agent only with remote-admin parity, if the owner still wants the rewrite (asked in Aico) (plan: docs/audit-2026-11-06.md)
 - Trust fabric leftovers: never run yet: the live IPv6 rig `test_wfp_ipv6_live.exe` on real Windows, and waiting out a real dead-man timer on either platform. The dead-man counts beats, not time, so a slow beat or a silent resolver stretches it. Moved-hub following on real Windows was proven with a hosts-file answer, not through a resolver in the baseline (plan: docs/TRUST_FABRIC.md)
 ## Later
@@ -13,4 +12,4 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - Phase 3: measured agent move from C to Go, portable Go collector (Windows first), labeled Neri-lab drill harness, time-boxed Velociraptor benchmark
 - Phase 4: business line with paid certs, licensing, multi-tenant and macOS
 - Umbrella direction: a lean sensor-and-response fleet (vault proposal direction-2026-10)
-- Audit leftovers (Nov 8): rerun `scripts/update-linux-agents.sh` when linux-agent-work, linux-blackbox-vault and linux-neri-hunters start
+- Audit leftovers (Nov 8): rerun `scripts/update-linux-agents.sh` when linux-agent-work, linux-blackbox-vault and linux-neri-hunters start; when windows-laptop-85t7ci9j and windows-laptop-tjk0q7df next connect, check they report the engagement profile the hub has signed for them
