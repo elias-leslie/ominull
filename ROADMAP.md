@@ -5,7 +5,6 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 ## Next
 - M5: Aico owns machine inventory, intent and liveness (plan: docs/audit-2026-11-06.md)
 - M8 rest: confirm the abuse.ch ThreatFox and URLhaus feeds load once the owner puts an abuse.ch Auth-Key in /etc/ominull/abusech.key on the hub (asked in Aico); decoys, decoy names and planted credentials are live (plan: docs/audit-2026-11-06.md)
-- M9: Monthly live drill that proves a page reaches the phone (plan: docs/audit-2026-11-06.md)
 - M4, M7: Agent release with one key, Linux updates through Aico fleet; drop the page budget note, legacy settings keys (copilot.config, legacy_agent_auth, byte/hunt repair flags), docs/history and extra keys. M7's Nightshift part is done: dead routes gone, alerts/verdict and agent-builds now under /api/v1/aico/ (plan: docs/audit-2026-11-06.md)
 - M6: Fold the response authority into the hub (owner approved 2026-11-06); with it remove host-script signing (dead nightshift:tap/auto operators) and the unused steward key route (plan: docs/audit-2026-11-06.md)
 - M10-M12: Remote-admin kept everywhere (tidy only), console trim, Go Linux agent only with remote-admin parity (plan: docs/audit-2026-11-06.md)
