@@ -313,6 +313,9 @@ static inline bool Screen_ParsePayloadWindows(const char* json, ScreenSessionPar
     if (!json || !out) return false;
     memset(out, 0, sizeof(*out));
     char operator_raw[256] = {0};
+    /* A repeated member is refused (as in ScreenCanonicalFromOffer), so the
+     * grant digest and this reader never take different values. */
+    bool seen_sid = false, seen_mode = false, seen_tok = false, seen_op = false;
     TermJson j;
     if (!TermJson_Begin(&j, json, strlen(json))) return false;
     for (;;) {
@@ -323,18 +326,26 @@ static inline bool Screen_ParsePayloadWindows(const char* json, ScreenSessionPar
         if (r == 0) break;
         if (r < 0) return false;
         if (TermJson_KeyIs(k, kl, "session_id")) {
+            if (seen_sid) return false;
+            seen_sid = true;
             if (vt != 's' || !TermJson_CopyString(v, vl, out->session_id, sizeof(out->session_id))) return false;
         } else if (TermJson_KeyIs(k, kl, "mode")) {
+            if (seen_mode) return false;
+            seen_mode = true;
             if (vt != 's' || !TermJson_CopyString(v, vl, out->mode, sizeof(out->mode))) return false;
         } else if (TermJson_KeyIs(k, kl, "connect_token")) {
+            if (seen_tok) return false;
+            seen_tok = true;
             if (vt != 's' || !TermJson_CopyString(v, vl, out->connect_token, sizeof(out->connect_token))) return false;
         } else if (TermJson_KeyIs(k, kl, "operator")) {
+            if (seen_op) return false;
+            seen_op = true;
             if (vt != 's' || !TermJson_CopyString(v, vl, operator_raw, sizeof(operator_raw))) return false;
         } else if (TermJson_KeyIs(k, kl, "unattended")) {
-            if (vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false; /* true or absent only */
+            if (out->unattended || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false; /* true or absent only */
             out->unattended = true;
         } else if (TermJson_KeyIs(k, kl, "ask_first")) {
-            if (vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false;
+            if (out->ask_first || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false;
             out->ask_first = true;
         }
     }

@@ -175,12 +175,15 @@ static inline bool TermJson_CopyString(const char* raw, size_t raw_len, char* ou
             case 't': c = '\t'; break;
             case 'u': {
                 if (i + 4 >= raw_len) return false;
-                char hex[5];
-                memcpy(hex, raw + i + 1, 4);
-                hex[4] = '\0';
-                char* end = NULL;
-                long v = strtol(hex, &end, 16);
-                if (!end || *end != '\0' || v <= 0 || v > 0x7f) return false;
+                long v = 0;
+                for (int h = 1; h <= 4; h++) {   /* exactly four hex digits, no sign or space */
+                    char x = raw[i + h];
+                    int d = (x >= '0' && x <= '9') ? x - '0' : (x >= 'a' && x <= 'f') ? x - 'a' + 10
+                          : (x >= 'A' && x <= 'F') ? x - 'A' + 10 : -1;
+                    if (d < 0) return false;
+                    v = v * 16 + d;
+                }
+                if (v <= 0 || v > 0x7f) return false;
                 c = (char)v;
                 i += 4;
                 break;
@@ -253,7 +256,9 @@ static inline bool TermFrame_Parse(const char* json, size_t len, TermInFrame* f)
 static inline bool TermPayload_Parse(const char* json, char* session_id, size_t sid_max, char* program, size_t prog_max,
                                      char* token, size_t tok_max) {
     if (!json) return false;
+    if (!session_id || !program || !token || sid_max == 0 || prog_max == 0 || tok_max == 0) return false;
     session_id[0] = program[0] = token[0] = '\0';
+    bool seen_sid = false, seen_prog = false, seen_tok = false;
     TermJson j;
     if (!TermJson_Begin(&j, json, strlen(json))) return false;
     for (;;) {
@@ -265,18 +270,25 @@ static inline bool TermPayload_Parse(const char* json, char* session_id, size_t 
         if (r < 0) return false;
         char* dst = NULL;
         size_t max = 0;
+        bool* seen = NULL;
         if (TermJson_KeyIs(k, kl, "session_id")) {
             dst = session_id;
             max = sid_max;
+            seen = &seen_sid;
         } else if (TermJson_KeyIs(k, kl, "program")) {
             dst = program;
             max = prog_max;
+            seen = &seen_prog;
         } else if (TermJson_KeyIs(k, kl, "connect_token")) {
             dst = token;
             max = tok_max;
+            seen = &seen_tok;
         }
         if (dst) {
-            if (vt != 's' || !TermJson_CopyString(v, vl, dst, max)) return false;
+            /* A repeated member is refused: the grant check and the worker must
+             * never read different values from one offer. */
+            if (*seen || vt != 's' || !TermJson_CopyString(v, vl, dst, max)) return false;
+            *seen = true;
         }
     }
     return true;

@@ -359,8 +359,7 @@ static void test_screen_canonical_vectors(void) {
 /* 6. Screen-session grant end-to-end: the digest over the canonical subset is
  * verified through VerifyResponseGrant, and a tampered mode/flag is rejected. */
 static bool screen_sign_grant(const char* tmp_dir, const char* key_path, const char* canonical,
-                              const char* mode_kind_unused, ResponseGrant* grant) {
-    (void)mode_kind_unused;
+                              const char* kind, ResponseGrant* grant) {
     int64_t now = (int64_t)time(NULL);
     uint8_t h[32];
     char digest[65];
@@ -372,7 +371,7 @@ static bool screen_sign_grant(const char* tmp_dir, const char* key_path, const c
     strcpy(grant->grant_id, "screen-grant-1");
     strcpy(grant->tenant_id, "default");
     strcpy(grant->endpoint_id, "ep-screen");
-    strcpy(grant->action_kind, "screen_session");
+    strcpy(grant->action_kind, kind ? kind : "screen_session");
     strcpy(grant->action_digest, digest);
     strcpy(grant->operator_id, "admin");
     strcpy(grant->response_session_id, "sess-scr");
@@ -430,6 +429,9 @@ static void test_screen_grant_verification(void) {
 
         const char* extra = "{\"session_id\":\"s1\",\"mode\":\"control\",\"connect_token\":\"tok\",\"unattended\":true}";
         expect("screen injected unattended fails", VerifyResponseGrant(&g, extra, "ep-screen", pub_path), false);
+
+        const char* dup_mode = "{\"session_id\":\"s1\",\"mode\":\"view\",\"mode\":\"control\",\"connect_token\":\"tok\"}";
+        expect("screen repeated mode fails", VerifyResponseGrant(&g, dup_mode, "ep-screen", pub_path), false);
     }
 
     /* Grant digests {"mode":"control","unattended":true}. */
@@ -438,6 +440,61 @@ static void test_screen_grant_verification(void) {
         expect("screen unattended grant + unattended offer verifies", VerifyResponseGrant(&g, with, "ep-screen", pub_path), true);
         const char* without = "{\"session_id\":\"s1\",\"mode\":\"control\",\"connect_token\":\"tok\"}";
         expect("screen unattended mismatch fails", VerifyResponseGrant(&g, without, "ep-screen", pub_path), false);
+    }
+
+    unlink(key_path);
+    unlink(pub_path);
+    rmdir(tmp_dir);
+}
+
+/* 7. Terminal-session grant: the digest is over {"program":...} rebuilt with
+ * the worker's reader, so the program the grant signs is the one that starts.
+ * Before, a strstr scrape took the first "program" text anywhere in the offer
+ * (nested, repeated), while the worker took the top-level, last one. */
+static void test_terminal_grant_verification(void) {
+    char tmp_dir[64] = "/tmp/ominull_test_termkeys_XXXXXX";
+    if (!mkdtemp(tmp_dir)) return;
+    char key_path[128], pub_path[128], gen[512];
+    snprintf(key_path, sizeof(key_path), "%s/ed25519.key", tmp_dir);
+    snprintf(pub_path, sizeof(pub_path), "%s/ed25519.pub", tmp_dir);
+    snprintf(gen, sizeof(gen),
+             "openssl genpkey -algorithm Ed25519 -out %s >/dev/null 2>&1 && "
+             "openssl pkey -in %s -pubout -out %s >/dev/null 2>&1", key_path, key_path, pub_path);
+    if (system(gen) != 0) { rmdir(tmp_dir); expect("terminal keypair generated", false, true); return; }
+
+    ResponseGrant g;
+    char canon[TERMINAL_CANON_MAX];
+    expect("terminal canonical takes the top-level program",
+           TerminalCanonicalFromOffer("{\"session_id\":\"s1\",\"program\":\"/bin/sh\",\"connect_token\":\"t\"}", canon, sizeof(canon)) &&
+               strcmp(canon, "{\"program\":\"/bin/sh\"}") == 0, true);
+    expect("terminal canonical keeps the hub's escaping",
+           TerminalCanonicalFromOffer("{\"program\":\"C:\\\\Windows\\\\cmd.exe\",\"session_id\":\"s\"}", canon, sizeof(canon)) &&
+               strcmp(canon, "{\"program\":\"C:\\\\Windows\\\\cmd.exe\"}") == 0, true);
+    expect("terminal canonical refuses a repeated program",
+           TerminalCanonicalFromOffer("{\"program\":\"/bin/sh\",\"program\":\"/bin/bash\"}", canon, sizeof(canon)), false);
+    expect("terminal canonical refuses a missing program",
+           TerminalCanonicalFromOffer("{\"session_id\":\"s1\",\"x\":{\"program\":\"/bin/sh\"}}", canon, sizeof(canon)), false);
+    expect("terminal canonical refuses a non-string program",
+           TerminalCanonicalFromOffer("{\"program\":[\"/bin/sh\"]}", canon, sizeof(canon)), false);
+    expect("terminal canonical refuses a repeated connect_token",
+           TerminalCanonicalFromOffer("{\"program\":\"/bin/sh\",\"connect_token\":\"a\",\"connect_token\":\"b\"}", canon, sizeof(canon)), false);
+    expect("terminal canonical refuses trailing bytes",
+           TerminalCanonicalFromOffer("{\"program\":\"/bin/sh\"}x", canon, sizeof(canon)), false);
+
+    if (screen_sign_grant(tmp_dir, key_path, "{\"program\":\"/bin/sh\"}", "terminal_session", &g)) {
+        const char* good = "{\"session_id\":\"s1\",\"program\":\"/bin/sh\",\"connect_token\":\"tok\"}";
+        expect("terminal good offer verifies", VerifyResponseGrant(&g, good, "ep-screen", pub_path), true);
+        const char* other = "{\"session_id\":\"s1\",\"program\":\"/bin/bash\",\"connect_token\":\"tok\"}";
+        expect("terminal other program fails", VerifyResponseGrant(&g, other, "ep-screen", pub_path), false);
+        /* The old scrape signed the nested /bin/sh while the worker started /bin/bash. */
+        const char* nested = "{\"x\":{\"program\":\"/bin/sh\"},\"session_id\":\"s1\",\"program\":\"/bin/bash\",\"connect_token\":\"tok\"}";
+        expect("terminal nested program decoy fails", VerifyResponseGrant(&g, nested, "ep-screen", pub_path), false);
+        const char* dup = "{\"session_id\":\"s1\",\"program\":\"/bin/sh\",\"program\":\"/bin/bash\",\"connect_token\":\"tok\"}";
+        expect("terminal repeated program fails", VerifyResponseGrant(&g, dup, "ep-screen", pub_path), false);
+        const char* in_value = "{\"session_id\":\"\\\"program\\\":\\\"/bin/sh\",\"program\":\"/bin/bash\",\"connect_token\":\"tok\"}";
+        expect("terminal program text inside a value fails", VerifyResponseGrant(&g, in_value, "ep-screen", pub_path), false);
+        char sid[64], prog[64], tok[128];
+        expect("terminal worker reader refuses a repeated program", TermPayload_Parse(dup, sid, sizeof(sid), prog, sizeof(prog), tok, sizeof(tok)), false);
     }
 
     unlink(key_path);
@@ -454,6 +511,7 @@ int main(void) {
     test_grant_verification();
     test_screen_canonical_vectors();
     test_screen_grant_verification();
+    test_terminal_grant_verification();
 
     if (failures == 0) {
         printf("[+] All response dispatcher tests passed cleanly.\n");

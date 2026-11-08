@@ -580,14 +580,15 @@ static inline bool ScreenCanonicalFromOffer(const char* payload_json, char* out,
         int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
         if (r == 0) break;
         if (r < 0) return false;
+        /* A repeated member is refused, so the digest and the worker read one value. */
         if (TermJson_KeyIs(k, kl, "mode")) {
-            if (vt != 's' || !TermJson_CopyString(v, vl, mode, sizeof(mode))) return false;
+            if (have_mode || vt != 's' || !TermJson_CopyString(v, vl, mode, sizeof(mode))) return false;
             have_mode = true;
         } else if (TermJson_KeyIs(k, kl, "unattended")) {
-            if (vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false; /* true or absent only */
+            if (unattended || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false; /* true or absent only */
             unattended = true;
         } else if (TermJson_KeyIs(k, kl, "ask_first")) {
-            if (vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false;
+            if (ask_first || vt != 'n' || vl != 4 || memcmp(v, "true", 4) != 0) return false;
             ask_first = true;
         }
     }
@@ -595,6 +596,41 @@ static inline bool ScreenCanonicalFromOffer(const char* payload_json, char* out,
     int n = snprintf(out, out_cap, "{\"mode\":\"%s\"%s%s}", mode,
                      unattended ? ",\"unattended\":true" : "",
                      ask_first ? ",\"ask_first\":true" : "");
+    return n > 0 && (size_t)n < out_cap;
+}
+
+/* TerminalCanonicalFromOffer rebuilds the bytes the hub digested for a
+ * terminal_session grant: {"program":"<value>"} with the program member's raw
+ * JSON string content copied unchanged (the hub's json.Marshal escaping is
+ * what it signed). The offer must parse whole with TermPayload_Parse, the
+ * worker's reader, which refuses a repeated session_id, program or
+ * connect_token; program must be a top-level string. A nested or repeated
+ * "program" can therefore never sign one program while another starts. */
+#define TERMINAL_CANON_MAX 192
+static inline bool TerminalCanonicalFromOffer(const char* payload_json, char* out, size_t out_cap) {
+    if (!payload_json || !out || out_cap == 0) return false;
+    out[0] = '\0';
+    char sid[64], prog[64], tok[128];
+    if (!TermPayload_Parse(payload_json, sid, sizeof(sid), prog, sizeof(prog), tok, sizeof(tok))) return false;
+    TermJson j;
+    if (!TermJson_Begin(&j, payload_json, strlen(payload_json))) return false;
+    const char* raw = NULL;
+    size_t raw_len = 0;
+    for (;;) {
+        const char *k = NULL, *v = NULL;
+        size_t kl = 0, vl = 0;
+        char vt = 0;
+        int r = TermJson_Next(&j, &k, &kl, &vt, &v, &vl);
+        if (r == 0) break;
+        if (r < 0) return false;
+        if (TermJson_KeyIs(k, kl, "program")) {
+            if (vt != 's' || raw) return false;
+            raw = v;
+            raw_len = vl;
+        }
+    }
+    if (!raw) return false;
+    int n = snprintf(out, out_cap, "{\"program\":\"%.*s\"}", (int)raw_len, raw);
     return n > 0 && (size_t)n < out_cap;
 }
 
@@ -627,44 +663,26 @@ static inline bool VerifyResponseGrantKey(
     char computed_hex[65];
     Response_BytesToHex(computed_hash, 32, computed_hex);
 
+    if (grant->action_kind[0] && strcmp(grant->action_kind, "terminal_session") == 0) {
+        /* The terminal grant digests {"program":...} alone. Rebuilt with the
+         * worker's own reader (one top-level program member, a string), so the
+         * program the signature names is the program the worker starts. */
+        char canon[TERMINAL_CANON_MAX];
+        if (!payload_json || !TerminalCanonicalFromOffer(payload_json, canon, sizeof(canon))) return false;
+        Response_SHA256_Sum((const uint8_t*)canon, strlen(canon), computed_hash);
+        Response_BytesToHex(computed_hash, 32, computed_hex);
+    } else if (grant->action_kind[0] && strcmp(grant->action_kind, "screen_session") == 0) {
+        /* The screen grant binds the canonical {"mode"[,"unattended"][,"ask_first"]}
+         * subset, not the whole offer (REMOTE_SCREEN.md §6). Rebuild it from the
+         * offer and recompute; mode/unattended/ask_first thus reach the worker only
+         * through this verified digest. */
+        char canon[64];
+        if (!payload_json || !ScreenCanonicalFromOffer(payload_json, canon, sizeof(canon))) return false;
+        Response_SHA256_Sum((const uint8_t*)canon, strlen(canon), computed_hash);
+        Response_BytesToHex(computed_hash, 32, computed_hex);
+    }
     if (strcasecmp(grant->action_digest, computed_hex) != 0) {
-        // For terminal_session, the operator ActionProof binds specifically to the authorized program {"program":"..."}
-        if (grant->action_kind[0] && strcmp(grant->action_kind, "terminal_session") == 0 && payload_json) {
-            const char* p_pr = strstr(payload_json, "\"program\"");
-            if (p_pr) {
-                const char* val = strchr(p_pr, ':');
-                if (val) {
-                    val++;
-                    while (*val == ' ' || *val == '\t' || *val == '"') val++;
-                    char prog[128] = {0};
-                    size_t plen = 0;
-                    while (val[plen] && val[plen] != '"' && val[plen] != ',' && val[plen] != '}' && plen < sizeof(prog) - 1) {
-                        prog[plen] = val[plen];
-                        plen++;
-                    }
-                    prog[plen] = '\0';
-                    char prog_payload[256];
-                    int n = snprintf(prog_payload, sizeof(prog_payload), "{\"program\":\"%s\"}", prog);
-                    if (n > 0) {
-                        Response_SHA256_Sum((const uint8_t*)prog_payload, (size_t)n, computed_hash);
-                        Response_BytesToHex(computed_hash, 32, computed_hex);
-                    }
-                }
-            }
-        } else if (grant->action_kind[0] && strcmp(grant->action_kind, "screen_session") == 0 && payload_json) {
-            /* The screen grant binds the canonical {"mode"[,"unattended"][,"ask_first"]}
-             * subset, not the whole offer (REMOTE_SCREEN.md §6). Rebuild it from the
-             * offer and recompute; mode/unattended/ask_first thus reach the worker only
-             * through this verified digest. */
-            char canon[64];
-            if (ScreenCanonicalFromOffer(payload_json, canon, sizeof(canon))) {
-                Response_SHA256_Sum((const uint8_t*)canon, strlen(canon), computed_hash);
-                Response_BytesToHex(computed_hash, 32, computed_hex);
-            }
-        }
-        if (strcasecmp(grant->action_digest, computed_hex) != 0) {
-            return false; // Action digest tampered or mismatched
-        }
+        return false; // Action digest tampered or mismatched
     }
 
     // 5. Binary canonical encoding (OMINULL-ENDPOINT-GRANT-V2 or -V3)
