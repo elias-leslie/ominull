@@ -82,6 +82,7 @@ DEFINE_GUID(OMINULL_CONDITION_ALE_APP_ID,           /* d78e1e87-8644-4ea5-9437-d
 #define OMINULL_WEIGHT_PERMIT_DNS      11
 #define OMINULL_WEIGHT_PERMIT_ALLOW    10
 #define OMINULL_WEIGHT_BLOCK_ALL        0
+#define OMINULL_BLOCK_ALL_NAME L"Ominull Host Isolation Block All"
 
 // Native probes override only this byte to own a separate dynamic sublayer.
 #ifndef OMINULL_WFP_SUBLAYER_LAST_BYTE
@@ -511,7 +512,7 @@ static DWORD Wfp_AddIsolationRules(const char* const* allowIPs, int allowCount,
 
     /* 6. Default-deny on all four layers, weight zero so everything above it
      *    wins. */
-    status = AddFilterEverywhere(L"Ominull Host Isolation Block All", FWP_ACTION_BLOCK,
+    status = AddFilterEverywhere(OMINULL_BLOCK_ALL_NAME, FWP_ACTION_BLOCK,
                                  OMINULL_WEIGHT_BLOCK_ALL, NULL, 0, OMINULL_FAMILY_BOTH);
     if (status != ERROR_SUCCESS) {
         printf("[-] Failed to add default block filter: 0x%08lX\n", (unsigned long)status);
@@ -579,6 +580,32 @@ static DWORD Wfp_DeleteOwnFilters(void) {
         printf("[*] Removed %lu Ominull filter(s) from the kernel.\n", (unsigned long)doomedCount);
     }
     return firstFailure;
+}
+
+// Wfp_IsolationInForce says whether the default deny of an isolation is in the
+// kernel, whoever put it there. Not knowing counts as no.
+int Wfp_IsolationInForce(void) {
+    HANDLE hEnum = NULL;
+    if (FwpmFilterCreateEnumHandle0(g_hEngine, NULL, &hEnum) != ERROR_SUCCESS) return 0;
+    int found = 0;
+    for (;;) {
+        FWPM_FILTER0** entries = NULL;
+        UINT32 got = 0;
+        DWORD status = FwpmFilterEnum0(g_hEngine, hEnum, 64, &entries, &got);
+        if (status != ERROR_SUCCESS || got == 0) {
+            if (entries) FwpmFreeMemory0((void**)&entries);
+            break;
+        }
+        for (UINT32 i = 0; i < got && !found; i++) {
+            found = memcmp(&entries[i]->subLayerKey, &OMINULL_SUBLAYER_USER_GUID, sizeof(GUID)) == 0 &&
+                    entries[i]->displayData.name &&
+                    wcscmp(entries[i]->displayData.name, OMINULL_BLOCK_ALL_NAME) == 0;
+        }
+        FwpmFreeMemory0((void**)&entries);
+        if (found || got < 64) break;
+    }
+    FwpmFilterDestroyEnumHandle0(g_hEngine, hEnum);
+    return found;
 }
 
 DWORD Wfp_UnisolateHost(void) {

@@ -1638,61 +1638,86 @@ static int RunFw(const char* const argv[]) {
  * request: this is the same mistake that cost the Windows agent its DHCP lease
  * when the floor was permitted outbound only. The remote port is the server's
  * port in both directions, so it is --dport going out and --sport coming back. */
-static void BaselinePermit(const char* tool, const BASELINE_RULE* r) {
+static int BaselinePermit(const char* tool, const BASELINE_RULE* r) {
     char portStr[8];
     snprintf(portStr, sizeof(portStr), "%d", r->port);
+    /* A DHCPv6 request goes to the multicast address; the reply comes from the
+     * server's own link-local one. */
+    const char* source = strcmp(r->destination, "ff02::1:2") == 0 ? "fe80::/10" : r->destination;
 
     const char* out[] = { tool, "-A", OMINULL_NEXT_OUT, "-p", r->protocol,
                           "-d", r->destination, "--dport", portStr, "-j", "RETURN", NULL };
     const char* in[]  = { tool, "-A", OMINULL_NEXT_IN,  "-p", r->protocol,
-                          "-s", r->destination, "--sport", portStr, "-j", "RETURN", NULL };
-    (void)RunFw(out);
-    (void)RunFw(in);
+                          "-s", source, "--sport", portStr, "-j", "RETURN", NULL };
+    int rc = RunFw(out);
+    int rcIn = RunFw(in);
+    return rc != 0 ? rc : rcIn;
 }
 
-/* DropChain unhooks and removes one chain. The unhook is repeated a bounded
- * number of times because a crash loop can leave the jump inserted more than
- * once, and one -D removes one copy. */
-static void DropChain(const char* tool, const char* hook, const char* chain) {
-    const char* unhook[] = { tool, "-D", hook, "-j", chain, NULL };
-    for (int i = 0; i < 8 && RunFw(unhook) == 0; i++) { }
-    const char* flush[] = { tool, "-F", chain, NULL };
-    const char* drop[]  = { tool, "-X", chain, NULL };
-    (void)RunFw(flush);
-    (void)RunFw(drop);
+/* What iptables exit codes mean for "is it there": 0 yes; 1 or 2 no such rule or
+ * chain; 3 and 127 no such table or tool. Anything else, a held lock (4) above
+ * all, says nothing, and nothing may be flushed on the strength of it. */
+static bool FwSaysAbsent(int rc) {
+    return rc == 1 || rc == 2 || rc == 3 || rc == 127;
 }
 
-/* StillHooked says whether a chain is still in force, or the lock kept us from
- * finding out. A chain that is gone or never existed makes -C fail otherwise. */
-static bool StillHooked(const char* tool, const char* hook, const char* chain) {
+/* HookState: 1 the chain is in force, 0 it is not, -1 we could not find out. */
+static int HookState(const char* tool, const char* hook, const char* chain) {
     const char* check[] = { tool, "-C", hook, "-j", chain, NULL };
     int rc = RunFw(check);
-    return rc == 0 || rc == 4;
+    return rc == 0 ? 1 : FwSaysAbsent(rc) ? 0 : -1;
+}
+
+/* DropChain unhooks and removes one chain and says whether it is gone. The
+ * unhook is repeated a bounded number of times because a crash loop can leave
+ * the jump inserted more than once, and one -D removes one copy. A chain that
+ * may still be hooked keeps its rules: emptying it would open the host. */
+static bool DropChain(const char* tool, const char* hook, const char* chain) {
+    const char* unhook[] = { tool, "-D", hook, "-j", chain, NULL };
+    for (int i = 0; i < 8 && RunFw(unhook) == 0; i++) { }
+    if (HookState(tool, hook, chain) != 0) return false;
+    const char* flush[] = { tool, "-F", chain, NULL };
+    const char* drop[]  = { tool, "-X", chain, NULL };
+    const char* list[]  = { tool, "-S", chain, NULL };
+    (void)RunFw(flush);
+    (void)RunFw(drop);
+    return FwSaysAbsent(RunFw(list));
 }
 
 /* EnforcementTeardown removes the chains from one table, including what a
  * rebuild that died part-way left behind. It reports whether they are gone. */
 static bool EnforcementTeardown(const char* tool) {
-    DropChain(tool, "INPUT", OMINULL_CHAIN_IN);
-    DropChain(tool, "OUTPUT", OMINULL_CHAIN_OUT);
-    DropChain(tool, "INPUT", OMINULL_NEXT_IN);
-    DropChain(tool, "OUTPUT", OMINULL_NEXT_OUT);
-    return !StillHooked(tool, "INPUT", OMINULL_CHAIN_IN) && !StillHooked(tool, "OUTPUT", OMINULL_CHAIN_OUT) &&
-           !StillHooked(tool, "INPUT", OMINULL_NEXT_IN) && !StillHooked(tool, "OUTPUT", OMINULL_NEXT_OUT);
+    bool gone = DropChain(tool, "INPUT", OMINULL_CHAIN_IN);
+    gone = DropChain(tool, "OUTPUT", OMINULL_CHAIN_OUT) && gone;
+    gone = DropChain(tool, "INPUT", OMINULL_NEXT_IN) && gone;
+    return DropChain(tool, "OUTPUT", OMINULL_NEXT_OUT) && gone;
 }
 
 /* RecoverSwap finishes a swap that died after unhooking the old chain, which
- * left the second chain as the only policy in force. */
-static void RecoverSwap(const char* tool, const char* hook, const char* chain, const char* next) {
-    const char* nextHooked[] = { tool, "-C", hook, "-j", next, NULL };
-    const char* chainHooked[] = { tool, "-C", hook, "-j", chain, NULL };
-    if (RunFw(nextHooked) != 0 || RunFw(chainHooked) == 0) return;
+ * left the second chain as the only policy in force. False means that chain may
+ * still be the only policy, or we could not tell, so it must not be dropped. */
+static bool RecoverSwap(const char* tool, const char* hook, const char* chain, const char* next) {
+    int nextHooked = HookState(tool, hook, next);
+    int chainHooked = HookState(tool, hook, chain);
+    if (nextHooked < 0 || chainHooked < 0) return false;
+    if (nextHooked == 0 || chainHooked == 1) return true;
     const char* flush[] = { tool, "-F", chain, NULL };
     const char* drop[]  = { tool, "-X", chain, NULL };
     const char* rename[] = { tool, "-E", next, chain, NULL };
     (void)RunFw(flush);
     (void)RunFw(drop);
-    (void)RunFw(rename);
+    return RunFw(rename) == 0;
+}
+
+/* Set by EnforcementBuild when a destination the policy permits did not make it
+ * into the rules, and whether trying again could help. */
+static bool g_PermitsMissing = false;
+static bool g_PermitsRetry = false;
+
+static void NotePermit(int rc) {
+    if (rc == 0) return;
+    g_PermitsMissing = true;
+    if (!FwSaysAbsent(rc)) g_PermitsRetry = true;
 }
 
 /* EnforcementBuild writes this host's whole enforcement state into one ordered
@@ -1714,9 +1739,7 @@ static void RecoverSwap(const char* tool, const char* hook, const char* chain, c
  * anything to enforce, not only while isolated: quarantining the controller
  * from an endpoint is not an operation with a way back.
  *
- * First installation builds chains before hooking them. Existing-chain reloads
- * still flush and refill live chains sequentially, a known non-atomic reload
- * risk. Both families are built; nftables migration remains separate work. */
+ * Both families are built; nftables migration remains separate work. */
 static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_TARGETS *hub,
                              char allow[][64], int allowCount,
                              char peers[][64], int peerCount,
@@ -1729,10 +1752,10 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
      * the old one is unhooked. Flushing in place opened the host until the
      * final DROP went back on, and every change to the allow list, the peers or
      * the threat list, and every agent restart, rebuilds. */
-    RecoverSwap(tool, "INPUT", OMINULL_CHAIN_IN, OMINULL_NEXT_IN);
-    RecoverSwap(tool, "OUTPUT", OMINULL_CHAIN_OUT, OMINULL_NEXT_OUT);
-    DropChain(tool, "INPUT", OMINULL_NEXT_IN);
-    DropChain(tool, "OUTPUT", OMINULL_NEXT_OUT);
+    if (!RecoverSwap(tool, "INPUT", OMINULL_CHAIN_IN, OMINULL_NEXT_IN) ||
+        !RecoverSwap(tool, "OUTPUT", OMINULL_CHAIN_OUT, OMINULL_NEXT_OUT)) return false;
+    bool cleared = DropChain(tool, "INPUT", OMINULL_NEXT_IN);
+    if (!DropChain(tool, "OUTPUT", OMINULL_NEXT_OUT) || !cleared) return false;
     const char* newIn[]  = { tool, "-N", OMINULL_NEXT_IN,  NULL };
     const char* newOut[] = { tool, "-N", OMINULL_NEXT_OUT, NULL };
     if (RunFw(newIn) != 0 || RunFw(newOut) != 0) {
@@ -1744,9 +1767,9 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
         DropChain(tool, "OUTPUT", OMINULL_NEXT_OUT);
         return v6 && (rc == 127 || rc == 3 || access("/proc/net/if_inet6", F_OK) != 0);
     }
-    /* What the swap cannot go ahead without: the way back to the hub, every
-     * block and, when isolating, the default deny. A permit that fails only
-     * closes more. */
+    /* What the swap cannot go ahead without: the way back to the hub, loopback,
+     * DHCP, every block and, when isolating, the default deny. Any other permit
+     * that fails only closes more, so containment goes ahead and it is reported. */
     bool whole = true;
 
     /* 1. Complete A/AAAA pinholes, ahead of peer blocks, TCP port only. */
@@ -1766,8 +1789,7 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
     /* 2. Loopback. */
     const char* loIn[]  = { tool, "-A", OMINULL_NEXT_IN,  "-i", "lo", "-j", "RETURN", NULL };
     const char* loOut[] = { tool, "-A", OMINULL_NEXT_OUT, "-o", "lo", "-j", "RETURN", NULL };
-    (void)RunFw(loIn);
-    (void)RunFw(loOut);
+    if (RunFw(loIn) != 0 || RunFw(loOut) != 0) whole = false;
 
     /* IPv6 neighbor/router discovery is the link control plane, like ARP
      * for IPv4. Blocking it strands even an explicitly permitted hub after
@@ -1779,8 +1801,8 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
                 "--icmpv6-type", types[i], "-m", "hl", "--hl-eq", "255", "-j", "RETURN", NULL};
             const char *ndOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-p", "ipv6-icmp",
                 "--icmpv6-type", types[i], "-m", "hl", "--hl-eq", "255", "-j", "RETURN", NULL};
-            (void)RunFw(ndIn);
-            (void)RunFw(ndOut);
+            NotePermit(RunFw(ndIn));
+            NotePermit(RunFw(ndOut));
         }
         /* Preserve path-MTU/error feedback for existing flows, not arbitrary
          * ICMPv6 requests that could bypass peer quarantine. */
@@ -1788,15 +1810,15 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
             "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
         const char *errorOut[] = {tool, "-A", OMINULL_NEXT_OUT, "-p", "ipv6-icmp",
             "-m", "conntrack", "--ctstate", "RELATED", "-j", "RETURN", NULL};
-        (void)RunFw(errorIn);
-        (void)RunFw(errorOut);
+        NotePermit(RunFw(errorIn));
+        NotePermit(RunFw(errorOut));
     }
 
     /* 3. DHCP, above the peer blocks. */
     for (int i = 0; i < baselineCount; i++) {
         if (strcmp(baseline[i].service, "dhcp") != 0) continue;
         if ((strchr(baseline[i].destination, ':') != NULL) != v6) continue;
-        BaselinePermit(tool, &baseline[i]);
+        if (BaselinePermit(tool, &baseline[i]) != 0) whole = false;
     }
 
     /* 4. Mesh quarantine. Applies whether or not this host is isolated. */
@@ -1822,7 +1844,7 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
         for (int i = 0; i < baselineCount; i++) {
             if (strcmp(baseline[i].service, "dhcp") == 0) continue;  /* already placed */
             if ((strchr(baseline[i].destination, ':') != NULL) != v6) continue;
-            BaselinePermit(tool, &baseline[i]);
+            NotePermit(BaselinePermit(tool, &baseline[i]));
         }
 
         /* 6. The hub's allow list - a scoped trust rule, below a peer block so
@@ -1831,8 +1853,8 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
             if ((strchr(allow[i], ':') != NULL) != v6) continue;
             const char* aIn[]  = { tool, "-A", OMINULL_NEXT_IN,  "-s", allow[i], "-j", "RETURN", NULL };
             const char* aOut[] = { tool, "-A", OMINULL_NEXT_OUT, "-d", allow[i], "-j", "RETURN", NULL };
-            (void)RunFw(aIn);
-            (void)RunFw(aOut);
+            NotePermit(RunFw(aIn));
+            NotePermit(RunFw(aOut));
         }
 
         /* 7. Default deny. */
@@ -1851,11 +1873,10 @@ static bool EnforcementBuild(const char* tool, bool isolated, const OMINULL_HUB_
         DropChain(tool, "OUTPUT", OMINULL_NEXT_OUT);
         return false;
     }
-    DropChain(tool, "INPUT", OMINULL_CHAIN_IN);
-    DropChain(tool, "OUTPUT", OMINULL_CHAIN_OUT);
     /* The old set must really be gone: on a release its DROP would still sit
      * behind the new chain, with the host cut off. */
-    if (StillHooked(tool, "INPUT", OMINULL_CHAIN_IN) || StillHooked(tool, "OUTPUT", OMINULL_CHAIN_OUT)) return false;
+    cleared = DropChain(tool, "INPUT", OMINULL_CHAIN_IN);
+    if (!DropChain(tool, "OUTPUT", OMINULL_CHAIN_OUT) || !cleared) return false;
     const char* promoteIn[]  = { tool, "-E", OMINULL_NEXT_IN,  OMINULL_CHAIN_IN,  NULL };
     const char* promoteOut[] = { tool, "-E", OMINULL_NEXT_OUT, OMINULL_CHAIN_OUT, NULL };
     (void)RunFw(promoteIn);         /* a failure leaves the rules in force under the other name */
@@ -1900,7 +1921,22 @@ static int ParseAddressList(const char* respJson, const char* key,
 static bool known = false;              /* nothing reconciled yet this run */
 static bool appliedIsolated = false;
 static bool g_ApplyRefused = false;
+static const char* g_ApplyNote = "";    /* what last_applied reports */
 static OMINULL_HUB_TARGETS appliedHubTargets;
+
+/* AdoptRulesInForce runs once at startup. Chains outlive the agent, so a host
+ * restarted while isolated is still isolated, and if the hub never answers again
+ * the dead-man timer has to know that. The list of peers it held is gone with
+ * the old process; the hub puts them back when it answers. */
+static void AdoptRulesInForce(void) {
+    const char* tools[] = { "iptables", "ip6tables" };
+    for (int i = 0; i < 2; i++) {
+        (void)RecoverSwap(tools[i], "INPUT", OMINULL_CHAIN_IN, OMINULL_NEXT_IN);
+        (void)RecoverSwap(tools[i], "OUTPUT", OMINULL_CHAIN_OUT, OMINULL_NEXT_OUT);
+        const char* deny[] = { tools[i], "-C", OMINULL_CHAIN_OUT, "-j", "DROP", NULL };
+        if (RunFw(deny) == 0) appliedIsolated = true;
+    }
+}
 
 /* SameAddress compares two address literals as addresses (family and bytes),
  * so "2001:4860::8888" and its expanded form are one address. */
@@ -2041,19 +2077,33 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
             || strcmp(baseline[i].service, appliedBaseline[i].service) != 0
             || baseline[i].port != appliedBaseline[i].port) changed = true;
     }
-    if (!changed) { g_ApplyRefused = false; return; }
+    if (!changed) {
+        g_ApplyRefused = false;
+        if (!g_PermitsMissing) g_ApplyNote = "";
+        return;
+    }
 
     OMINULL_HUB_TARGETS hubTargets = {0};
     bool haveHub = OminullResolveHub(config->hub_url, &hubTargets);
+    if (!haveHub && appliedHubTargets.count > 0) {
+        /* The lookup may be failing because of the isolation itself. The hole in
+         * force is good enough to change the rules, including to lift them. */
+        hubTargets = appliedHubTargets;
+        haveHub = true;
+    }
     const char *hubIP = haveHub ? hubTargets.addresses[0] : "";
     if ((wantIsolated || peerCount || threatCount) && !haveHub) {
         /* Refused, deliberately. An isolation with no hole for the hub can
          * never be lifted by the hub, so it is not a quarantine - it is a
          * host taken off the network permanently by a name lookup that
          * happened to fail. The order stands and is retried next beat. */
-        printf("[-] Isolation ordered, but the hub address could not be resolved from %s. "
-               "Refusing to isolate: this host could not be released afterwards.\n", config->hub_url);
-        fflush(stdout);
+        if (!g_ApplyRefused) {
+            printf("[-] Isolation ordered, but the hub address could not be resolved from %s. "
+                   "Refusing to isolate: this host could not be released afterwards.\n", config->hub_url);
+            fflush(stdout);
+        }
+        g_ApplyRefused = true;
+        g_ApplyNote = "policy not applied: the hub address could not be resolved";
         return;
     }
 
@@ -2075,6 +2125,8 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     }
     fflush(stdout);
 
+    bool wasMissing = g_PermitsMissing;
+    g_PermitsMissing = g_PermitsRetry = false;
     bool built;
     if (!wantIsolated && peerCount == 0 && threatCount == 0) {
         built = EnforcementTeardown("iptables");
@@ -2095,6 +2147,7 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
             fflush(stdout);
         }
         g_ApplyRefused = true;
+        g_ApplyNote = "policy not applied: the firewall refused the new rules";
         known = false;
         if (wantIsolated) {
             appliedIsolated = true;
@@ -2104,6 +2157,11 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     }
 
     g_ApplyRefused = false;
+    g_ApplyNote = g_PermitsMissing ? "policy partly applied: the firewall refused some permitted destinations" : "";
+    if (g_PermitsMissing && !wasMissing) {
+        printf("[-] The firewall refused some permitted destinations; the rest of the policy is in force.\n");
+        fflush(stdout);
+    }
     appliedHubTargets = hubTargets;
     appliedIsolated = wantIsolated;
     memcpy(appliedAllow, allow, sizeof(allow));
@@ -2114,7 +2172,7 @@ static void SyncEnforcement(const LINUX_AGENT_CONFIG* config, const char* respJs
     appliedThreatCount = threatCount;
     memcpy(appliedBaseline, baseline, sizeof(baseline));
     appliedBaselineCount = baselineCount;
-    known = true;
+    known = !g_PermitsRetry;            /* a held lock passes; try those permits again */
 }
 
 /* HubContact drives the dead-man timer. Every beat reports whether the hub
@@ -2151,14 +2209,20 @@ static void HubContact(bool accepted) {
         fflush(stdout);
     }
 
-    bool built = EnforcementBuild("iptables", false, &appliedHubTargets, appliedAllow, 0,
-                                  appliedPeers, appliedPeerCount,
-                                  appliedThreats, appliedThreatCount,
-                                  appliedBaseline, appliedBaselineCount);
-    built = EnforcementBuild("ip6tables", false, &appliedHubTargets, appliedAllow, 0,
-                             appliedPeers, appliedPeerCount,
-                             appliedThreats, appliedThreatCount,
-                             appliedBaseline, appliedBaselineCount) && built;
+    bool built;
+    if (appliedPeerCount == 0 && appliedThreatCount == 0) {
+        built = EnforcementTeardown("iptables");
+        built = EnforcementTeardown("ip6tables") && built;
+    } else {
+        built = EnforcementBuild("iptables", false, &appliedHubTargets, appliedAllow, 0,
+                                 appliedPeers, appliedPeerCount,
+                                 appliedThreats, appliedThreatCount,
+                                 appliedBaseline, appliedBaselineCount);
+        built = EnforcementBuild("ip6tables", false, &appliedHubTargets, appliedAllow, 0,
+                                 appliedPeers, appliedPeerCount,
+                                 appliedThreats, appliedThreatCount,
+                                 appliedBaseline, appliedBaselineCount) && built;
+    }
     if (!built) {
         /* Still isolated, or isolated in one family: the count stays past the
          * limit, and what is applied is no longer known once the hub is back. */
@@ -2167,11 +2231,13 @@ static void HubContact(bool accepted) {
             fflush(stdout);
         }
         g_ApplyRefused = true;
+        g_ApplyNote = "policy not applied: the firewall refused the new rules";
         known = false;
         return;
     }
 
     g_ApplyRefused = false;
+    g_ApplyNote = "";
     appliedIsolated = false;
     g_DeadmanReleased = true;
     g_ForgetApplied = true;
@@ -2380,7 +2446,7 @@ static int AppendObservations(const LINUX_AGENT_CONFIG* config, char* buf, size_
                     EnforcementEngineStatus(),
                     haveHub ? hubIP : "",
                     haveDHCP ? "dhcp" : "static",
-                    g_ApplyRefused ? "policy not applied: the firewall refused the new rules"
+                    g_ApplyNote[0] ? g_ApplyNote
                     : rolledBack ? "released by the dead-man timer after losing contact with the hub" : "");
     return off;
 }
@@ -3658,6 +3724,7 @@ int main(int argc, char* argv[]) {
      * terminal worker is double-forked so init reaps it. */
 
     mkdir("/var/lib/ominull", 0755);
+    AdoptRulesInForce();
     Trust_Init(&g_Trust, config.endpoint_id, NULL, NULL, true);
     g_ReleaseVerifyPem = OMINULL_RELEASE_PUBKEY_PEM;
     g_Trust.verify_release = ReleaseVerifyPosix;

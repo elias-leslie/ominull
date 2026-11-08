@@ -7,6 +7,15 @@ static int CaptureExec(const char *file, char *const argv[]);
 #undef main
 #undef execvp
 #include <assert.h>
+/* A pattern ending in $ has to end the line, so one chain isn't taken for its _N. */
+static bool LineMatches(const char *line, const char *pattern) {
+    size_t n = strlen(pattern);
+    if (n && pattern[n - 1] == '$') {
+        size_t m = strlen(line);
+        return m >= n - 1 && strncmp(line + m - (n - 1), pattern, n - 1) == 0;
+    }
+    return strstr(line, pattern) != NULL;
+}
 static int CaptureExec(const char *file, char *const argv[]) {
     (void)file;
     char line[1024];
@@ -15,9 +24,11 @@ static int CaptureExec(const char *file, char *const argv[]) {
         used += snprintf(line + used, sizeof(line) - used, "%s%s", i ? " " : "", argv[i]);
     const char *fail = getenv("OMINULL_FIXTURE_FAIL");
     const char *code = getenv("OMINULL_FIXTURE_FAIL_CODE");
-    int status = fail && strstr(line, fail) ? (code ? atoi(code) : 1) : 0;
-    /* Every chain the fixture "removed" is gone. */
-    if (!status && strstr(line, " -C "))
+    const char *present = getenv("OMINULL_FIXTURE_PRESENT");
+    int status = fail && LineMatches(line, fail) ? (code ? atoi(code) : 1) : 0;
+    /* Every chain the fixture "removed" is gone, unless it says otherwise. */
+    if (!status && (strstr(line, " -C ") || strstr(line, " -S ")) &&
+        !(present && LineMatches(line, present)))
         status = 1;
     FILE *out = fopen(getenv("OMINULL_FIXTURE_COMMANDS"), "a");
     if (!out)
@@ -50,6 +61,117 @@ static void RefusedStepKeepsTheOldChain(const char *path, const char *step,
         fprintf(stderr, "A refused step (%s) still touched the rules in force\n", step);
         exit(1);
     }
+}
+static const char *ReadCommands(const char *path) {
+    static char data[65536];
+    FILE *in = fopen(path, "r");
+    assert(in);
+    size_t size = fread(data, 1, sizeof(data) - 1, in);
+    data[size] = 0;
+    fclose(in);
+    return data;
+}
+static void ResetCommands(const char *path) {
+    FILE *reset = fopen(path, "w");
+    assert(reset);
+    fclose(reset);
+    unsetenv("OMINULL_FIXTURE_FAIL");
+    unsetenv("OMINULL_FIXTURE_FAIL_CODE");
+    unsetenv("OMINULL_FIXTURE_PRESENT");
+    g_PermitsMissing = g_PermitsRetry = false;
+}
+#define FLUSHED_OUT "-F OMINULL_ISO_OUT\n"
+/* What a held lock or a chain that won't go must never do: empty a live chain,
+ * or drop the only one in force. */
+static void LockAndLeftovers(const char *path, OMINULL_HUB_TARGETS *hub) {
+    char none[1][64] = {{0}};
+
+    /* Could not tell whether the chain is hooked: nothing is touched. */
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_FAIL", "-C OUTPUT -j OMINULL_ISO_OUT$", 1);
+    setenv("OMINULL_FIXTURE_FAIL_CODE", "4", 1);
+    assert(!EnforcementBuild("iptables", true, hub, none, 0, none, 0, none, 0, NULL, 0));
+    assert(!strstr(ReadCommands(path), FLUSHED_OUT));
+    assert(!strstr(ReadCommands(path), "-N OMINULL_ISO_OUT_N"));
+
+    /* The old chain stayed hooked through the swap: it keeps its rules. */
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_PRESENT", "-C OUTPUT -j OMINULL_ISO_OUT$", 1);
+    assert(!EnforcementBuild("iptables", true, hub, none, 0, none, 0, none, 0, NULL, 0));
+    assert(strstr(ReadCommands(path), "-I OUTPUT -j OMINULL_ISO_OUT_N"));
+    assert(!strstr(ReadCommands(path), FLUSHED_OUT));
+
+    /* The second chain is the only policy and can't take the usual name: it stays. */
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_PRESENT", "-C OUTPUT -j OMINULL_ISO_OUT_N$", 1);
+    setenv("OMINULL_FIXTURE_FAIL", "-E OMINULL_ISO_OUT_N OMINULL_ISO_OUT$", 1);
+    assert(!EnforcementBuild("iptables", true, hub, none, 0, none, 0, none, 0, NULL, 0));
+    assert(!strstr(ReadCommands(path), "-D OUTPUT -j OMINULL_ISO_OUT_N"));
+
+    /* Teardown reports a chain that would not go, or a hook it can't see past. */
+    ResetCommands(path);
+    assert(EnforcementTeardown("iptables"));
+    setenv("OMINULL_FIXTURE_PRESENT", "-S OMINULL_ISO_IN$", 1);
+    assert(!EnforcementTeardown("iptables"));
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_FAIL", "-C INPUT -j OMINULL_ISO_IN$", 1);
+    setenv("OMINULL_FIXTURE_FAIL_CODE", "4", 1);
+    assert(!EnforcementTeardown("iptables"));
+    assert(!strstr(ReadCommands(path), "-F OMINULL_ISO_IN\n"));
+
+    /* A restart finds the default deny still in force, in either family. */
+    ResetCommands(path);
+    appliedIsolated = false;
+    AdoptRulesInForce();
+    assert(!appliedIsolated);
+    setenv("OMINULL_FIXTURE_PRESENT", "ip6tables -w 5 -C OMINULL_ISO_OUT -j DROP$", 1);
+    AdoptRulesInForce();
+    assert(appliedIsolated);
+    appliedIsolated = false;
+}
+/* Loopback and DHCP hold the swap back; other permits only report. */
+static void Permits(const char *path, OMINULL_HUB_TARGETS *hub) {
+    char none[1][64] = {{0}};
+    char allow[1][64] = {"198.51.100.5"};
+    BASELINE_RULE rules[2];
+    memset(rules, 0, sizeof(rules));
+    strcpy(rules[0].service, "dhcp"); strcpy(rules[0].destination, "198.51.100.2");
+    strcpy(rules[0].protocol, "udp"); rules[0].port = 67;
+    strcpy(rules[1].service, "ntp"); strcpy(rules[1].destination, "198.51.100.3");
+    strcpy(rules[1].protocol, "udp"); rules[1].port = 123;
+
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_FAIL", "-i lo -j RETURN", 1);
+    assert(!EnforcementBuild("iptables", true, hub, allow, 1, none, 0, none, 0, rules, 2));
+    assert(!strstr(ReadCommands(path), FLUSHED_OUT));
+
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_FAIL", "-d 198.51.100.2", 1);
+    assert(!EnforcementBuild("iptables", true, hub, allow, 1, none, 0, none, 0, rules, 2));
+    assert(!strstr(ReadCommands(path), FLUSHED_OUT));
+
+    ResetCommands(path);
+    assert(EnforcementBuild("iptables", true, hub, allow, 1, none, 0, none, 0, rules, 2));
+    assert(!g_PermitsMissing);
+
+    /* Refused for good: reported, not retried. A held lock: retried too. */
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_FAIL", "-d 198.51.100.5", 1);
+    assert(EnforcementBuild("iptables", true, hub, allow, 1, none, 0, none, 0, rules, 2));
+    assert(g_PermitsMissing && !g_PermitsRetry);
+    ResetCommands(path);
+    setenv("OMINULL_FIXTURE_FAIL", "-d 198.51.100.3", 1);
+    setenv("OMINULL_FIXTURE_FAIL_CODE", "4", 1);
+    assert(EnforcementBuild("iptables", true, hub, allow, 1, none, 0, none, 0, rules, 2));
+    assert(g_PermitsMissing && g_PermitsRetry);
+
+    /* The DHCPv6 reply comes from the server's link-local address. */
+    ResetCommands(path);
+    strcpy(rules[0].destination, "ff02::1:2"); rules[0].port = 547;
+    assert(EnforcementBuild("ip6tables", true, hub, none, 0, none, 0, none, 0, rules, 1));
+    assert(strstr(ReadCommands(path), "-d ff02::1:2 --dport 547"));
+    assert(strstr(ReadCommands(path), "-s fe80::/10 --sport 547"));
+    ResetCommands(path);
 }
 int main(void) {
     char path[] = "/tmp/ominull-pinhole-XXXXXX";
@@ -105,6 +227,8 @@ int main(void) {
     RefusedStepKeepsTheOldChain(path, "-d 203.0.113.9 -p tcp --dport 9443", &hub);
     RefusedStepKeepsTheOldChain(path, "-I OUTPUT -j OMINULL_ISO_OUT_N", &hub);
     RefusedStepKeepsTheOldChain(path, "-d 203.0.113.77 -j DROP", &hub);
+    LockAndLeftovers(path, &hub);
+    Permits(path, &hub);
     unlink(path);
     puts("Linux IPv6 hub pinhole names exact TCP port; no real firewall "
          "commands "

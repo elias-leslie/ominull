@@ -664,6 +664,10 @@ static bool EnforcementEngineReady(void) {
     if (engineTried) return engineReady;
     engineTried = true;
     engineReady = (Wfp_Init(0) == ERROR_SUCCESS);
+    /* The filters outlive this service, so a host restarted while isolated is
+     * still isolated, and if the hub never answers again the dead-man timer has
+     * to know that. The hub restores whatever else it was holding when it answers. */
+    if (engineReady && Wfp_IsolationInForce()) appliedIsolated = true;
     if (!engineReady) {
         printf("[-] The user-mode filtering engine would not open, so isolation cannot be "
                "enforced on this host. Administrator rights are required.\n");
@@ -747,14 +751,22 @@ static void SyncEnforcement(const AGENT_CONFIG* config, const char* respJson) {
 
     OMINULL_HUB_TARGETS hubTargets = {0};
     if ((wantIsolated || peerCount) && !ResolveHubTargets(config, &hubTargets)) {
-        strcpy(g_ApplyNote, "policy not applied: no complete usable hub address set");
-        /* Refused on purpose. An isolation with no hole for the hub can never
-         * be lifted by the hub - it is not a quarantine, it is a host taken off
-         * the network by a failed name lookup. The order stands and is retried
-         * on the next beat. */
-        printf("[-] Isolation ordered, but the hub address could not be resolved from %s. "
-               "Refusing to isolate: this host could not be released afterwards.\n", config->hub_url);
-        return;
+        if (appliedHubTargets.count > 0) {
+            /* The lookup may be failing because of the isolation itself. The hole
+             * in force is good enough to change the rules, including to lift them. */
+            hubTargets = appliedHubTargets;
+        } else {
+            /* Refused on purpose. An isolation with no hole for the hub can never
+             * be lifted by the hub - it is not a quarantine, it is a host taken off
+             * the network by a failed name lookup. The order stands and is retried
+             * on the next beat. */
+            if (!g_ApplyNote[0]) {
+                printf("[-] Isolation ordered, but the hub address could not be resolved from %s. "
+                       "Refusing to isolate: this host could not be released afterwards.\n", config->hub_url);
+            }
+            strcpy(g_ApplyNote, "policy not applied: no complete usable hub address set");
+            return;
+        }
     }
 
         if (!EnforcementEngineReady()) return;
@@ -815,13 +827,16 @@ static void HubContact(bool accepted) {
         missed = 0;
         return;
     }
+    (void)EnforcementEngineReady();          /* finds an isolation that outlived a restart */
     if (!appliedIsolated) {
         missed = 0;
         return;
     }
     if (++missed < Agent_TrustDeadmanBeats(OMINULL_DEADMAN_BEATS, 2500)) return;
 
-    printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. Releasing "
+    /* A failed release stays past the limit and tries again every beat. */
+    static bool releaseFailed = false;
+    if (!releaseFailed) printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. Releasing "
            "this host's isolation: an isolation the hub cannot lift is not a containment, it is a "
            "lost endpoint. %d quarantined peer(s) stay blocked.\n", missed, appliedPeerCount);
     fflush(stdout);
@@ -841,12 +856,16 @@ static void HubContact(bool accepted) {
         _snprintf(g_DeadmanNote, sizeof(g_DeadmanNote),
                   "released by the dead-man timer after losing contact with the hub");
         g_DeadmanNote[sizeof(g_DeadmanNote) - 1] = '\0';
+        releaseFailed = false;
+        missed = 0;
     } else {
-        printf("[-] The dead-man release failed; this host is still isolated and still cannot "
-               "reach the hub.\n");
+        if (!releaseFailed) {
+            printf("[-] The dead-man release failed; this host is still isolated and still cannot "
+                   "reach the hub. Trying again every beat.\n");
+        }
+        releaseFailed = true;
     }
     fflush(stdout);
-    missed = 0;
 }
 
 static ULONGLONG g_LastSoftwareInventorySyncWin = 0;

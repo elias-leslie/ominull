@@ -109,6 +109,7 @@ typedef struct _OMINULL_EVENT {
  * the agent as well as built as the standalone ominull_wfp_user.exe recovery
  * tool. */
 DWORD Wfp_Init(int dynamicSession);
+int Wfp_IsolationInForce(void);
 void Wfp_Close(void);
 
 /* The baseline isolation policy, as the hub resolves it for this endpoint: what
