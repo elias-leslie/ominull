@@ -427,10 +427,25 @@ func (s *Server) aicoNotices(now time.Time) ([]aicoNotice, []string, error) {
 			since = t
 		}
 	}
-	list, err := s.store.NewOpenAlerts(since, feedAlertScan)
-	if err != nil {
-		return nil, nil, err
+	// Worst first and already-sent ones included, so a window of open findings
+	// that were all sent must not starve a new one: widen until a notice turns
+	// up or the window runs out.
+	for scan := feedAlertScan; ; scan *= 4 {
+		notices, tokens, complete, err := s.aicoNoticesScanning(since, scan, now)
+		if err != nil || len(notices) > 0 || complete {
+			return notices, tokens, err
+		}
 	}
+}
+
+// aicoNoticesScanning builds the notices from the first scan open findings;
+// complete says that was all of them.
+func (s *Server) aicoNoticesScanning(since time.Time, scan int, now time.Time) ([]aicoNotice, []string, bool, error) {
+	list, err := s.store.NewOpenAlerts(since, scan)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	complete := len(list) < scan
 	tuning := s.store.GetDetectionTuning()
 	var described []feedAlert
 	for _, a := range list {
@@ -458,7 +473,7 @@ func (s *Server) aicoNotices(now time.Time) ([]aicoNotice, []string, error) {
 	}
 	sent, err := s.store.AicoPushSent(all)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	var notices []aicoNotice
 	var tokens []string
@@ -474,7 +489,7 @@ func (s *Server) aicoNotices(now time.Time) ([]aicoNotice, []string, error) {
 			tokens = append(tokens, g.token)
 		}
 	}
-	return notices, tokens, nil
+	return notices, tokens, complete, nil
 }
 
 func (s *Server) aicoNotice(g *aicoGroup, now time.Time) (aicoNotice, bool) {

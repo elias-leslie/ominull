@@ -417,8 +417,8 @@ func TestAListenerAnsweringManyClientsIsServedNotScanning(t *testing.T) {
 			Action: "PERMIT", Direction: "OUTBOUND", Protocol: 6, SrcIP: "10.0.0.5", SrcPort: uint16(50000 + i),
 			DstIP: "10.0.0." + itoa(100+i), DstPort: 8006, BytesOut: 400, ProcessPath: "/usr/bin/perl", UserIdentity: "www-data"})
 	}
-	if got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP"); len(got) != 1 {
-		t.Fatalf("the same process fanning out from ephemeral ports raised %d sweeps, want 1", len(got))
+	if got := anomaliesOfType(t, store, "LATERAL_PORT_SWEEP"); pagesOf(got) != 1 {
+		t.Fatalf("the same process fanning out from ephemeral ports raised %d pages in %d sweeps, want one page", pagesOf(got), len(got))
 	}
 }
 

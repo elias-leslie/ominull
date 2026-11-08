@@ -185,15 +185,16 @@ func AlertClass(a AnomalyAlert) string {
 }
 
 // OpenIncident finds the incident a page with this key joins: the newest
-// paging finding carrying the key since a point in time. It returns the
-// incident id ("" when none is open) and the worst severity it has paged at.
+// paging finding carrying the key since a point in time that nobody has
+// resolved (the same thing after a resolve is news, not a repeat). It returns
+// the incident id ("" when none is open) and the worst severity it has paged at.
 func (s *Store) OpenIncident(tenantID, endpointID, key string, since time.Time) (id, worst string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	// The window runs from the incident's first page, not its newest member:
 	// activity that goes on for days asks again each window.
 	err = s.db.QueryRow(`SELECT json_extract(evidence, '$.incident') FROM anomaly_alerts
-		WHERE tenant_id = ? AND endpoint_id = ? AND timestamp >= ? AND json_valid(evidence)
+		WHERE tenant_id = ? AND endpoint_id = ? AND timestamp >= ? AND acknowledged = 0 AND json_valid(evidence)
 			AND json_extract(evidence, '$.incident_key') = ? AND json_extract(evidence, '$.incident') = 'inc-' || id
 		ORDER BY timestamp DESC LIMIT 1`, tenantID, endpointID, since.UTC(), key).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {

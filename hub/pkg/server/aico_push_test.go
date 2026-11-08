@@ -754,3 +754,30 @@ func TestQuietAgentsFollowsAico(t *testing.T) {
 		t.Fatalf("Aico says it is off: %+v err=%v", finding, err)
 	}
 }
+
+// A window full of findings already sent must not starve a new one that sorts
+// after them.
+func TestAicoPushNewFindingBehindAFullScanOfSentOnes(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	srv.hubURL = "https://hub.example.test"
+	rcv := newAicoReceiver(t)
+	now := time.Now().UTC()
+	aicoConfigure(t, srv, store, rcv, now.Add(-24*time.Hour))
+	for i := 0; i < feedAlertScan; i++ {
+		aicoAlert(t, store, fmt.Sprintf("c%d", i), "LATERAL_PORT_SWEEP", "CRITICAL", "ws-01", fmt.Sprintf("inc-%d", i), false, now.Add(-time.Hour))
+	}
+	// Each pass carries at most aicoListMax; drain them all.
+	for i := 0; i < feedAlertScan; i++ {
+		srv.aicoPushPass(now, rcv.server.Client())
+		if len(rcv.notices) == 0 {
+			break
+		}
+	}
+	aicoAlert(t, store, "new1", "LATERAL_PORT_SWEEP", "HIGH", "srv-01", "inc-new", false, now.Add(-time.Minute))
+	srv.aicoPushPass(now, rcv.server.Client())
+	if len(rcv.notices) != 1 {
+		t.Fatalf("the new HIGH finding should be the one notice, got %d", len(rcv.notices))
+	}
+}

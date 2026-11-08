@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -327,6 +328,9 @@ func (s *Server) AccessConfigured() bool { return s.access != nil }
 
 func (s *Server) SetAgentHubURL(u string) {
 	s.agentHubURL = u
+	if parsed, err := url.Parse(u); err == nil && net.ParseIP(parsed.Hostname()) != nil {
+		s.detector.SetHubAddress(parsed.Hostname())
+	}
 }
 
 func (s *Server) tenantFromRequest(r *http.Request) string {

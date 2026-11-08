@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,16 +41,6 @@ func (e *Engine) checkDecoy(ev storage.Event, geo threatintel.GeoRecord, endpoin
 	e.alertf("[!] ANOMALY ALERT [CRITICAL]: decoy %s touched by %s (%s)", ev.DstIP, ev.EndpointID, ev.ProcessPath)
 }
 
-// labEscapeQuietPorts are what a lab guest legitimately asks of the network
-// outside the lab: names, time and an address.
-func labEscapeQuietPort(port uint16) bool {
-	switch port {
-	case 53, 67, 123:
-		return true
-	}
-	return false
-}
-
 // checkLabEscape pages when a lab host reaches lab_escape_hosts or more
 // private hosts outside the lab (the home or infrastructure zones) within the
 // sweep window. Lab guests run untrusted code by design; what they must not
@@ -58,8 +49,8 @@ func labEscapeQuietPort(port uint16) bool {
 func (e *Engine) checkLabEscape(ev storage.Event, geo threatintel.GeoRecord, endpoint storage.Endpoint, cfg storage.DetectionTuning,
 	role, quietPath string, now time.Time) {
 	if role != storage.RoleLab || ev.Direction != "OUTBOUND" || servedFlow(ev, cfg) || !isPrivateIP(ev.DstIP) || netaddr.IsLoopback(ev.DstIP) ||
-		labEscapeQuietPort(ev.DstPort) || cfg.IsContainerAddress(ev.DstIP) || isSensorProcess(quietPath) ||
-		isSensorUpdater(ev, quietPath) {
+		slices.Contains(cfg.LabQuietPorts, int(ev.DstPort)) || cfg.IsContainerAddress(ev.DstIP) || isSensorProcess(quietPath) ||
+		(isSensorUpdater(ev, quietPath) && e.isHub(ev.DstIP)) {
 		return
 	}
 	destination, err := netaddr.Parse(ev.DstIP)
@@ -158,8 +149,9 @@ func isSensorProcess(path string) bool {
 const sensorUpdateDir = "/var/lib/ominull/updates/"
 
 // isSensorUpdater reports whether a connection is the agent's package download:
-// root running curl into the update directory from an https URL at the very
-// address and port connected to. quietPath is empty when the agent found the
+// root running curl, with only the flags the installer passes, into the update
+// directory from an https URL at the very address and port connected to.
+// checkLabEscape also asks that the address be the hub's. quietPath is empty when the agent found the
 // reported path is not the file running, so a renamed copy never counts. An
 // unprivileged lab program cannot borrow it: curl connects before it opens
 // its output file, so the user and the URL are what tell the updater apart.
@@ -181,6 +173,16 @@ func isSensorUpdater(ev storage.Event, quietPath string) bool {
 	}
 	if out != sensorUpdateDir+"agent.deb" || len(args) < 2 {
 		return false
+	}
+	// Anything else curl was told (-T, -d, -F, -K) can send data out.
+	for i := 1; i < len(args)-1; i++ {
+		switch args[i] {
+		case "-fsSL":
+		case "--cacert", "--proto", "-m", "-o":
+			i++
+		default:
+			return false
+		}
 	}
 	u, err := url.Parse(args[len(args)-1])
 	if err != nil || u.Scheme != "https" || u.User != nil {
@@ -216,6 +218,50 @@ func plural(n int, word string) string {
 		return "1 " + word
 	}
 	return fmt.Sprintf("%d %ss", n, word)
+}
+
+// worstZone is the most sensitive place a scan's window reached.
+func (e *Engine) worstZone(dsts []string) string {
+	cx := e.classContext()
+	seen := map[string]bool{}
+	for _, d := range dsts {
+		seen[cx.ZoneOf(d)] = true
+	}
+	for _, z := range []string{zoneInfra, zoneHome, zoneLab, zoneExternal} {
+		if seen[z] {
+			return z
+		}
+	}
+	return zoneLocal
+}
+
+// classOfDraft is the class a finding will get once written. The sweep
+// cooldowns key on it, so that a record cannot hold back a page.
+func (e *Engine) classOfDraft(a storage.AnomalyAlert, ep storage.Endpoint) string {
+	cx := e.classContext()
+	fields := map[string]any{}
+	if json.Unmarshal([]byte(a.Evidence), &fields) == nil && fields != nil {
+		fields["source_role"] = cx.RoleOf(ep)
+		if raw, err := json.Marshal(fields); err == nil {
+			a.Evidence = string(raw)
+		}
+	}
+	class, _ := cx.Classify(a)
+	return class
+}
+
+// SetHubAddress names the address agents reach the hub on, from its agent URL.
+// With none set (a name, not an address) the updater exemption isn't bound to it.
+func (e *Engine) SetHubAddress(ip string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.hubAddr = ip
+}
+
+func (e *Engine) isHub(ip string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.hubAddr == "" || e.hubAddr == ip
 }
 
 func scanEvidence(zone string, ports int) string {

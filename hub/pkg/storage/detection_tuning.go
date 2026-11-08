@@ -152,6 +152,9 @@ type DetectionTuning struct {
 	// the lab a lab host may reach before it pages.
 	LANSweepHosts  int `json:"lan_sweep_hosts"`
 	LabEscapeHosts int `json:"lab_escape_hosts"`
+	// LabQuietPorts are what a lab guest legitimately asks of the network
+	// outside the lab, for any host: names, time and an address.
+	LabQuietPorts []int `json:"lab_quiet_ports"`
 
 	// A beacon pages when its score is at least BeaconPageScore over at least
 	// BeaconPageSpanMin minutes and the destination is seen from at most
@@ -240,6 +243,7 @@ func defaultDetectionTuning() DetectionTuning {
 		AicoFleetOffMemoryHours: 24,
 		LANSweepHosts:           10,
 		LabEscapeHosts:          1,
+		LabQuietPorts:           []int{53, 67, 123},
 		BeaconPageScore:         0.90,
 		BeaconPageSpanMin:       30,
 		BeaconRareDevices:       1,
@@ -493,6 +497,9 @@ func (t DetectionTuning) normalised() DetectionTuning {
 	t.AicoFleetOffMemoryHours = clampInt(t.AicoFleetOffMemoryHours, 1, 168, 24)
 	t.LANSweepHosts = clampInt(t.LANSweepHosts, 2, 256, 10)
 	t.LabEscapeHosts = clampInt(t.LabEscapeHosts, 1, 256, 1)
+	if t.LabQuietPorts == nil {
+		t.LabQuietPorts = DefaultDetectionTuning().LabQuietPorts
+	}
 	if t.BeaconPageScore <= 0 || t.BeaconPageScore > 1 {
 		t.BeaconPageScore = 0.90
 	}

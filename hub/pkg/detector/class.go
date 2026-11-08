@@ -70,9 +70,10 @@ func NewClassContext(cfg storage.DetectionTuning, endpoints []storage.Endpoint, 
 }
 
 // RoleOf names an endpoint's role: an explicit role tag (agent, lab, infra,
-// personal), else agent when the tuning names it agent-heavy or its telemetry
-// has shown an agent runtime, lab when it is a parked guest or inside the lab
-// networks, infra when it is a server or inside the infrastructure networks,
+// personal), else agent when the tuning names it agent-heavy, lab when it is
+// inside the lab networks (an agent runtime seen on a lab guest doesn't stop it
+// being a lab guest), agent when its telemetry has shown an agent runtime, lab
+// when it is a parked guest, infra when it is a server or inside the infrastructure networks,
 // and personal otherwise (laptops and desktops).
 func (cx *ClassContext) RoleOf(ep storage.Endpoint) string {
 	switch r := strings.ToLower(strings.TrimSpace(ep.RoleTag)); r {
@@ -80,9 +81,13 @@ func (cx *ClassContext) RoleOf(ep storage.Endpoint) string {
 		return r
 	}
 	switch {
-	case cx.cfg.IsAgentHeavy(ep) || (cx.cfg.AgentHeavyObserved && cx.observed[ep.ID]):
+	case cx.cfg.IsAgentHeavy(ep):
 		return storage.RoleAgent
-	case storage.NormalizePresence(ep.Presence) == storage.PresenceParked || cx.cfg.IsLabAddress(ep.IP):
+	case cx.cfg.IsLabAddress(ep.IP):
+		return storage.RoleLab
+	case cx.cfg.AgentHeavyObserved && cx.observed[ep.ID]:
+		return storage.RoleAgent
+	case storage.NormalizePresence(ep.Presence) == storage.PresenceParked:
 		return storage.RoleLab
 	case cx.cfg.IsInfraAddress(ep.IP) || strings.EqualFold(ep.RoleTag, "server"):
 		return storage.RoleInfra

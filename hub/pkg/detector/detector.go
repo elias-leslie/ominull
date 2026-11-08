@@ -30,6 +30,7 @@ type Engine struct {
 	inventory      map[string]map[string]bool         // tenant -> enrolled endpoint addresses (admin_fanout.go)
 	inventoryAt    map[string]time.Time
 	alertCooldown  map[string]time.Time // alertKey -> last triggered time
+	hubAddr        string               // the address agents reach the hub on (SetHubAddress)
 	silence        *silenceWatch        // endpoints already reported as gone quiet
 	classes        classCache           // endpoints the classifier reads (class.go)
 	tuning         storage.DetectionTuning
@@ -106,6 +107,7 @@ func warmingUp(ep storage.Endpoint, cfg storage.DetectionTuning, now time.Time) 
 
 type portAccess struct {
 	port uint16
+	dst  string
 	t    time.Time
 }
 
@@ -948,10 +950,16 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 				seenPorts[p.port] = true
 			}
 		}
-		recent = append(recent, portAccess{port: ev.DstPort, t: now})
+		recent = append(recent, portAccess{port: ev.DstPort, dst: ev.DstIP, t: now})
 		seenPorts[ev.DstPort] = true
 		e.portHistory[sweepKey] = recent
 		distinctCount := len(seenPorts)
+		var scanned []string
+		if len(seenPorts) >= portSweepShellPorts {
+			for _, p := range recent {
+				scanned = append(scanned, p.dst)
+			}
+		}
 		e.mu.Unlock()
 
 		portThreshold := portSweepPorts
@@ -959,7 +967,10 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 			portThreshold = portSweepShellPorts
 		}
 		if distinctCount >= portThreshold {
-			alertKey := fmt.Sprintf("portsweep:%s:%s", ev.EndpointID, procKey)
+			evidence := scanEvidence(e.worstZone(scanned), distinctCount)
+			// A recorded scan has its own cooldown: it cannot hide the page.
+			alertKey := fmt.Sprintf("portsweep:%s:%s:%s", ev.EndpointID, procKey,
+				e.classOfDraft(storage.AnomalyAlert{AnomalyType: "PORT_SCAN_RECON", EndpointID: ev.EndpointID, DstIP: ev.DstIP, DstPort: ev.DstPort, Evidence: evidence}, endpoint))
 			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
@@ -982,7 +993,7 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 					Title:       alert.Title,
 					Description: alert.Description,
 					Details:     fmt.Sprintf("Distinct Ports: %d in 10s window | Process: %s", distinctCount, ev.ProcessPath),
-					Evidence:    scanEvidence(e.classContext().ZoneOf(ev.DstIP), distinctCount),
+					Evidence:    evidence,
 					ProcessPath: ev.ProcessPath,
 					DstIP:       ev.DstIP,
 					DstPort:     ev.DstPort,
@@ -1056,18 +1067,21 @@ func (e *Engine) checkSweeps(ev storage.Event, geo threatintel.GeoRecord, endpoi
 			// A sweep reaching a floor port has its own cooldown: an earlier
 			// sweep on ordinary ports (explained, a note) cannot hide it.
 			floor := sweepFloorPorts(window)
+			zoneHosts := map[string]int{}
+			cx := e.classContext()
+			for ip := range window {
+				zoneHosts[cx.ZoneOf(ip)]++
+			}
+			sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
+				"sweep_actor": sweepActor(window), "floor_ports": floor, "zone_hosts": zoneHosts})
 			alertKey := fmt.Sprintf("lateral_sweep:%s:%s", ev.EndpointID, procKey)
 			if len(floor) > 0 {
 				alertKey = fmt.Sprintf("lateral_sweep_floor:%s:%s", ev.EndpointID, procKey)
 			}
+			// The record a shell's lower threshold raises has its own cooldown
+			// too: the page at lan_sweep_hosts comes after it.
+			alertKey += ":" + e.classOfDraft(storage.AnomalyAlert{AnomalyType: "LATERAL_PORT_SWEEP", EndpointID: ev.EndpointID, DstIP: ev.DstIP, DstPort: ev.DstPort, Evidence: string(sweepEvidence)}, endpoint)
 			if !e.shouldSuppressAlert(alertKey, sweepCooldown) {
-				zoneHosts := map[string]int{}
-				cx := e.classContext()
-				for ip := range window {
-					zoneHosts[cx.ZoneOf(ip)]++
-				}
-				sweepEvidence, _ := json.Marshal(map[string]any{"sweep_targets": sweepTargetList(window), "sweep_window_seconds": 60, "admin_rule": why,
-					"sweep_actor": sweepActor(window), "floor_ports": floor, "zone_hosts": zoneHosts})
 				alert := storage.Alert{
 					ID:          uuid.New().String(),
 					TenantID:    ev.TenantID,
