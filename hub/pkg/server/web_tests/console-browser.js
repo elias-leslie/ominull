@@ -546,7 +546,14 @@
   assert(!document.querySelector('.route'),'The route was already painted');
   a.render();
   assert(document.querySelector('.route'),'The link stayed blank after the list arrived');
+  for(let i=0;i<40&&document.querySelector('.route').textContent.includes('Loading host alerts');i++) await wait();
+  assert(!document.querySelector('.route').textContent.includes('Loading host alerts'),'The linked machine never read its alerts');
   a.closeRoute();
+  a.state.routeKey=bare.key;
+  document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+  assert(a.state.routeKey==='','Escape did not cancel a link still waiting for the list');
+  a.render();
+  assert(!document.querySelector('.route'),'A cancelled link opened anyway');
  });
  await check('An empty machine list says why and only offers what this login can do', async () => {
   const loaded=a.state.assetsLoaded;
@@ -554,7 +561,7 @@
    a.state.assetsLoaded=true;
    assert(a.emptyFleet(true).textContent.includes('Install an agent'),'Admin lost the way to add a machine');
    const tenant=a.emptyFleet(false).textContent;
-   assert(tenant.includes('your client')&&!tenant.includes('Install an agent'),'Scoped login told to do what it cannot: '+tenant);
+   assert(tenant.includes('you can see')&&!tenant.includes('Install an agent'),'Scoped login told to do what it cannot: '+tenant);
    a.state.assetsLoaded=false;
    assert(a.emptyFleet(true).textContent.includes('could not be read'),'A failed read looks like an empty fleet');
   } finally { a.state.assetsLoaded=loaded; }

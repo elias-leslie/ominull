@@ -649,6 +649,8 @@
           renderStrip();
           if (!sheetEl && !routeEl && !typingInField({target: document.activeElement}) && !state.pointerDragging && (!selection || selection.isCollapsed)) { setStale(false); renderBody(); }
           else setStale(true);
+          /* A link waiting for the list opens as soon as its machine arrives. */
+          if (state.routeKey && !routeEl && !sheetEl && state.assetByKey[state.routeKey]) renderRoute();
         }, 0);
       } else if (!reading) {
         Object.keys(resources).forEach(function (key) { resources[key].updated = 0; });
@@ -1043,6 +1045,7 @@
       c.measured_flows = r.measured_flows ? c.flows : 0;
       c.blocked = Math.min(c.flows, r.blocked);
       ["bytes_in", "bytes_out"].forEach(function (k) { c[k] = Math.round(r[k] * Math.max(w.scale, first / 1440)); });
+      if (c.sessions) c.sessions = c.sessions.map(function (p) { return Object.assign({}, p, { flows: c.flows, measured_flows: c.measured_flows, bytes_in: c.bytes_in, bytes_out: c.bytes_out }); });
       delete c.first_min; delete c.last_min;
       return c;
     }).filter(function (c) {
@@ -1600,6 +1603,7 @@
   function demoTuning() {
     var defaults = {
       off_hours_start: 22, off_hours_end: 5, off_hours_zone: "Local", off_hours_enabled: true,
+      agent_egress_policy: { mode: "observe", block_endpoints: [], rules: [{ id: "unknown-uploads", action: "flag", domains: ["paste.example.net"] }] },
       beacon_enabled: true, beacon_min_samples: 12, beacon_min_span_minutes: 10,
       beacon_min_interval_seconds: 5, beacon_max_interval_seconds: 3600,
       beacon_score_threshold: 0.8, beacon_cooldown_minutes: 30,
@@ -4987,14 +4991,19 @@
       }
       arrayOf(policy.rules).forEach(addRow);
       if (!arrayOf(policy.rules).length) addRow();
-      var mode = h("select", { "aria-label": "How the rules apply" },
-        h("option", { value: "observe", text: "Observe: rows show what the rules would do", selected: policy.mode !== "enforce" }),
-        h("option", { value: "enforce", text: "Enforce: flag rules write a finding, block rules hold", selected: policy.mode === "enforce" }));
-      var machines = h("input", { type: "text", value: arrayOf(policy.block_endpoints).join(", "), placeholder: "No machine", "aria-label": "Lab machines that hold block rules", title: "Endpoint ids of lab machines. Blocks are only held on lab machines" });
+      var mode = h("select", { "aria-label": "How the rules apply", title: "Observe: rows only show what the rules would do. Enforce: flag rules write a finding that never asks, block rules hold on the machines named here" },
+        h("option", { value: "observe", text: "Observe", selected: policy.mode !== "enforce" }),
+        h("option", { value: "enforce", text: "Enforce", selected: policy.mode === "enforce" }));
+      var machines = h("input", { type: "text", value: arrayOf(policy.block_endpoints).join(", "), placeholder: "Lab machine ids", "aria-label": "Lab machines that hold block rules", title: "Endpoint ids of lab machines. Blocks are only held on lab machines; with none named, a block rule stops nothing" });
       var save = h("button", { cls: "btn btn-primary", type: "button", text: "Save", on: { click: function () {
         var rules = Array.prototype.map.call(rows.children, function (r) { return r.readRule(); }).filter(function (r) { return r.id || r.domains.length || r.cidrs.length || r.ports.length || r.session || r.runtime; });
         request("/api/v1/detection/tuning", "POST", { agent_egress_policy: { mode: mode.value, block_endpoints: splitList(machines.value), rules: rules } }).then(function () {
-          closeSheet(); toast("Agent rules saved", "ok"); refresh();
+          var named = splitList(machines.value).length;
+          var idle = rules.some(function (r) { return r.action === "block"; }) && (mode.value !== "enforce" || !named);
+          closeSheet();
+          if (idle) toast("Saved, but the block rules stop nothing yet: " + (mode.value !== "enforce" ? "set Applies to Enforce" + (named ? "" : " and name a lab machine") : "name a lab machine"), "warn");
+          else toast(mode.value === "enforce" ? "Agent rules saved and switched on" : "Agent rules saved. Rows show what they would do", "ok");
+          refresh();
         }, function (e) { toast((e && e.message) || "Could not save", "crit"); });
       } } });
       openSheet("Agent rules", h("div", { cls: "stack" },
@@ -10202,6 +10211,8 @@
     var asset = state.assetByKey[state.routeKey];
     if (!asset) { if (state.assetsLoaded) state.routeKey = ""; return; }
     loadRouteDetail(state.routeKey);
+    /* A linked machine with no agent gets no other first read of its scope. */
+    if (!hostScopes[state.routeKey]) loadHostScope(state.routeKey);
 
     var ep = asset.endpoint;
     var sc = asset.scan;
@@ -10868,7 +10879,8 @@
       if (sheetEl) { requestCloseSheet(); return; }
       if (ctxMenu) { closeCtx(); return; }
       if (accountPop) { closeAccountPop(); return; }
-      if (routeEl) { closeRoute(); return; }
+      /* A link still waiting for the list counts: Escape cancels it. */
+      if (routeEl || state.routeKey) { closeRoute(); return; }
       if (openDrawer) { closeDrawer(); return; }
       if (state.query) { state.query = ""; render(); return; }
       return;
@@ -11161,11 +11173,11 @@
     });
   }
 
-  /* A failed read is not an empty fleet, and a login scoped to one client can
-     neither install an agent nor sweep a subnet from here. */
+  /* A failed read is not an empty fleet, and only an admin can install an agent
+     or sweep a subnet from here. */
   function emptyFleet(isAdmin) {
     if (!state.assetsLoaded) return h("div", { cls: "empty", text: "The machine list could not be read." });
-    if (!isAdmin) return h("div", { cls: "empty" }, h("p", { text: "No machines in your client yet." }), h("p", { cls: "dim-2", text: "An admin adds them by installing an agent or sweeping a subnet." }));
+    if (!isAdmin) return h("div", { cls: "empty" }, h("p", { text: "No machines you can see yet." }), h("p", { cls: "dim-2", text: "An admin adds them by installing an agent or sweeping a subnet." }));
     return h("div", { cls: "empty" }, h("p", { text: "No machines yet." }), h("p", { cls: "dim-2", text: "Install an agent on one, or sweep a subnet to find what is on it." }));
   }
 
