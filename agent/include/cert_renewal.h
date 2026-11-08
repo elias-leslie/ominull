@@ -28,6 +28,9 @@
  * client_certificate object. False when the object or key is absent, the value
  * does not end within cap, or it holds anything but base64. */
 static inline bool CertRenewal_Field(const char* json, const char* key, char* out, size_t cap) {
+#ifdef HI_BASE64_CERT
+    return hi_cert_field(json, key, out, cap);
+#else
     if (!json || !key || !out || cap < 2) return false;
     out[0] = '\0';
     const char* obj = strstr(json, "\"client_certificate\":{");
@@ -57,12 +60,16 @@ static inline bool CertRenewal_Field(const char* json, const char* key, char* ou
     }
     out[i] = '\0';
     return true;
+#endif
 }
 
 /* CertRenewal_DecodePEM decodes b64 into out as a NUL-terminated PEM document
  * that must open with the expected BEGIN line and close with an END line.
  * Returns the length, or 0 when it does not. */
 static inline size_t CertRenewal_DecodePEM(const char* b64, const char* begin, char* out, size_t cap) {
+#ifdef HI_BASE64_CERT
+    return hi_cert_decode_pem(b64, begin, out, cap);
+#else
     if (!b64 || !begin || !out || cap < 2) return 0;
     size_t n = Response_Base64Decode(b64, strlen(b64), (uint8_t*)out, cap - 1);
     if (n == 0) return 0;
@@ -72,6 +79,7 @@ static inline size_t CertRenewal_DecodePEM(const char* b64, const char* begin, c
         return 0;
     }
     return n;
+#endif
 }
 
 /* A swap is: write <key>.new and <cert>.new, prove them, hard-link the live

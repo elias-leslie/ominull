@@ -53,6 +53,7 @@
 #endif
 
 #include "response_canonical.h"
+#include "hub_input.h"
 #include "ed25519_verify.h"
 #include "terminal_frame.h"   /* TermJson: bounded JSON reader for the screen offer payload */
 
@@ -218,6 +219,9 @@ static inline int Response_B64Val(char c) {
  * than two pad characters or output past out_cap makes it return 0, so a
  * value is never silently truncated or read two ways. */
 static inline size_t Response_Base64Decode(const char* in, size_t in_len, uint8_t* out, size_t out_cap) {
+#ifdef HI_BASE64_CERT
+    return hi_base64_decode(in, in_len, out, out_cap);
+#else
     size_t out_len = 0, chars = 0, pad = 0;
     uint32_t buf = 0;
     int bits = 0;
@@ -242,6 +246,7 @@ static inline size_t Response_Base64Decode(const char* in, size_t in_len, uint8_
     }
     if (pad && chars % 4 != 0) return 0;
     return out_len;
+#endif
 }
 
 static inline bool Response_LoadPublicKey(const char* key_path, uint8_t pub_bytes[32]) {

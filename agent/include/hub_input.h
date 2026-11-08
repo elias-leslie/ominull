@@ -19,6 +19,7 @@
 #ifdef OMINULL_HUB_INPUT
 /* One switch per family, flipped as each one passes its differential test. */
 #define HI_TERM_FRAME
+#define HI_BASE64_CERT
 #endif
 
 enum {
