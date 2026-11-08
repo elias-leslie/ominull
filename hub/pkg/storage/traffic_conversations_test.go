@@ -111,7 +111,7 @@ func TestTrafficConversationsFoldAndMark(t *testing.T) {
 		t.Fatalf("blocked flow: %+v", smb)
 	}
 	c := res.Counts
-	if c.All != 4 || c.Flagged != 2 || c.Open != 1 || c.New != 3 || c.Blocked != 1 || c.In != 1 || c.Out != 3 {
+	if c.All != 4 || c.Flagged != 2 || c.Open != 1 || c.OpenFindings != 1 || c.New != 3 || c.Blocked != 1 || c.In != 1 || c.Out != 3 {
 		// python3, sshd's client and smbclient were all first reached in the window.
 		t.Fatalf("counts: %+v", c)
 	}
@@ -138,6 +138,9 @@ func TestTrafficConversationsFoldAndMark(t *testing.T) {
 		}
 		if tc.q.Limit == 2 && (!r.Truncated || r.Matching != 4) {
 			t.Errorf("a capped list says it is truncated: %+v", r)
+		}
+		if tc.q.Mark == "blocked" && (r.MatchingFlows != 1 || r.MatchingBytesIn != 100 || r.MatchingBytesOut != 50) {
+			t.Errorf("totals follow the filter: %+v", r)
 		}
 	}
 }

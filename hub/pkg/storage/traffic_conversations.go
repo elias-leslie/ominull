@@ -66,26 +66,32 @@ type ConversationFindings struct {
 type TrafficConversationCounts struct {
 	All     int `json:"all"`
 	Flagged int `json:"flagged"`
-	Open    int `json:"open"`
-	New     int `json:"new"`
-	Blocked int `json:"blocked"`
-	Out     int `json:"out"`
-	In      int `json:"in"`
+	Open    int `json:"open"` // rows with an open finding
+	// OpenFindings is how many open findings those rows carry.
+	OpenFindings int `json:"open_findings"`
+	New          int `json:"new"`
+	Blocked      int `json:"blocked"`
+	Out          int `json:"out"`
+	In           int `json:"in"`
 }
 
 // TrafficConversations is the conversations answer for one window.
 type TrafficConversations struct {
-	AsOf          time.Time                 `json:"as_of"`
-	WindowStart   time.Time                 `json:"window_start"`
-	WindowEnd     time.Time                 `json:"window_end"`
-	RetainedFrom  *time.Time                `json:"retained_from,omitempty"`
-	LatestFlow    *time.Time                `json:"latest_flow,omitempty"`
-	NewKnown      bool                      `json:"new_known"`
-	ProfilesFrom  *time.Time                `json:"profiles_from,omitempty"`
-	Counts        TrafficConversationCounts `json:"counts"`
-	Matching      int                       `json:"matching"`
-	Truncated     bool                      `json:"truncated"`
-	Conversations []TrafficConversation     `json:"conversations"`
+	AsOf         time.Time                 `json:"as_of"`
+	WindowStart  time.Time                 `json:"window_start"`
+	WindowEnd    time.Time                 `json:"window_end"`
+	RetainedFrom *time.Time                `json:"retained_from,omitempty"`
+	LatestFlow   *time.Time                `json:"latest_flow,omitempty"`
+	NewKnown     bool                      `json:"new_known"`
+	ProfilesFrom *time.Time                `json:"profiles_from,omitempty"`
+	Counts       TrafficConversationCounts `json:"counts"`
+	Matching     int                       `json:"matching"`
+	// The matching rows' totals, for a summary that follows the filters.
+	MatchingFlows    int64                 `json:"matching_flows"`
+	MatchingBytesIn  int64                 `json:"matching_bytes_in"`
+	MatchingBytesOut int64                 `json:"matching_bytes_out"`
+	Truncated        bool                  `json:"truncated"`
+	Conversations    []TrafficConversation `json:"conversations"`
 }
 
 // ConversationQuery narrows the folded set: Search matches host, program,
@@ -153,6 +159,7 @@ func (s *Store) QueryTrafficConversations(filter TrafficFilter, q ConversationQu
 			out.Counts.Flagged++
 			if c.Findings.Open > 0 {
 				out.Counts.Open++
+				out.Counts.OpenFindings += c.Findings.Open
 			}
 		}
 		if c.New {
@@ -183,6 +190,9 @@ func (s *Store) QueryTrafficConversations(filter TrafficFilter, q ConversationQu
 		if q.Direction != "" && c.Direction != q.Direction {
 			continue
 		}
+		out.MatchingFlows += int64(c.Flows)
+		out.MatchingBytesIn += int64(c.BytesIn)
+		out.MatchingBytesOut += int64(c.BytesOut)
 		out.Conversations = append(out.Conversations, c)
 	}
 	out.Matching = len(out.Conversations)

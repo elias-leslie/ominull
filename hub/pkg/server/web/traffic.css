@@ -139,6 +139,15 @@ body[data-section="traffic"] #view {
 .tf-stat[data-tone="warn"] {
   color: var(--warn);
 }
+.tf-outside {
+  color: var(--crit);
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+}
+.tf-outside:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
 .tf-timeline:empty {
   display: none;
 }
@@ -215,6 +224,11 @@ body[data-section="traffic"] #view {
 .tf-table td {
   vertical-align: top;
 }
+/* Long names wrap here; the console's tables keep cells on one line. */
+.tf-table .c-who,
+.tf-table .c-peer {
+  white-space: normal;
+}
 .tf-table tbody tr {
   cursor: pointer;
 }
@@ -279,6 +293,7 @@ body[data-section="traffic"] #view {
   color: var(--ink);
   font: inherit;
   text-align: left;
+  white-space: normal;
   cursor: pointer;
   overflow-wrap: anywhere;
 }

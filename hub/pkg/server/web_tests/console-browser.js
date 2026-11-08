@@ -299,6 +299,7 @@
   for(let i=0;i<100 && rows().length!==flagged;i++) await wait();
   assert(a.state.trafficFilter.mark==='flagged' && chip('Flagged').getAttribute('aria-pressed')==='true','Flagged did not turn on');
   assert(rows().length===flagged && rows().every(r=>r.querySelector('.tf-mark[data-kind="finding"]')),'Flagged shows rows without a finding');
+  assert(document.querySelector('.tf-shown').textContent===flagged+' conversations','The count does not follow the filter: '+document.querySelector('.tf-shown').textContent);
   const opener=rows()[0].querySelector('.tf-open'); opener.focus(); opener.click(); await wait();
   const panel=document.querySelector('.tf-panel');
   assert(document.querySelector('.tf-workspace').dataset.panel==='open' && panel.contains(document.activeElement),'Details did not open and take focus');
@@ -323,6 +324,8 @@
   const box=document.querySelector('.tf-search'); box.focus(); box.value='nginx'; box.dispatchEvent(new Event('input',{bubbles:true}));
   for(let i=0;i<100 && !(rows().length && rows().every(r=>/nginx/.test(r.textContent)));i++) await wait();
   assert(document.activeElement===box,'Search lost focus');
+  await a.refresh(); await wait();
+  assert(!/paused/.test(document.getElementById('connection-status').textContent),'Traffic claims it is paused while it keeps painting');
   assert(rows().length && rows().every(r=>/nginx/.test(r.textContent)),'The list did not follow the search while the box had focus');
   box.value=''; a.state.trafficFilter=saved; a.state.section='assets'; a.render();
  });

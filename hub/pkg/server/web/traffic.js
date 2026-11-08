@@ -198,7 +198,7 @@
         ws.dataset.controls = open ? "open" : "closed";
         filterToggle.setAttribute("aria-expanded", String(open));
       },
-    }, icon("i-tag"), el("span", { class: "tf-toggle-n" }), el("span", { class: "tf-sr", text: "Filters" }));
+    }, icon("i-tag"), el("span", { text: "Filters" }), el("span", { class: "tf-toggle-n" }));
     const fresh = el("span", { class: "tf-fresh", role: "img" });
     const bar = el("div", { class: "tf-bar" }, search, filterToggle, hostField.node, windowField.node, el("span", { class: "tg-fill" }), fresh);
 
@@ -237,7 +237,7 @@
     };
     chips.in.node.classList.add("tf-chip-in");
     const extra = el("div", { class: "tg-set tf-extra", role: "group", "aria-label": "Other filters" });
-    const shown = el("span", { class: "tg-shown", "aria-live": "polite" });
+    const shown = el("span", { class: "tf-stat tf-shown", "aria-live": "polite", title: "Program-to-peer conversations matching the filters" });
     const clearBtn = el("button", { type: "button", class: "btn tg-button", text: "Clear filters", onclick: () => {
       search.value = "";
       api.onFilter({ clear: true });
@@ -251,7 +251,6 @@
       extra,
       el("span", { class: "tg-fill" }),
       sortField.node,
-      shown,
       clearBtn,
     );
 
@@ -358,7 +357,15 @@
       const t = ov.totals || {};
       const item = (iconId, text, tip, tone) =>
         el("span", { class: "tf-stat", "data-tone": tone || "", title: tip }, iconId ? icon(iconId) : null, el("span", { text }), el("span", { class: "tf-sr", text: " — " + tip }));
-      if (data.overview) {
+      const f = filter();
+      const narrowed = !!(cv && (f.q || f.mark || f.dir));
+      if (narrowed) {
+        summary.append(
+          item(null, "↓ " + bytes(cv.matching_bytes_in), "Received by the conversations shown (flows with a byte counter)"),
+          item(null, "↑ " + bytes(cv.matching_bytes_out), "Sent by the conversations shown (flows with a byte counter)"),
+          item(null, plural(Number(cv.matching_flows) || 0, "flow", "flows"), "Flows in the conversations shown"),
+        );
+      } else if (data.overview) {
         summary.append(
           item(null, "↓ " + bytes(t.bytes_in), "Received in this window (flows with a byte counter)"),
           item(null, "↑ " + bytes(t.bytes_out), "Sent in this window (flows with a byte counter)"),
@@ -370,7 +377,11 @@
           summary.append(item("g-watch", (pct === 0 ? "<1" : pct) + "% with byte counts", "Only " + (pct === 0 ? "under 1" : pct) + "% of flows carry a byte counter; the volume of the rest is unknown, not zero", "warn"));
         }
       }
-      if (cv) summary.append(item(null, plural(cv.counts ? cv.counts.all : 0, "conversation", "conversations"), "Program-to-peer conversations in this window"));
+      if (cv) summary.append(shown);
+      /* The rail counts every open finding; say when some are not in this list. */
+      const outside = cv ? api.openAlertCount() - ((cv.counts && cv.counts.open_findings) || 0) : 0;
+      if (outside > 0)
+        summary.append(el("button", { type: "button", class: "tf-link tf-stat tf-outside", title: "Open findings this list doesn't show: older than this window, filtered out, or not about a conversation. Opens Alerts", onclick: () => api.showAlerts() }, icon("i-alert"), el("span", { text: plural(outside, "open finding", "open findings") + " outside this view" })));
       const ws0 = when((cv || ov).window_start),
         we = when((cv || ov).window_end),
         rf = when((cv || ov).retained_from);
@@ -488,7 +499,7 @@
       chips.blocked.set(c.blocked || 0, f.mark === "blocked", "crit");
       chips.out.set(c.out || 0, f.dir === "out");
       chips.in.set(c.in || 0, f.dir === "in");
-      shown.textContent = cv.matching > rows.length ? num(rows.length) + " of " + num(cv.matching) : plural(cv.matching || 0, "conversation", "conversations");
+      shown.textContent = (cv.matching > rows.length ? num(rows.length) + " of " : "") + plural(cv.matching || 0, "conversation", "conversations");
       if (!rows.length) {
         const filtered = f.q || f.mark || f.dir || f.endpoint_id || extra.childElementCount;
         if (filtered) {

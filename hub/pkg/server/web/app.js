@@ -1046,10 +1046,11 @@
     });
     var by = { volume: function (a, b) { return b.bytes_in + b.bytes_out - a.bytes_in - a.bytes_out; }, recent: function (a, b) { return Date.parse(b.last_seen) - Date.parse(a.last_seen); }, flows: function (a, b) { return b.flows - a.flows; } }[q.get("sort")];
     if (by) rows.sort(by);
-    var shown = [], matching = 0;
+    var shown = [], picked = [], matching = 0;
+    counts.open_findings = 0;
     rows.forEach(function (c) {
       counts.all++;
-      if (c.findings) { counts.flagged++; if (c.findings.open) counts.open++; }
+      if (c.findings) { counts.flagged++; if (c.findings.open) { counts.open++; counts.open_findings += c.findings.open; } }
       if (c["new"]) counts["new"]++;
       if (c.blocked) counts.blocked++;
       counts[c.direction]++;
@@ -1058,13 +1059,16 @@
       if (mark === "blocked" && !c.blocked) return;
       if (dir && c.direction !== dir) return;
       matching++;
+      picked.push(c);
       if (shown.length < limit) shown.push(c);
     });
     return {
       as_of: new Date(w.end).toISOString(), window_start: new Date(w.start).toISOString(), window_end: new Date(w.end).toISOString(),
       retained_from: new Date(w.end - 14 * 86400000).toISOString(), latest_flow: new Date(w.end - 60000).toISOString(),
       new_known: true, profiles_from: new Date(w.end - 60 * 86400000).toISOString(),
-      counts: counts, matching: matching, truncated: matching > shown.length, conversations: shown
+      counts: counts, matching: matching, matching_flows: picked.reduce(function (t, c) { return t + c.flows; }, 0),
+      matching_bytes_in: picked.reduce(function (t, c) { return t + c.bytes_in; }, 0), matching_bytes_out: picked.reduce(function (t, c) { return t + c.bytes_out; }, 0),
+      truncated: matching > shown.length, conversations: shown
     };
   }
 
@@ -1493,7 +1497,7 @@
         var q = new URLSearchParams(path.split("?")[1] || "");
         if (base === "/api/v1/anomalies" && q.get("endpoint_id")) {
           var mine = arrayOf(DEMO_CACHE[base]).filter(function (a) { return a.endpoint_id === q.get("endpoint_id") && (!q.get("unacknowledged_only") || !a.acknowledged); });
-          resolve({ alerts: mine, total: mine.length, unacknowledged_total: mine.length });
+          resolve({ alerts: mine, total: mine.length, unacknowledged_total: arrayOf(DEMO_CACHE["/api/v1/anomalies"]).filter(function (a) { return !a.acknowledged; }).length });
           return;
         }
         if (base === "/api/v1/traffic/conversations") { resolve(demoTrafficConversations(q)); return; }
@@ -4417,7 +4421,7 @@
       h("div", { cls: "actions" }, searchInput, bulkAckBtn, ackAllBtn, clearResolvedBtn));
 
     if (af.asset_id || af.endpoint_id) filterBar.appendChild(h("div", { cls: "uf uf-g2" },
-      h("span", { text: "Host scope: " + (af.asset_id || af.endpoint_id) + (af.asset_id ? " · recorded source identity only; older unattributed findings excluded" : "") }),
+      h("span", { text: "Host scope: " + (af.asset_id || (arrayOf(state.endpoints).find(function (e) { return e.id === af.endpoint_id; }) || {}).hostname || af.endpoint_id) + (af.asset_id ? " · recorded source identity only; older unattributed findings excluded" : "") }),
       h("button", { cls: "btn mini", type: "button", text: "Clear host scope", on: { click: function () { af.asset_id=""; af.endpoint_id=""; af.page=1; refresh(); } } })));
 
     // 3. Alerts Table
@@ -4938,6 +4942,8 @@
           go("topology");
         },
         openFlow: function (flow) { openEventInspectionSheet(flow); },
+        openAlertCount: function () { return state.unackAlertsTotal || 0; },
+        showAlerts: function () { state.alertsFilter = { page: 1, limit: 50 }; go("alerts"); },
         copy: function (text) {
           if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { toast("Copied " + text, "ok"); }, function () { toast("Couldn't copy " + text + "."); });
           else toast("Couldn't copy " + text + ".");
@@ -10765,6 +10771,16 @@
     });
     scored.sort(function (a, b) { return b.score - a.score; });
     paletteItems = scored.slice(0, 60).map(function (x) { return x.it; });
+    /* An address need not be a known asset: it may be a peer. */
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(q) || (q.indexOf(":") >= 0 && /^[0-9a-f:.]+$/.test(q))) paletteItems.push({
+      group: "Traffic", label: "Traffic with " + q, mono: true, iconId: "i-traffic",
+      run: function () {
+        state.trafficFilter = { range: "7d", dst_ip: q };
+        state.trafficConversations = null;
+        state.trafficOverview = null;
+        go("traffic");
+      }
+    });
     if (paletteCursor >= paletteItems.length) paletteCursor = 0;
 
     var list = paletteEl.querySelector(".palette-list");
@@ -11542,7 +11558,9 @@
         renderStrip();
         var alertBadge = $("rail-alert-badge");
         if (alertBadge) alertBadge.textContent = state.unackAlertsTotal || 0;
-        setStale(true);
+        /* Traffic paints its own answers, so its view is not paused. */
+        setStale(state.section !== "traffic");
+        if (state.section === "traffic") updateTraffic();
         return;
       }
 
