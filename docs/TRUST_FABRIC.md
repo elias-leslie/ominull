@@ -104,8 +104,12 @@ audits each change (`AGENT_APPLY_REPORT`) and shows the report in
 what the hub signed; only this report says what the agent could not do with it.
 
 The rules outlive the agent. After a restart it recognises the isolation from its
-own rules and keeps it. When the dead-man timer lifts an isolation it removes only
-the default deny, so a block on a peer stays where it was.
+own rules and keeps it. An agent that can't reach its hub lifts the isolation itself
+after five minutes if nobody supervised it (a detector's or one adopted at first
+start) and after twelve hours if it is an owner's. That is waking time, however long
+each failed heartbeat takes: time asleep doesn't count, and an agent restart starts it
+over. It removes only the default deny, so a block on a peer stays where it was, and
+if the hub comes back still wanting the isolation it goes straight back on.
 
 A hub that changes address while a machine is isolated is followed. While the hub
 isn't answering, the agent looks its name up again and adds any new address beside

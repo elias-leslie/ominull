@@ -519,3 +519,35 @@ func TestIncidentKeysKeepSeparatePagesApart(t *testing.T) {
 		t.Error("one sweep's alerts should stay one incident")
 	}
 }
+
+// A drill cuts a lab machine's agent off on purpose, so its dark sensor is recorded
+// and the owner isn't asked. Only a lab tag or a lab network earns that: a parked
+// server still pages, and an agent runtime seen on a lab guest changes nothing.
+func TestALabMachinesDarkSensorIsRecordedNotPaged(t *testing.T) {
+	cfg := storage.DefaultDetectionTuning()
+	cfg.LabCIDRs = []string{"10.20.0.0/24"}
+	eps := []storage.Endpoint{
+		{ID: "guest", IP: "10.20.0.101", RoleTag: "workstation"},
+		{ID: "tagged", IP: "10.0.0.13", RoleTag: "Lab"},
+		{ID: "runtime", IP: "10.20.0.102", RoleTag: storage.RoleAgent},
+		{ID: "pc", IP: "10.0.0.12", Presence: storage.PresenceAlwaysOn},
+		{ID: "parked", IP: "10.0.0.14", RoleTag: "server", Presence: storage.PresenceParked},
+	}
+	dark := func(c storage.DetectionTuning, id string) string {
+		class, _ := NewClassContext(c, eps, nil).Classify(storage.AnomalyAlert{
+			EndpointID: id, AnomalyType: "ENDPOINT_SILENT", Evidence: `{"sensor_dark":true}`})
+		return class
+	}
+	for id, want := range map[string]string{
+		"guest": storage.ClassRecord, "tagged": storage.ClassRecord, "runtime": storage.ClassRecord,
+		"pc": storage.ClassPage, "parked": storage.ClassPage, "gone": storage.ClassPage,
+	} {
+		if got := dark(cfg, id); got != want {
+			t.Errorf("%s: got %s, want %s", id, got, want)
+		}
+	}
+	cfg.LabDarkSensorQuiet = false
+	if got := dark(cfg, "guest"); got != storage.ClassPage {
+		t.Errorf("lab machine with the policy off: got %s", got)
+	}
+}

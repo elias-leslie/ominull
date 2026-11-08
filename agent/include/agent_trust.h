@@ -1876,6 +1876,26 @@ static inline int Trust_DeadmanBeats(const TrustContext* t, int unsupervisedBeat
     return (int)((int64_t)TRUST_DEADMAN_OWNER_SECONDS * 1000 / beatMillis);
 }
 
+/* The most one failed heartbeat counts for. A silent hub makes a heartbeat wait
+ * out its timeouts, tens of seconds at worst, and that time counts. Callers' clocks
+ * stop while the machine sleeps; a longer gap is a machine stopped some other way,
+ * such as a paused VM, which has not been without its hub for that long either. */
+#define TRUST_DEADMAN_GAP_CAP_MS 60000
+
+/* Trust_DeadmanElapsed counts one failed heartbeat towards the dead-man limit
+ * and says whether the limit is reached. The limit is beats * beatMillis of waking
+ * time, however long each failure took. nowMs is a monotonic clock; the caller
+ * zeroes *missedMs and *lastMs when the hub answers. Past the limit it stays true,
+ * so a release that failed is tried again every beat. */
+static inline bool Trust_DeadmanElapsed(int64_t* missedMs, int64_t* lastMs, int64_t nowMs, int beats, int beatMillis) {
+    int64_t step = beatMillis;
+    if (*lastMs > 0 && nowMs > *lastMs) step = nowMs - *lastMs;
+    if (step > TRUST_DEADMAN_GAP_CAP_MS) step = TRUST_DEADMAN_GAP_CAP_MS;
+    *lastMs = nowMs;
+    *missedMs += step;
+    return *missedMs >= (int64_t)beats * beatMillis;
+}
+
 /* Trust_OfferRefusal checks a response job offer (collection, script,
  * terminal, screen) beyond its signature: the offer's kind must be the kind the grant
  * signs (so an isolation or update grant can never open a terminal), and the

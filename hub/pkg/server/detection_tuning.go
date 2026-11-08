@@ -232,6 +232,7 @@ func tuningDelta(before, after storage.DetectionTuning) string {
 	add("agent egress mode", before.AgentEgressPolicy.Mode, after.AgentEgressPolicy.Mode)
 	listDelta("agent-heavy endpoints", before.AgentHeavyEndpoints, after.AgentHeavyEndpoints)
 	listDelta("agent-heavy roles", before.AgentHeavyRoles, after.AgentHeavyRoles)
+	add("lab dark sensor quiet", before.LabDarkSensorQuiet, after.LabDarkSensorQuiet)
 	add("agent-heavy when a runtime is seen", before.AgentHeavyObserved, after.AgentHeavyObserved)
 	add("agent egress enabled", before.AgentEgressOn, after.AgentEgressOn)
 	add("agent baseline days", before.AgentBaselineDays, after.AgentBaselineDays)

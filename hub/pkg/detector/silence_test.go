@@ -475,3 +475,46 @@ func TestAicosWordGoesToTheNewestEnrolment(t *testing.T) {
 		}
 	}
 }
+
+// A lab machine's dark sensor is only recorded, so once the machine leaves the lab
+// that open row doesn't stand in for the page, even across a hub restart.
+func TestARecordedLabDarkSensorDoesNotSwallowALaterPage(t *testing.T) {
+	yes := true
+	engine, store := silentEngine(t)
+	store.SetAlertClassifier(engine.stampClass)
+	now := time.Now().UTC()
+	put := func(tag string) {
+		t.Helper()
+		if err := store.UpsertEndpoint(storage.Endpoint{ID: "guest", TenantID: "default", Hostname: "guest", OS: "linux", RoleTag: tag,
+			Status: "online", LastSeenAt: now.Add(-40 * time.Minute), CreatedAt: now.Add(-48 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(storage.RoleLab)
+	later := now.Add(16 * time.Minute)
+	aicoSays(t, store, []storage.AicoMachine{{Machine: "guest", Up: &yes}}, now, later)
+	for _, at := range []time.Time{later, later.Add(time.Minute)} {
+		engine.SweepSilence(at)
+	}
+	got := anomaliesOfType(t, store, "ENDPOINT_SILENT")
+	if len(got) != 1 || storage.AlertClass(got[0]) != storage.ClassRecord {
+		t.Fatalf("a lab machine's dark sensor should be recorded: %+v", got)
+	}
+	put(storage.RolePersonal)
+	fresh, _ := silentEngineOn(t, store)
+	store.SetAlertClassifier(fresh.stampClass)
+	fresh.SweepSilence(later.Add(2 * time.Minute))
+	got = anomaliesOfType(t, store, "ENDPOINT_SILENT")
+	if len(got) != 2 {
+		t.Fatalf("want a second finding once it left the lab, got %d", len(got))
+	}
+	pages := 0
+	for _, a := range got {
+		if storage.AlertClass(a) == storage.ClassPage {
+			pages++
+		}
+	}
+	if pages != 1 {
+		t.Fatalf("want one page, got %d", pages)
+	}
+}

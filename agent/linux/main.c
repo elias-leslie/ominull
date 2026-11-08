@@ -2039,8 +2039,8 @@ static bool g_ForgetApplied = false;
 static OMINULL_HUB_TARGETS g_FollowPending;
 static bool g_DeadmanReleased = false;
 
-/* OMINULL_DEADMAN_BEATS is how many consecutive heartbeats may fail while this
- * host is isolated before it releases itself.
+/* OMINULL_DEADMAN_BEATS is how many heartbeats' worth of time the hub may stay
+ * silent while this host is isolated before it releases itself.
  *
  * The readiness gate is a prediction; this is the backstop, and it is what makes
  * the whole arrangement safe to use. Without it, a defect in the floor means a
@@ -2054,7 +2054,10 @@ static bool g_DeadmanReleased = false;
  * minutes - long enough to outlast all three, short enough that a person who has
  * just isolated a host is still watching when it comes back. */
 /* The count itself comes from Trust_DeadmanBeats (agent_trust.h): 100 beats
- * for an isolation nobody supervised, twelve hours for an owner's. */
+ * for an isolation nobody supervised, twelve hours for an owner's. Those beats
+ * are measured as time (Trust_DeadmanElapsed): a hub that silently drops packets
+ * makes each failed heartbeat wait out its timeout, and five minutes must not
+ * become ten. */
 
 /* SyncEnforcement reconciles this host's whole link state - isolation, the
  * mesh peer list and the isolation allow list - against the hub's answer on
@@ -2310,7 +2313,7 @@ static void FollowHubAddress(const LINUX_AGENT_CONFIG *config) {
 }
 
 static void HubContact(bool accepted) {
-    static int missed = 0;
+    static int64_t missedMs = 0, lastMissMs = 0;
 
     if (accepted) {
         if (g_DeadmanReleased) {
@@ -2319,21 +2322,24 @@ static void HubContact(bool accepted) {
             fflush(stdout);
             g_DeadmanReleased = false;
         }
-        missed = 0;
+        missedMs = lastMissMs = 0;
         return;
     }
     AdoptRulesInForce();
     if (!appliedIsolated) {
-        missed = 0;                          /* nothing to roll back */
+        missedMs = lastMissMs = 0;           /* nothing to roll back */
         return;
     }
-    if (++missed < Trust_DeadmanBeats(&g_Trust, 100, 3000)) return;
+    struct timespec tick;
+    clock_gettime(CLOCK_MONOTONIC, &tick);
+    if (!Trust_DeadmanElapsed(&missedMs, &lastMissMs, (int64_t)tick.tv_sec * 1000 + tick.tv_nsec / 1000000,
+                              Trust_DeadmanBeats(&g_Trust, 100, 3000), 3000)) return;
 
     if (!g_ApplyRefused) {
-        printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. "
+        printf("[!] Isolated, and the hub has not answered for %lld seconds. "
                "Releasing this host's isolation: an isolation the hub cannot lift is not a "
                "containment, it is a lost endpoint. Quarantined peers stay blocked.\n",
-               missed);
+               (long long)(missedMs / 1000));
         fflush(stdout);
     }
 
@@ -2357,7 +2363,7 @@ static void HubContact(bool accepted) {
     appliedIsolated = false;
     g_DeadmanReleased = true;
     g_ForgetApplied = true;
-    missed = 0;
+    missedMs = lastMissMs = 0;
 }
 
 /* What this host actually uses the network for at the infrastructure layer.

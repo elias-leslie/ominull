@@ -150,13 +150,15 @@ func (s *Store) NetworkAttributionState() (refreshedAt time.Time, source string,
 	return refreshedAt, source, count, err
 }
 
-// HasOpenDarkSensor is HasOpenAnomaly for a finding that called the sensor dark.
+// HasOpenDarkSensor is HasOpenAnomaly for a finding that called the sensor dark
+// and paged: one only recorded (a lab machine's) doesn't stand in for a page.
 func (s *Store) HasOpenDarkSensor(endpointID, anomalyType string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM anomaly_alerts
 		WHERE endpoint_id = ? AND anomaly_type = ? AND acknowledged = 0
-			AND json_valid(evidence) AND json_extract(evidence, '$.sensor_dark') = 1`,
-		endpointID, anomalyType).Scan(&count)
+			AND json_valid(evidence) AND json_extract(evidence, '$.sensor_dark') = 1
+			AND COALESCE(json_extract(evidence, '$.class'), ?) = ?`,
+		endpointID, anomalyType, ClassPage, ClassPage).Scan(&count)
 	if err != nil {
 		return false, err
 	}

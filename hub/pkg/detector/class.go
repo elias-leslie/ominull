@@ -237,6 +237,12 @@ func (cx *ClassContext) Classify(a storage.AnomalyAlert) (string, string) {
 	case "ENDPOINT_SILENT":
 		ep, known := cx.byID[a.EndpointID]
 		switch {
+		// Tagged or addressed as lab, not RoleOf: presence must not hide a dark
+		// sensor (a parked server still pages), and an agent runtime seen on a lab
+		// guest doesn't stop it being a lab guest.
+		case ev.SensorDark && known && cx.cfg.LabDarkSensorQuiet &&
+			(strings.EqualFold(strings.TrimSpace(ep.RoleTag), storage.RoleLab) || cx.cfg.IsLabAddress(ep.IP)):
+			return record("a lab machine's sensor is dark; drills cut these off on purpose")
 		case ev.SensorDark:
 			return page("Aico says the machine is up while its sensor is dark")
 		case !known || storage.NormalizePresence(ep.Presence) != storage.PresenceAlwaysOn:

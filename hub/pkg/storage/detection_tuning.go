@@ -130,6 +130,10 @@ type DetectionTuning struct {
 	// roles are left out by default: cutting the agent workstation or the
 	// hypervisor off the network is worse than the match.
 	AutoIsolateRoles []string `json:"auto_isolate_roles"`
+	// LabDarkSensorQuiet records a dark sensor on a lab machine (tagged lab, or
+	// on a lab network) instead of paging: drills cut those agents off on
+	// purpose, and the owner should not be asked about that.
+	LabDarkSensorQuiet bool `json:"lab_dark_sensor_quiet"`
 
 	// PageIncidentHours is how long one incident (device, rule family,
 	// counterparty) stays open: later alerts add to its count and only an
@@ -230,6 +234,7 @@ func defaultDetectionTuning() DetectionTuning {
 		BeaconBrowsers:          defaultBeaconBrowsers(),
 		IntelPageConfidence:     IntelPageConfidenceDefault,
 		AutoIsolateRoles:        []string{RoleLab, RolePersonal},
+		LabDarkSensorQuiet:      true,
 		PageIncidentHours:       24,
 		AicoFleetFreshMinutes:   10,
 		AicoFleetOffMemoryHours: 24,

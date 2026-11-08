@@ -87,6 +87,10 @@ int Agent_TrustDeadmanBeats(int unsupervisedBeats, int beatMillis) {
     return Trust_DeadmanBeats(&g_Trust, unsupervisedBeats, beatMillis);
 }
 
+bool Agent_TrustDeadmanElapsed(int64_t* missedMs, int64_t* lastMs, int64_t nowMs, int beats, int beatMillis) {
+    return Trust_DeadmanElapsed(missedMs, lastMs, nowMs, beats, beatMillis);
+}
+
 const char* Agent_TrustOfferRefusal(const char* kind, const void* grant) {
     if (!g_TrustLoaded) return "trust state not loaded";
     const char* why = Trust_OfferRefusal(&g_Trust, kind, (const ResponseGrant*)grant);

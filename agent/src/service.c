@@ -635,8 +635,8 @@ static bool g_ForgetApplied = false;
 static char g_DeadmanNote[160] = {0};
 static char g_ApplyNote[160] = {0};
 
-/* OMINULL_DEADMAN_BEATS is how many consecutive heartbeats may fail while this
- * host is isolated before it releases itself.
+/* OMINULL_DEADMAN_BEATS is how many heartbeats' worth of time the hub may stay
+ * silent while this host is isolated before it releases itself.
  *
  * The readiness gate is a prediction made before the host is cut off; this is
  * what happens when the prediction was wrong. Without it, a defect in the floor
@@ -647,7 +647,9 @@ static char g_ApplyNote[160] = {0};
  * Not 1: a hub restart, a brief network event or a rolling release must not lift
  * every isolation in the fleet. This loop flushes every 2500ms, so 120 is five
  * minutes - long enough to outlast all three, short enough that the person who
- * just isolated the host is still watching. */
+ * just isolated the host is still watching. Measured as time
+ * (Agent_TrustDeadmanElapsed): a hub that silently drops packets makes each failed
+ * flush wait out its timeouts, which on a real run made five minutes sixteen. */
 #define OMINULL_DEADMAN_BEATS 120   /* unsupervised; an owner's isolation: Agent_TrustDeadmanBeats */
 
 /* The hub counts what it signed as enforced, so an entry the engine can't hold
@@ -885,7 +887,7 @@ static void FollowHubAddress(const AGENT_CONFIG *config) {
 }
 
 static void HubContact(bool accepted) {
-    static int missed = 0;
+    static int64_t missedMs = 0, lastMissMs = 0;
 
     if (accepted) {
         if (g_DeadmanNote[0]) {
@@ -893,21 +895,25 @@ static void HubContact(bool accepted) {
                    "decides what this host enforces from here.\n");
             g_DeadmanNote[0] = '\0';
         }
-        missed = 0;
+        missedMs = lastMissMs = 0;
         return;
     }
     AdoptIsolationInForce();
     if (!appliedIsolated) {
-        missed = 0;
+        missedMs = lastMissMs = 0;
         return;
     }
-    if (++missed < Agent_TrustDeadmanBeats(OMINULL_DEADMAN_BEATS, 2500)) return;
+    /* Unbiased: unlike GetTickCount64 it stops while the machine sleeps. */
+    ULONGLONG awake = 0;
+    QueryUnbiasedInterruptTime(&awake);
+    if (!Agent_TrustDeadmanElapsed(&missedMs, &lastMissMs, (int64_t)(awake / 10000),
+                                   Agent_TrustDeadmanBeats(OMINULL_DEADMAN_BEATS, 2500), 2500)) return;
 
     /* A failed release stays past the limit and tries again every beat. */
     static bool releaseFailed = false;
-    if (!releaseFailed) printf("[!] Isolated, and the hub has not answered for %d consecutive heartbeats. Releasing "
+    if (!releaseFailed) printf("[!] Isolated, and the hub has not answered for %lld seconds. Releasing "
            "this host's isolation: an isolation the hub cannot lift is not a containment, it is a "
-           "lost endpoint. Quarantined peers stay blocked.\n", missed);
+           "lost endpoint. Quarantined peers stay blocked.\n", (long long)(missedMs / 1000));
     fflush(stdout);
 
     /* Only the default deny goes. Quarantined peers stay blocked, including ones
@@ -921,7 +927,7 @@ static void HubContact(bool accepted) {
                   "released by the dead-man timer after losing contact with the hub");
         g_DeadmanNote[sizeof(g_DeadmanNote) - 1] = '\0';
         releaseFailed = false;
-        missed = 0;
+        missedMs = lastMissMs = 0;
     } else {
         if (!releaseFailed) {
             printf("[-] The dead-man release failed; this host is still isolated and still cannot "

@@ -303,6 +303,28 @@ static void test_grants(int64_t now) {
     one(now, FX_G_AUTO);
     expect("detector isolation applied", T.state.isolated && strcmp(T.state.source, "auto") == 0 && T.state.allowCount == 0);
     expect("detector isolation keeps the 5 min dead-man", Trust_DeadmanBeats(&T, 100, 3000) == 100);
+    {
+        /* Beats that fail fast: 100 of them, three seconds apart, is the limit. */
+        int64_t missed = 0, last = 0, clock = 1000;
+        int beats = 0;
+        while (!Trust_DeadmanElapsed(&missed, &last, clock, 100, 3000)) { beats++; clock += 3000; }
+        expect("fast failures reach the limit on the 100th beat", beats == 99);
+        /* A silent hub: each failure takes eleven seconds, and five minutes stays five. */
+        missed = last = 0; clock = 1000; beats = 0;
+        while (!Trust_DeadmanElapsed(&missed, &last, clock, 100, 3000)) { beats++; clock += 11000; }
+        expect("slow failures reach the limit in time, not in count", beats == 27);
+        expect("a limit reached stays reached", Trust_DeadmanElapsed(&missed, &last, clock, 100, 3000));
+        /* A clock that jumps hours (a paused VM) counts one capped gap. */
+        missed = last = 0; clock = 1000;
+        Trust_DeadmanElapsed(&missed, &last, clock, 100, 3000);
+        expect("a long stop does not spend the limit", !Trust_DeadmanElapsed(&missed, &last, clock + 6 * 3600 * 1000, 100, 3000));
+        expect("the stop counts one capped gap", missed == 3000 + TRUST_DEADMAN_GAP_CAP_MS);
+        /* A clock that does not move still counts one beat, so the limit can't hang. */
+        missed = last = 0;
+        Trust_DeadmanElapsed(&missed, &last, 5000, 100, 3000);
+        Trust_DeadmanElapsed(&missed, &last, 5000, 100, 3000);
+        expect("a stuck clock counts beats", missed == 6000);
+    }
 
     one(now, FX_G_MESH_ON);
     bool on = false;

@@ -263,6 +263,7 @@ bool Agent_TrustIsolated(void);
 int Agent_TrustAllow(char out[][64], int cap);
 int Agent_TrustPeers(char out[][64], int cap);
 int Agent_TrustDeadmanBeats(int unsupervisedBeats, int beatMillis);
+bool Agent_TrustDeadmanElapsed(int64_t* missedMs, int64_t* lastMs, int64_t nowMs, int beats, int beatMillis);
 const char* Agent_TrustOfferRefusal(const char* kind, const void* grant);
 const char* Agent_TrustOfferGrantRefusal(const char* job_id, const void* grant, const char* payload_json, const char* endpoint_id);
 void Agent_TrustResponseKeyPath(char* out, size_t cap);
