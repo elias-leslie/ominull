@@ -22,3 +22,4 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 - Phase 3: measured agent move from C to Go, portable Go collector (Windows first), labeled Neri-lab drill harness, time-boxed Velociraptor benchmark
 - Phase 4: business line with paid certs, licensing, multi-tenant and macOS
 - Umbrella direction: a lean sensor-and-response fleet (vault proposal direction-2026-10)
+- Agent reading cost: docs/project-guide.md "CLI and API" (25 KB, read 43 times in 4 sessions) holds route and policy detail agents page through; put each rule next to its code or in ominullctl --help and keep the guide to pointers (usage-burn lane 7 report, Nov 8)
