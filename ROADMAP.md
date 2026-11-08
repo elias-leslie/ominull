@@ -3,7 +3,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 
 ## Now
 ## Next
-- Trust fabric leftover: a full 12-hour owner dead-man timer has never been waited out; it held 39 minutes on Linux and 6 on Windows, and the 5-minute timer released on both. Moved-hub following on real Windows was proven with a hosts-file answer, not through a resolver in the baseline (plan: docs/TRUST_FABRIC.md)
+- Trust fabric leftover: a full 12-hour owner dead-man timer has never been waited out; it held 39 minutes on Linux and 6 on Windows, and the 5-minute timer released on both. Unexplained on Windows 1.8.122: in one moved-hub drill, about a minute after isolate was sent, a lookup failed and another program on VM 110 reached the hub's real address (alert 138873ae); after the move that address was closed to it, and the next run didn't probe it before the move, so check whether isolation applied late or a path stayed open. Tested but not seen live: the Windows agent's hourly retry of a dropped certificate (plan: docs/TRUST_FABRIC.md)
 ## Later
 - AI weak-point finder, on a small graph in the hub's own database, not BloodHound (evaluation: docs/BLOODHOUND_EVALUATION.md)
 - Household: back up the router and repair the approved parental, DNS and Ominull config; then IoT segmentation and DNS filtering (vault proposal direction-2026-10)
