@@ -62,6 +62,18 @@ static void test_payload(void) {
     char json[400];
     snprintf(json, sizeof(json), "{\"session_id\":\"s\",\"connect_token\":\"%.*s\"}", 200, longtok);
     assert(!TermPayload_Parse(json, sid, sizeof(sid), prog, sizeof(prog), tok, sizeof(tok)));
+    /* A repeated member is refused, so no two readers can pick different ones. */
+    assert(!TermPayload_Parse("{\"session_id\":\"s\",\"program\":\"/bin/sh\",\"program\":\"/bin/bash\",\"connect_token\":\"t\"}",
+                              sid, sizeof(sid), prog, sizeof(prog), tok, sizeof(tok)));
+    assert(!TermPayload_Parse("{\"session_id\":\"s\",\"session_id\":\"s2\",\"connect_token\":\"t\"}",
+                              sid, sizeof(sid), prog, sizeof(prog), tok, sizeof(tok)));
+    /* \u takes exactly four hex digits: no sign, space or 0x prefix. */
+    char out[16];
+    assert(TermJson_CopyString("\\u0041", 6, out, sizeof(out)) && strcmp(out, "A") == 0);
+    assert(!TermJson_CopyString("\\u+07f", 6, out, sizeof(out)));
+    assert(!TermJson_CopyString("\\u 7f0", 6, out, sizeof(out)));
+    assert(!TermJson_CopyString("\\u0x7f", 6, out, sizeof(out)));
+    assert(!TermJson_CopyString("\\u004", 5, out, sizeof(out)));
     printf("[+] offer payload parser\n");
 }
 

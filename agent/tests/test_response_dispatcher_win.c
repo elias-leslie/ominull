@@ -11,6 +11,7 @@
 #include <stdbool.h>
 
 #include "../include/response_dispatcher.h"
+#include "../include/screen_windows.h"
 
 static int failures = 0;
 
@@ -153,6 +154,20 @@ static void test_screen_canonical_vectors(void) {
     expect("unattended:false refused", ScreenCanonicalFromOffer("{\"mode\":\"control\",\"unattended\":false}", canon, sizeof(canon)), false);
     expect("bad mode refused", ScreenCanonicalFromOffer("{\"mode\":\"spy\"}", canon, sizeof(canon)), false);
     expect("missing mode refused", ScreenCanonicalFromOffer("{\"operator\":\"x\"}", canon, sizeof(canon)), false);
+
+    /* The worker's reader refuses a repeated member, like the digest rebuild. */
+    ScreenSessionParamsWin sp;
+    expect("worker reads a hub screen offer",
+           Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"mode\":\"view\",\"connect_token\":\"t\",\"operator\":\"admin\"}", &sp) &&
+               strcmp(sp.mode, "view") == 0, true);
+    expect("worker refuses a repeated mode",
+           Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"mode\":\"view\",\"mode\":\"control\",\"connect_token\":\"t\"}", &sp), false);
+    expect("worker refuses a repeated unattended",
+           Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"mode\":\"view\",\"unattended\":true,\"unattended\":true,\"connect_token\":\"t\"}", &sp), false);
+    expect("worker refuses a repeated session_id",
+           Screen_ParsePayloadWindows("{\"session_id\":\"s1\",\"session_id\":\"s2\",\"mode\":\"view\",\"connect_token\":\"t\"}", &sp), false);
+    expect("canonical refuses a repeated mode",
+           ScreenCanonicalFromOffer("{\"mode\":\"view\",\"mode\":\"control\"}", canon, sizeof(canon)), false);
 }
 
 int main(void) {

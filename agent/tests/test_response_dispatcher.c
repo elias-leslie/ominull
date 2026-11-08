@@ -491,11 +491,22 @@ static void test_terminal_grant_verification(void) {
         expect("terminal nested program decoy fails", VerifyResponseGrant(&g, nested, "ep-screen", pub_path), false);
         const char* dup = "{\"session_id\":\"s1\",\"program\":\"/bin/sh\",\"program\":\"/bin/bash\",\"connect_token\":\"tok\"}";
         expect("terminal repeated program fails", VerifyResponseGrant(&g, dup, "ep-screen", pub_path), false);
-        const char* in_value = "{\"session_id\":\"\\\"program\\\":\\\"/bin/sh\",\"program\":\"/bin/bash\",\"connect_token\":\"tok\"}";
-        expect("terminal program text inside a value fails", VerifyResponseGrant(&g, in_value, "ep-screen", pub_path), false);
+        /* The old scrape matched "program" at the tail of the key x\"program. */
+        const char* in_key = "{\"x\\\"program\":\"/bin/sh\",\"session_id\":\"s1\",\"program\":\"/bin/bash\",\"connect_token\":\"tok\"}";
+        expect("terminal program text inside a key fails", VerifyResponseGrant(&g, in_key, "ep-screen", pub_path), false);
         char sid[64], prog[64], tok[128];
         expect("terminal worker reader refuses a repeated program", TermPayload_Parse(dup, sid, sizeof(sid), prog, sizeof(prog), tok, sizeof(tok)), false);
     }
+
+    /* A grant over the whole offer is no longer taken for either kind: the
+     * hub signs only the subset, and the fallback let a payload whose subset
+     * cannot be rebuilt through. */
+    const char* whole_t = "{\"session_id\":\"s1\",\"connect_token\":\"tok\"}";
+    if (screen_sign_grant(tmp_dir, key_path, whole_t, "terminal_session", &g))
+        expect("terminal whole-offer digest refused", VerifyResponseGrant(&g, whole_t, "ep-screen", pub_path), false);
+    const char* whole_s = "{\"session_id\":\"s1\",\"mode\":\"control\",\"connect_token\":\"tok\"}";
+    if (screen_sign_grant(tmp_dir, key_path, whole_s, "screen_session", &g))
+        expect("screen whole-offer digest refused", VerifyResponseGrant(&g, whole_s, "ep-screen", pub_path), false);
 
     unlink(key_path);
     unlink(pub_path);
