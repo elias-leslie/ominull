@@ -36,10 +36,13 @@ static BOOL FixtureSetOption(HINTERNET h, DWORD option, LPVOID value, DWORD len)
     if (option == WINHTTP_OPTION_CLIENT_CERT_CONTEXT && value) offered = TRUE;
     return TRUE;
 }
+static DWORD sendError = ERROR_WINHTTP_SECURE_FAILURE;
 static BOOL FixtureSend(HINTERNET h, LPCWSTR a, DWORD b, LPVOID c, DWORD d, DWORD e, DWORD_PTR f) {
     (void)h; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
     asks++;
-    return offered ? sendWithCert : answersWithout;
+    BOOL sent = offered ? sendWithCert : answersWithout;
+    if (!sent) SetLastError(sendError);
+    return sent;
 }
 static DWORD receiveError = SEC_E_UNTRUSTED_ROOT;
 static BOOL FixtureReceive(HINTERNET h, LPVOID a) {
@@ -103,9 +106,19 @@ int main(void) {
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) Check(&cases[i]);
     /* These don't reach the hub, so the last error is whatever they were given. */
     static const CASE unasked[] = {
-        {"a failure that can't be asked about", tls, FALSE, FALSE, FALSE, FALSE, true, false, 0},
+        {"a failure that can't be asked about", tls, FALSE, FALSE, FALSE, FALSE, false, true, 0},
     };
     Check(&unasked[0]);
+    /* The hub answering a moment later says nothing about a certificate that never got
+     * as far as a TLS failure. */
+    static const CASE notTLS = {"a hub restarting between the two questions", tls, TRUE, FALSE, FALSE, TRUE, false, true, 1};
+    sendError = ERROR_WINHTTP_CANNOT_CONNECT;
+    Check(&notTLS);
+    sendError = ERROR_WINHTTP_SECURE_FAILURE;
+    static const CASE timedOut = {"an answer that timed out", tls, TRUE, TRUE, FALSE, TRUE, false, true, 1};
+    receiveError = ERROR_WINHTTP_TIMEOUT;
+    Check(&timedOut);
+    receiveError = SEC_E_UNTRUSTED_ROOT;
     g_cached = (PCCERT_CONTEXT)(uintptr_t)1;
     g_certUnusable = false;
     asks = 0;
@@ -137,6 +150,21 @@ int main(void) {
     }
     if (!Hub_TransportReady(&config)) {
         puts("The preflight after a refusal didn't go through without the certificate");
+        failures++;
+    }
+    /* A dropped certificate gets another try on the hour, in case the drop was wrong. */
+    g_droppedAt = GetTickCount() - (CLIENT_CERT_RECHECK_MS - 60000);
+    if (Hub_AttachClientCert(FIXTURE_OTHER, &config) || g_cached) {
+        puts("A dropped certificate came back early");
+        failures++;
+    }
+    g_droppedAt = GetTickCount() - CLIENT_CERT_RECHECK_MS;
+    if (!Hub_AttachClientCert(FIXTURE_OTHER, &config) || !g_cached || g_certUnusable || !Hub_HasClientCert()) {
+        printf("A dropped certificate didn't come back on the hour: unusable %d\n", g_certUnusable);
+        failures++;
+    }
+    if (!Hub_RetryWithoutClientCert(FIXTURE_FAILED, tls, &config) || g_cached || !g_certUnusable) {
+        puts("A certificate still refused on the hour wasn't dropped again");
         failures++;
     }
     printf("Client certificate fallback failures: %d\n", failures);

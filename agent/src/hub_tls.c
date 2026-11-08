@@ -52,6 +52,12 @@
  * revoked or replaced hub identity is noticed within one coffee break. */
 #define PIN_REVALIDATE_MS (15 * 60 * 1000)
 
+/* A failed TLS exchange, as WinHTTP or Schannel reports it. A dead port, a timeout or a
+ * reset says nothing about a certificate. */
+static bool IsTLSFailure(DWORD err) {
+    return err == ERROR_WINHTTP_SECURE_FAILURE || (err & 0xFFFF0000u) == 0x80090000u;
+}
+
 void Hub_SplitURL(const char *url, char *host, size_t capacity, WORD *port, BOOL *isHttps) {
     bool tls = false;
     OminullParseHubURL(url, host, capacity, port, &tls);
@@ -249,8 +255,7 @@ static bool Preflight(const AGENT_CONFIG* config) {
         /* Under TLS 1.3 a hub refuses a certificate after the handshake, so the refusal
          * lands here, as a Schannel error, on real Windows. Every request waits on this
          * preflight, so here is enough: the next attempt goes without the certificate. */
-        DWORD receiveErr = GetLastError();
-        if (receiveErr == ERROR_WINHTTP_SECURE_FAILURE || (receiveErr & 0xFFFF0000u) == 0x80090000u)
+        if (IsTLSFailure(GetLastError()))
             Hub_RetryWithoutClientCert(hRequest, ERROR_WINHTTP_SECURE_FAILURE, config);
         goto done;
     }
@@ -464,12 +469,23 @@ static PCCERT_CONTEXT g_cached = NULL;
 /* Set once a certificate has proved it cannot complete a handshake. Without it
  * the retry window would reload the same unusable certificate every minute and
  * pay a failed send for it on every request. Re-enrolment is followed by a
- * restart, which is when it is worth trying again. */
+ * restart, which is when it is worth trying again. So is the hour's end: a drop
+ * that was wrong must not last, since a hub requiring certificates would then
+ * refuse this endpoint, updates included. */
+#define CLIENT_CERT_RECHECK_MS (60 * 60 * 1000)
 static bool g_certUnusable = false;
+static PCCERT_CONTEXT g_dropped = NULL;
+static DWORD g_droppedAt = 0;
 
 bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
     static DWORD lastAttempt = 0;
     static bool complained = false;
+
+    if (g_certUnusable && GetTickCount() - g_droppedAt >= CLIENT_CERT_RECHECK_MS) {
+        g_cached = g_dropped;
+        g_clientCertLoaded = true;
+        g_certUnusable = false;
+    }
 
     if (!Hub_UsesTLS(config) || !config->client_pfx_path[0] || g_certUnusable) {
         DeclareNoClientCert((HINTERNET)hRequest);
@@ -538,13 +554,13 @@ bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
  * this one nothing: whoever answered isn't the hub, and a lying name server shouldn't
  * cost the endpoint its identity. WinHTTP's failure flags can't tell the two apart, as
  * a hub rejecting this certificate sends the same alerts. So the hub gets asked afresh,
- * with the certificate and then without: only a hub that answers without it and not
- * with it puts the certificate down. If that can't even be asked, the certificate goes
- * before, since a lockout is the worse outcome. */
+ * with the certificate and then without: only a failed TLS exchange with it, then an
+ * answer without it, puts the certificate down. Anything less keeps it for the next try:
+ * a restarting hub or a dropped connection says nothing about the certificate. */
 /* One real request to the hub on a session of its own, so nothing pooled or remembered
  * stands in for it. A hub rejecting a certificate can do it after the handshake, so an
- * answer is what counts. *asked goes false when the request couldn't be made at all. */
-static bool HubAnswers(const AGENT_CONFIG* config, PCCERT_CONTEXT cert, bool* asked) {
+ * answer is what counts. *tlsFailed says the exchange itself failed as TLS. */
+static bool HubAnswers(const AGENT_CONFIG* config, PCCERT_CONTEXT cert, bool* tlsFailed) {
     char hostA[256] = {0};
     WCHAR host[256] = {0};
     WORD port = 0;
@@ -562,11 +578,13 @@ static bool HubAnswers(const AGENT_CONFIG* config, PCCERT_CONTEXT cert, bool* as
     if (request) {
         if (cert) WinHttpSetOption(request, WINHTTP_OPTION_CLIENT_CERT_CONTEXT, (LPVOID)cert, sizeof(CERT_CONTEXT));
         else DeclareNoClientCert(request);
-        ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0) &&
-             WinHttpReceiveResponse(request, NULL) && Hub_VerifyRequestPin(request, config);
+        if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0) &&
+            WinHttpReceiveResponse(request, NULL)) {
+            ok = Hub_VerifyRequestPin(request, config);
+        } else {
+            *tlsFailed = IsTLSFailure(GetLastError());
+        }
         WinHttpCloseHandle(request);
-    } else {
-        *asked = false;
     }
     if (connect) WinHttpCloseHandle(connect);
     if (session) WinHttpCloseHandle(session);
@@ -581,14 +599,16 @@ bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err, const AGENT_C
 
     if (err == ERROR_WINHTTP_SECURE_FAILURE && g_cached) {
         PCCERT_CONTEXT held = g_cached;
-        bool asked = true;
-        bool without = !HubAnswers(config, held, &asked) && asked && HubAnswers(config, NULL, &asked);
+        bool tlsFailed = false, ignored = false;
+        bool refused = !HubAnswers(config, held, &tlsFailed) && tlsFailed && HubAnswers(config, NULL, &ignored);
         SetLastError(err);
-        if ((asked && !without) || g_cached != held) return false;
+        if (!refused || g_cached != held) return false;
         fprintf(stderr, "[!] The client certificate this endpoint holds cannot complete a TLS "
                         "handshake (WinHTTP error %lu); dropping it and reporting under the API "
                         "key alone. Re-run enrolment to replace it.\n", err);
         /* Not freed: another thread may be presenting it, as in Hub_UseClientCert. */
+        g_dropped = held;
+        g_droppedAt = GetTickCount();
         g_certUnusable = true;
         g_clientCertLoaded = false;
         g_cached = NULL;
