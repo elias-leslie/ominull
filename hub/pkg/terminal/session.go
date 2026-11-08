@@ -874,27 +874,6 @@ func (m *Manager) RotateOperatorToken(sessionID string) (string, error) {
 	return token, nil
 }
 
-// DetachSession drops the operator side of a live session without touching the
-// remote process tree. The console reaches this by closing its WebSocket; this
-// is the explicit path, for a caller that has no socket to close.
-func (m *Manager) DetachSession(sessionID, reason string) error {
-	sess, err := m.GetSession(sessionID)
-	if err != nil {
-		return err
-	}
-	sess.mu.RLock()
-	relay := sess.relay
-	sess.mu.RUnlock()
-	if relay == nil {
-		return errors.New("session has no active relay")
-	}
-	if reason == "" {
-		reason = "operator_detached"
-	}
-	relay.DetachOperator(reason)
-	return nil
-}
-
 // IsLive reports whether a session still holds a slot and can be attached to.
 func (s *TerminalSession) IsLive() bool {
 	s.mu.RLock()

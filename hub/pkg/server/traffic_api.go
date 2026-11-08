@@ -165,14 +165,6 @@ func (s *Server) handleTrafficFlows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if this is a single flow detail request: /api/v1/traffic/flows/{id}
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/traffic/flows")
-	path = strings.TrimPrefix(path, "/")
-	if path != "" {
-		s.handleTrafficFlowDetail(w, r, path)
-		return
-	}
-
 	filter := parseTrafficFilter(s, r)
 	result, err := s.store.QueryTrafficFlows(filter)
 	if err != nil {
@@ -181,19 +173,4 @@ func (s *Server) handleTrafficFlows(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleTrafficFlowDetail(w http.ResponseWriter, r *http.Request, flowID string) {
-	tenantID := s.tenantFromRequest(r)
-	flow, err := s.store.GetTrafficFlowByID(flowID, tenantID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if flow == nil {
-		writeJSONError(w, http.StatusNotFound, "flow not found")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, flow)
 }

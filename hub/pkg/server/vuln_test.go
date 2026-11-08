@@ -244,23 +244,15 @@ func TestServer_VulnSnapshotsAndCatalog(t *testing.T) {
 		t.Fatalf("unexpected sync response: %+v", syncResp)
 	}
 
-	// 2. GET /api/v1/vulnerabilities/snapshots
-	reqSnaps := httptest.NewRequest(http.MethodGet, "/api/v1/vulnerabilities/snapshots", nil)
-	reqSnaps.Header.Set("X-API-Key", "test-admin-key-12345")
-	wSnaps := httptest.NewRecorder()
-	handler.ServeHTTP(wSnaps, reqSnaps)
-
-	if wSnaps.Code != http.StatusOK {
-		t.Fatalf("list snapshots returned %d: %s", wSnaps.Code, wSnaps.Body.String())
-	}
-	var snapsResp struct {
-		Snapshots []*vuln.FeedSnapshot `json:"snapshots"`
-	}
-	if err := json.NewDecoder(wSnaps.Body).Decode(&snapsResp); err != nil {
-		t.Fatalf("failed to decode snapshots list: %v", err)
-	}
-	if len(snapsResp.Snapshots) != 1 || snapsResp.Snapshots[0].ID != "snap-20260904-api-1" {
-		t.Fatalf("unexpected snapshots list: %+v", snapsResp.Snapshots)
+	// 2. Only the active snapshot is served; nothing lists them.
+	for _, path := range []string{"/api/v1/vulnerabilities/snapshots/", "/api/v1/vulnerabilities/snapshots/other"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "test-admin-key-12345")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s returned %d, want 404: %s", path, w.Code, w.Body.String())
+		}
 	}
 
 	// 3. GET /api/v1/vulnerabilities/snapshots/active

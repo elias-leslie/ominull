@@ -493,65 +493,6 @@ func (s *Server) handleTerminalSessionAttach(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(sess.Summary())
 }
 
-// handleTerminalSessionDetach drops the operator side of a live session and
-// leaves the remote process tree running. The console normally detaches by
-// closing its WebSocket; this exists for a caller that has none - a page that
-// was closed, or an operator releasing a session from the Assets row.
-func (s *Server) handleTerminalSessionDetach(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if s.terminalMgr == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "terminal manager not initialized")
-		return
-	}
-	if r.Header.Get("X-Auth-Method") == "api-key" {
-		writeJSONError(w, http.StatusForbidden, "static API keys cannot detach terminal sessions")
-		return
-	}
-	role := r.Header.Get("X-Role")
-	if role != "admin" && role != "operator" {
-		writeJSONError(w, http.StatusForbidden, "insufficient role permissions to detach a terminal session")
-		return
-	}
-
-	tenantID := s.tenantFromRequest(r)
-	if tenantID == "" {
-		tenantID = "default"
-	}
-
-	var req struct {
-		SessionID string `json:"session_id"`
-		Reason    string `json:"reason"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
-		writeJSONError(w, http.StatusBadRequest, "missing session_id")
-		return
-	}
-
-	sess, err := s.terminalMgr.GetSession(req.SessionID)
-	if err != nil || screen.IsScreen(sess.Program) {
-		writeJSONError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if sess.TenantID != tenantID {
-		writeJSONError(w, http.StatusForbidden, "session belongs to different tenant")
-		return
-	}
-
-	if err := s.terminalMgr.DetachSession(req.SessionID, req.Reason); err != nil {
-		writeJSONError(w, http.StatusConflict, "detach refused: "+err.Error())
-		return
-	}
-
-	s.audit(r, "TERMINAL_SESSION_DETACHED", req.SessionID,
-		fmt.Sprintf("Operator detached from terminal session %s on %s; remote process tree left running", req.SessionID, sess.EndpointID))
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(sess.Summary())
-}
-
 // terminalProgram picks and checks the program for a session. The hub goes by
 // what the endpoint reports it can run (response capabilities), never by its
 // OS name: Linux forkpty, Windows ConPTY and a later macOS backend all sit

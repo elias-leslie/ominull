@@ -620,7 +620,6 @@ func TestServer_ScreenAgentLabel(t *testing.T) {
 	for _, tc := range []struct{ method, path, body string }{
 		{http.MethodDelete, "/api/v1/terminal/sessions?id=" + id, ""},
 		{http.MethodPost, "/api/v1/terminal/sessions/close", `{"session_id":"` + id + `"}`},
-		{http.MethodPost, "/api/v1/terminal/sessions/detach", `{"session_id":"` + id + `"}`},
 	} {
 		req, _ := http.NewRequest(tc.method, ts.URL+tc.path, strings.NewReader(tc.body))
 		req.Header.Set("Authorization", "Bearer "+jwt)

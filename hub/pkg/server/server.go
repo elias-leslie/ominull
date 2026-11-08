@@ -1827,24 +1827,6 @@ func (s *Server) handleConsoleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleConsoleTrustInstructions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ca_download_url": "/api/v1/pki/ca.crt",
-		"hostname":        s.consoleTLSOpts.Hostname,
-		"instructions": map[string]string{
-			"linux_debian": "sudo cp ca.crt /usr/local/share/ca-certificates/ominull-ca.crt && sudo update-ca-certificates",
-			"linux_rhel":   "sudo cp ca.crt /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust",
-			"macos":        "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt",
-			"windows":      "Import-Certificate -FilePath .\\ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root",
-			"browser":      "Browser Settings -> Privacy and security -> Security -> Manage certificates -> Authorities -> Import ca.crt and check 'Trust this certificate for identifying websites'.",
-		},
-	})
-}
-
 func (s *Server) handlePKIEnroll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2723,68 +2705,6 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(alerts)
 }
 
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	addr := clientIP(r)
-	if s.throttle.blocked(addr) {
-		w.Header().Set("Retry-After", "60")
-		writeJSONError(w, http.StatusTooManyRequests, "too many failed authentication attempts; try again shortly")
-		return
-	}
-
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	if req.Username == "admin" && secretEqual(req.Password, s.adminKey) {
-		s.throttle.succeed(addr)
-		token, err := auth.GenerateJWT(auth.Claims{
-			UserID:   "usr-admin",
-			Username: "admin",
-			Role:     auth.RoleAdmin,
-			TenantID: "default",
-		}, s.adminKey, 24*time.Hour)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		_ = s.store.RecordAudit(storage.AuditEntry{
-			ID:        uuid.New().String(),
-			TenantID:  "default",
-			UserID:    "usr-admin",
-			Username:  "admin",
-			Action:    "LOGIN",
-			Resource:  "auth",
-			Details:   "Admin user logged in via master key",
-			IPAddress: clientIP(r),
-			Timestamp: time.Now().UTC(),
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "authenticated",
-			"token":  token,
-			"role":   auth.RoleAdmin,
-		})
-		return
-	}
-
-	if s.throttle.fail(addr) {
-		log.Printf("[!] %s has failed console login %d times in a minute; refusing it for the next minute.", addr, s.throttle.limit)
-	}
-	writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
-}
-
 func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3220,54 +3140,6 @@ func (s *Server) handleScannerFeedback(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-/* 8. VISUAL COMMUNICATIONS TOPOLOGY GRAPH HANDLER */
-
-func (s *Server) handleTopologyGraph(w http.ResponseWriter, r *http.Request) {
-	// Default 24h, not 1h: a known asset that was quiet in the last hour is
-	// still on the network, and the graph draws it dimmed rather than
-	// pretending it does not exist.
-	windowStr := r.URL.Query().Get("window")
-	windowDuration := 24 * time.Hour
-	switch windowStr {
-	case "1h":
-		windowDuration = 1 * time.Hour
-	case "6h":
-		windowDuration = 6 * time.Hour
-	case "7d":
-		windowDuration = 7 * 24 * time.Hour
-	default:
-		// Normalised, because the cache key is this string and an unrecognised
-		// window already fell through to 24h. Without this "?window=banana"
-		// would be a cache entry of its own.
-		windowStr = "24h"
-	}
-
-	// The graph is admin-only and takes no tenant, so the window is the whole
-	// key.
-	now := time.Now()
-	if cached := s.topology.get(windowStr, now); cached != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(cached)
-		return
-	}
-
-	topoData, err := s.store.GetTopologyGraph(windowDuration)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	body, err := json.Marshal(topoData)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.topology.put(windowStr, body, now)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
-}
-
 /* 8b. UNIFIED ASSET GRAPH + FLOW HANDLERS */
 
 // handleAssets returns the whole asset graph: one row per host, however many
@@ -3557,15 +3429,6 @@ func (s *Server) routes() *http.ServeMux {
 	// looking at an alert has to be able to see the rule that produced it - and
 	// the handler itself refuses a write from anyone but an administrator.
 	mux.HandleFunc("/api/v1/detection/tuning", s.authMiddleware(s.detectionTuningGate))
-	mux.HandleFunc("/api/v1/detection/coverage", s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.detector.ObservationCoverage())
-	}))
 	mux.HandleFunc("/api/v1/detection/expected", s.authMiddleware(s.handleExpectedRules))
 	mux.HandleFunc("/api/v1/detection/expected/mark", s.authMiddleware(s.handleMarkExpected))
 	mux.HandleFunc("/api/v1/detection/tuning/replay", s.authMiddleware(s.handleTuningReplay))
@@ -3586,7 +3449,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/router/flows", s.authMiddleware(s.handleRouterFlows))
 	mux.HandleFunc("/api/v1/router/talkers", s.authMiddleware(s.handleRouterTalkers))
 
-	mux.HandleFunc("/api/v1/enrolment/platforms", s.authMiddleware(s.handleEnrolmentPlatforms))
 	// A local one-use setup session has administrator weight for enrollment:
 	// first-run proof cannot complete until the operator can install an agent.
 	// The setup cookie is short-lived, HttpOnly, SameSite=Strict and CSRF-bound;
@@ -3662,14 +3524,12 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/traffic/overview", s.authMiddleware(s.handleTrafficOverview))
 	mux.HandleFunc("/api/v1/traffic/flows", s.authMiddleware(s.handleTrafficFlows))
 	mux.HandleFunc("/api/v1/traffic/conversations", s.authMiddleware(s.handleTrafficConversations))
-	mux.HandleFunc("/api/v1/traffic/flows/", s.authMiddleware(s.handleTrafficFlows))
 	mux.HandleFunc("/api/v1/threatintel/iocs", s.authMiddleware(s.handleThreatIntelIOCs))
 	mux.HandleFunc("/api/v1/threatintel/sync", s.authMiddleware(requireAdmin(s.handleThreatIntelSync)))
 	mux.HandleFunc("/api/v1/threatintel/domain-feeds", s.authMiddleware(s.handleDomainFeeds))
 	mux.HandleFunc("/api/v1/alerts", s.authMiddleware(s.handleAlerts))
 
 	// 5. RBAC Auth & Audit Logging API
-	mux.HandleFunc("/api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/v1/audit/logs", s.authMiddleware(s.handleAuditLogs))
 	mux.HandleFunc("/oidc/start", s.handleOIDCStart)
 	mux.HandleFunc("/oidc/callback", s.handleOIDCCallback)
@@ -3678,7 +3538,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/pki/ca.crt", s.handlePKICACert)
 	mux.HandleFunc("/api/v1/pki/enroll", s.authMiddleware(s.handlePKIEnroll))
 	mux.HandleFunc("/api/v1/console/status", s.handleConsoleStatus)
-	mux.HandleFunc("/api/v1/console/trust-instructions", s.handleConsoleTrustInstructions)
 
 	// 7. Multi-Tier Asset Discovery & Extensible Scanner API
 	// Discovery is an operator tool end to end: it sweeps a subnet from the
@@ -3693,7 +3552,6 @@ func (s *Server) routes() *http.ServeMux {
 
 	// 8. Visual Communications Topology Graph API
 	mux.HandleFunc("/api/v1/topology/workspace", s.authMiddleware(requireTopologyOperator(s.handleTopologyWorkspace)))
-	mux.HandleFunc("/api/v1/topology/graph", s.authMiddleware(requireAdmin(s.handleTopologyGraph)))
 	mux.HandleFunc("/api/v1/topology/networks", s.authMiddleware(requireAdmin(s.handleTopologyNetworks)))
 
 	// 8b. Unified asset graph.
@@ -3729,7 +3587,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/v1/terminal/limits", s.authMiddleware(s.responseGate(s.handleTerminalLimits)))
 	mux.HandleFunc("/api/v1/terminal/sessions/close", s.authMiddleware(s.responseGate(s.handleTerminalSessionClose)))
 	mux.HandleFunc("/api/v1/terminal/sessions/attach", s.authMiddleware(s.responseGate(s.handleTerminalSessionAttach)))
-	mux.HandleFunc("/api/v1/terminal/sessions/detach", s.authMiddleware(s.responseGate(s.handleTerminalSessionDetach)))
 	mux.HandleFunc("/api/v1/terminal/frames", s.authMiddleware(s.responseGate(s.handleTerminalFrames)))
 	mux.HandleFunc("/api/v1/terminal/ws/operator", s.responseGate(s.handleTerminalWSOperator))
 	mux.HandleFunc("/api/v1/terminal/ws/agent", s.responseGate(s.handleTerminalWSAgent))
@@ -3771,7 +3628,6 @@ func (s *Server) routes() *http.ServeMux {
 	// 14. Software Inventory & CVE Vulnerability Correlation API (Fail-closed behind responseGate)
 	mux.HandleFunc("/api/v1/software", s.authMiddleware(s.responseGate(s.handleSoftwareInventory)))
 	mux.HandleFunc("/api/v1/vulnerabilities", s.authMiddleware(s.responseGate(s.handleVulnerabilities)))
-	mux.HandleFunc("/api/v1/vulnerabilities/snapshots", s.authMiddleware(s.responseGate(s.handleVulnerabilitySnapshots)))
 	mux.HandleFunc("/api/v1/vulnerabilities/snapshots/", s.authMiddleware(s.responseGate(s.handleVulnerabilitySnapshots)))
 	mux.HandleFunc("/api/v1/vulnerabilities/sync", s.authMiddleware(requireAdmin(s.responseGate(s.handleVulnerabilities))))
 

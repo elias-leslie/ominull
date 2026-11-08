@@ -894,26 +894,3 @@ func TrafficFlowResultWithAnomalies(s *Store, flows []TrafficFlowItem, nextCurso
 		ActiveFilters: activeFilters,
 	}
 }
-
-func (s *Store) GetTrafficFlowByID(flowID string, tenantID string) (*TrafficFlowItem, error) {
-	rowID, err := strconv.ParseInt(flowID, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid flow id: %s", flowID)
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	flow, err := scanTrafficFlow(s.db.QueryRow("SELECT "+trafficFlowColumns+" FROM events WHERE id = ?", rowID))
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	if tenantID != "" && flow.TenantID != tenantID {
-		return nil, nil
-	}
-	return &flow, nil
-}

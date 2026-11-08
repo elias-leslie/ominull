@@ -116,16 +116,6 @@ func TestTrafficOverviewAndFlows(t *testing.T) {
 	if len(flowsRes.Flows) != 3 {
 		t.Fatalf("expected 3 flows in page, got %d", len(flowsRes.Flows))
 	}
-
-	// 3. Query Single Flow by ID
-	firstFlowID := flowsRes.Flows[0].ID
-	singleFlow, err := store.GetTrafficFlowByID(firstFlowID, "default")
-	if err != nil {
-		t.Fatalf("GetTrafficFlowByID failed: %v", err)
-	}
-	if singleFlow == nil || singleFlow.ID != firstFlowID {
-		t.Errorf("unexpected single flow: %+v", singleFlow)
-	}
 }
 
 // The trend lanes are built by laying out one slot per bucket and filing each
@@ -258,11 +248,10 @@ func TestOverviewReportsHowFarBackTelemetryGoes(t *testing.T) {
 	}
 }
 
-// TestTrafficFlowListAndDetailAgree pins that the flow list and the flow
-// detail read the same columns into the same item, including the derived
-// process name and protocol name, so a column added to one cannot be missed
-// by the other.
-func TestTrafficFlowListAndDetailAgree(t *testing.T) {
+// TestTrafficFlowListReadsEveryColumn pins that the flow list reads each column
+// into its item, including the derived process and protocol names, and that
+// another tenant sees none of it.
+func TestTrafficFlowListReadsEveryColumn(t *testing.T) {
 	store, err := New(filepath.Join(t.TempDir(), "traffic_agree.db"))
 	if err != nil {
 		t.Fatalf("storage.New() failed: %v", err)
@@ -360,18 +349,7 @@ func TestTrafficFlowListAndDetailAgree(t *testing.T) {
 
 	names := map[string]string{}
 	for _, listed := range res.Flows {
-		detail, err := store.GetTrafficFlowByID(listed.ID, "default")
-		if err != nil || detail == nil {
-			t.Fatalf("GetTrafficFlowByID(%s) = %v, %v", listed.ID, detail, err)
-		}
-		if !reflect.DeepEqual(listed, *detail) {
-			t.Errorf("list and detail differ for flow %s:\nlist   %+v\ndetail %+v", listed.ID, listed, *detail)
-		}
 		names[listed.EndpointID+"|"+listed.DstIP] = listed.ProcessName + "|" + listed.ProtoName
-
-		if other, err := store.GetTrafficFlowByID(listed.ID, "other-tenant"); err != nil || other != nil {
-			t.Errorf("flow %s visible to another tenant: %v, %v", listed.ID, other, err)
-		}
 	}
 
 	want := map[string]string{
@@ -401,10 +379,11 @@ func TestTrafficFlowListAndDetailAgree(t *testing.T) {
 		t.Errorf("observation not read back: %+v", win.Observation)
 	}
 
-	if missing, err := store.GetTrafficFlowByID("999999", "default"); err != nil || missing != nil {
-		t.Errorf("missing flow = %v, %v; want nil, nil", missing, err)
+	other, err := store.QueryTrafficFlows(TrafficFilter{TenantID: "other-tenant", Range: "1h", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryTrafficFlows for another tenant failed: %v", err)
 	}
-	if _, err := store.GetTrafficFlowByID("not-a-number", "default"); err == nil {
-		t.Error("non-numeric flow id accepted")
+	if len(other.Flows) != 0 {
+		t.Errorf("another tenant sees %d flows", len(other.Flows))
 	}
 }

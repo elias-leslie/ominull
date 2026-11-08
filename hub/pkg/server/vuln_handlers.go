@@ -377,7 +377,7 @@ func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
-// handleVulnerabilitySnapshots handles listing snapshots and retrieving active snapshot metadata.
+// handleVulnerabilitySnapshots serves the active snapshot.
 func (s *Server) handleVulnerabilitySnapshots(w http.ResponseWriter, r *http.Request) {
 	if s.vulnStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "vulnerability store not initialized")
@@ -409,17 +409,5 @@ func (s *Server) handleVulnerabilitySnapshots(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	snapshots, err := s.vulnStore.ListSnapshots()
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to list snapshots: "+err.Error())
-		return
-	}
-	if snapshots == nil {
-		snapshots = []*vuln.FeedSnapshot{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"snapshots": snapshots,
-	})
+	writeJSONError(w, http.StatusNotFound, "not found")
 }

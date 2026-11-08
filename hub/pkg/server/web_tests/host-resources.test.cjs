@@ -19,9 +19,3 @@ test('host identifiers cannot inherit or modify object prototypes',async()=>{
  }
 });
 
-test('response session identifier uses secure browser randomness',()=>{
- const line=source.split('\n').find(line=>line.includes('var browserSessionId ='));
- const scope={Math:{random(){throw Error('insecure randomness used')}},window:{crypto:require('node:crypto').webcrypto},bufToHex:buf=>Buffer.from(buf).toString('hex')};
- vm.runInNewContext(line,scope);
- assert.match(scope.browserSessionId,/^sess-browser-[a-f0-9]{32}$/);
-});

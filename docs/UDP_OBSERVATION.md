@@ -81,7 +81,7 @@ Rate detection compares measured bytes per second over the recorded interval, wi
 a one-second denominator floor to avoid extrapolating a microsecond burst. Its
 baseline and evidence use the same unit. Protocols and byte bases stay separate.
 Detector histories are capped at 8,192 entries each; least-recently-used eviction
-starts an empty baseline. `GET /api/v1/detection/coverage` reports counts and evictions.
+starts an empty baseline.
 
 ## Coverage limits
 

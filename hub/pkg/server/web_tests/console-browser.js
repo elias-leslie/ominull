@@ -166,7 +166,7 @@
   a.openRoute(db.key);
   await until(() => /Signed scripts/.test(cardText()), 'the db-01 lock card');
   const t = cardText();
-  assert(/Host-locked/.test(t) && /Only scripts Nightshift signed run here/.test(t),'Host lock missing: '+t);
+  assert(/Host-locked/.test(t) && /Only scripts signed by a key pinned here run/.test(t),'Host lock missing: '+t);
   assert(/2 packages are allowed to run on this machine: btrfs-scrub, cleanup/.test(t),'Always allowed packages missing: '+t);
   assert(/the lock level does not allow it/.test(t),'Last refusal missing: '+t);
   assert(/Lock: Signed scripts/.test(head()) && /Host-locked/.test(head()) && /Remote access off/.test(head()),'Head chips missing: '+head());
@@ -333,6 +333,20 @@
   const tf=a.state.trafficFilter;
   assert(tf.range==='7d' && tf.q==='nginx' && tf.dst_ip==='203.0.113.9' && !tf.mark,'An address did not set the filters, or a bad value got through: '+JSON.stringify(tf));
   box.value=''; a.state.trafficFilter=saved; a.state.section='assets'; a.render();
+ });
+ await check('a running sweep shows on its button, and the installer reaches the enrollment keys', async () => {
+  const saved=a.state.scanStatus;
+  a.state.section='assets'; a.state.scanStatus={status:'running',progress:40}; a.render();
+  const button=text=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim().toLowerCase()===text);
+  assert(button('sweeping 40%'),'A running sweep does not show on the button');
+  a.state.scanStatus=saved; a.render();
+  button('install agent').click();
+  await wait();
+  button('enrollment keys').click();
+  for(let i=0;i<100 && !document.querySelector('.sheet table, [role=dialog] table');i++) await wait();
+  assert(/enr-demo-gpo-01/.test(document.body.textContent) && button('revoke'),'The enrollment keys sheet does not list a key to revoke');
+  button('close').click();
+  await wait();
  });
  await check('a gated-looking action completes on the first request', async () => {
   const original=window.fetch;a.state.demo=false;const calls=[];

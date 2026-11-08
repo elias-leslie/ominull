@@ -895,11 +895,6 @@ func (e *Engine) InvalidateCollectorWindows(endpointID string) {
 	match := func(key string) bool { return strings.HasPrefix(key, prefix) }
 	e.beaconTracker.removeMatching(match)
 }
-func (e *Engine) ObservationCoverage() map[string]any {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return map[string]any{"window_capacity": 8192, "beacon_windows": len(e.beaconTracker.entries), "beacon_evictions": e.beaconTracker.evictions}
-}
 
 // servedFlow says the local end of this flow is a listening socket answering a
 // client. The agent reports every TCP socket it reads as OUTBOUND with its own

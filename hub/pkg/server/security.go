@@ -318,10 +318,8 @@ func (t *authThrottle) succeed(addr string) {
 // how long a request may take, not how much it may carry, so a client on a LAN
 // could hand any handler as many gigabytes as it could push in thirty seconds
 // and the hub would buffer all of it - json.Decoder and io.ReadAll both grow
-// until they are done or the process is killed. /api/v1/auth/login takes a body
-// before any credential is checked, so that reach did not even need a key: one
-// unauthenticated request could take the hub down, and with it every endpoint's
-// only way to be told it is quarantined.
+// until they are done or the process is killed: one request could take the hub
+// down, and with it every endpoint's only way to be told it is quarantined.
 const (
 	// maxTelemetryBody is the batch endpoint. Agents cap their own payload well
 	// below this; the headroom is for a busy endpoint after a long outage.

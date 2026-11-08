@@ -304,10 +304,6 @@ a {
   white-space: nowrap;
 }
 
-.hidden {
-  display: none !important;
-}
-
 [hidden] {
   display: none !important;
 }
@@ -497,123 +493,24 @@ a.rail-btn {
 .health[data-state="down"] .pip {
   background: var(--crit);
 }
-
-.theme-btn {
-  width: 34px;
-  height: 26px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-c);
-  background: var(--ground);
-  cursor: pointer;
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  grid-template-rows: repeat(2, 1fr);
-  gap: 1px;
-  padding: 3px;
-}
-
-.theme-btn:hover {
-  border-color: var(--ink-3);
-}
-
-.theme-btn .sw {
-  border-radius: 1px;
-}
-
 /* Swatch chips are the one place a literal colour is correct: they preview a
    theme that is not the active one, so they cannot come from the live tokens. */
-.sw-ground-graphite { background: #17150F; }
-.sw-ink-graphite { background: #DDD8D0; }
 .sw-brand-graphite { background: #C98A5E; }
 .sw-ok-graphite { background: #7CB675; }
 .sw-warn-graphite { background: #EBBB6E; }
 .sw-crit-graphite { background: #CD776C; }
-
-.sw-ground-bunker { background: #0F1719; }
-.sw-ink-bunker { background: #D3DEDC; }
 .sw-brand-bunker { background: #4FB3A5; }
 .sw-ok-bunker { background: #6CB882; }
 .sw-warn-bunker { background: #EABC6E; }
 .sw-crit-bunker { background: #CD7670; }
-
-.sw-ground-ash { background: #14161A; }
-.sw-ink-ash { background: #DADDE3; }
 .sw-brand-ash { background: #8FA9E8; }
 .sw-ok-ash { background: #73B87D; }
 .sw-warn-ash { background: #E6BE6D; }
 .sw-crit-ash { background: #CD7670; }
-
-.sw-ground-phosphor { background: #0D0F0D; }
-.sw-ink-phosphor { background: #C8D3BE; }
 .sw-brand-phosphor { background: #9FCF86; }
 .sw-ok-phosphor { background: #86B46D; }
 .sw-warn-phosphor { background: #F0B871; }
 .sw-crit-phosphor { background: #CC7867; }
-
-.theme-pop {
-  position: fixed;
-  left: var(--x, 60px);
-  top: var(--y, 60px);
-  z-index: var(--z-menu);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-b);
-  padding: var(--s-1);
-  min-width: 172px;
-  box-shadow: var(--overlay);
-}
-
-.theme-pop .lbl {
-  font-family: var(--f-cond);
-  font-size: var(--t-1);
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  padding: var(--s-1) var(--s-2) 3px;
-}
-
-.theme-opt {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: var(--s-2);
-  width: 100%;
-  background: none;
-  border: 0;
-  border-radius: var(--r-c);
-  color: var(--ink-2);
-  font-family: var(--f-cond);
-  font-size: var(--t-3);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  text-align: left;
-  padding: var(--s-1) var(--s-2);
-  cursor: pointer;
-}
-
-.theme-opt:hover {
-  background: var(--raised);
-  color: var(--ink);
-}
-
-.theme-opt[aria-checked="true"] {
-  background: var(--raised);
-  color: var(--ink);
-}
-
-.theme-opt .chips {
-  display: flex;
-  gap: 2px;
-}
-
-.theme-opt .chips i {
-  width: 12px;
-  height: 8px;
-  border-radius: 1px;
-  display: block;
-}
 
 /* ----------------------------------------------------------------- pane */
 
@@ -740,22 +637,6 @@ kbd {
   border-color: var(--ink-3);
 }
 
-.count-pip {
-  font-family: var(--f-mono);
-  font-size: var(--t-1);
-  font-weight: 600;
-  min-width: 15px;
-  padding: 0 3px;
-  border-radius: var(--r-c);
-  background: var(--crit);
-  color: var(--ground);
-  text-align: center;
-}
-
-.count-pip[data-n="0"] {
-  display: none;
-}
-
 /* ----------------------------------------------------------- stat strip */
 
 .strip {
@@ -846,21 +727,6 @@ kbd {
   text-overflow: ellipsis;
 }
 
-.spark {
-  display: block;
-  width: 100%;
-  height: 12px;
-  margin-top: 5px;
-}
-
-.spark .bar {
-  fill: var(--ink-3);
-}
-
-.spark .bar-last {
-  fill: var(--brand);
-}
-
 /* ----------------------------------------------------------------- view */
 
 .view {
@@ -881,12 +747,6 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
-}
-
-.cols {
-  display: grid;
-  gap: var(--s-3);
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
 }
 
 .card {
@@ -1231,35 +1091,6 @@ tr.grp .tw[aria-expanded="false"] .ic-twist {
   background: var(--info);
 }
 
-.evkey {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-4);
-  font-family: var(--f-mono);
-  font-size: var(--t-2);
-  color: var(--ink-3);
-  padding: var(--s-2) var(--s-3);
-  border-top: 1px solid var(--line);
-}
-
-.evkey span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.evkey i {
-  width: 9px;
-  height: 11px;
-  border-radius: 1px;
-  display: block;
-}
-
-.evkey i[data-on="agent"] { background: var(--ok); }
-.evkey i[data-on="scan"] { background: var(--warn); }
-.evkey i[data-on="router"] { background: var(--info); }
-.evkey i[data-on="none"] { background: var(--line); }
-
 .menu-btn {
   border: 1px solid transparent;
   background: none;
@@ -1448,20 +1279,6 @@ p.pending {
   color: var(--ink-3);
 }
 
-.meter {
-  display: block;
-  width: 110px;
-  height: 3px;
-}
-
-.meter .track {
-  fill: var(--line);
-}
-
-.meter .fill {
-  fill: var(--info);
-}
-
 .detail-acts {
   margin-top: 9px;
   display: flex;
@@ -1648,22 +1465,6 @@ p.pending {
   overflow-y: auto;
 }
 
-.drawer-foot {
-  flex: none;
-  border-top: 1px solid var(--line);
-  padding: var(--s-2) var(--s-3);
-  display: flex;
-  gap: var(--s-2);
-  align-items: flex-end;
-}
-
-.drawer-foot textarea {
-  flex: 1;
-  resize: none;
-  height: 54px;
-  font-family: var(--f-sans);
-}
-
 .alert {
   display: grid;
   grid-template-columns: 3px 1fr;
@@ -1741,41 +1542,6 @@ p.pending {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: var(--s-2);
-}
-
-/* The chart's time axis. One cell per bucket, aligned with the bars above by
-   sharing their count rather than their pixel positions - the chart stretches
-   to the card, and so does this. */
-.chart-ticks {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
-  margin-top: var(--s-1);
-  font-family: var(--f-mono);
-  font-size: var(--t-1);
-  color: var(--ink-3);
-}
-
-.chart-ticks span {
-  text-align: center;
-}
-
-/* The part of a window the hub holds no telemetry for. Drawn as a wash over
-   both lanes rather than left blank, because blank already means "nothing was
-   talking" and the two readings must not look the same. */
-.chart-uncovered {
-  fill: var(--ink-3);
-  opacity: 0.12;
-}
-
-.chart-note {
-  margin-top: var(--s-1);
-  font-size: var(--t-1);
-  color: var(--ink-3);
-}
-
-.chart-note[data-tone="warn"] {
-  color: var(--warn);
 }
 
 /* ------------------------------------------------------- command palette */
@@ -1932,139 +1698,6 @@ p.pending {
   align-content: start;
 }
 
-/* ------------------------------------------------------------- topology */
-
-.topo {
-  display: grid;
-  grid-template-columns: 1fr 250px;
-  min-height: 0;
-}
-
-.topo-canvas {
-  position: relative;
-  min-width: 0;
-  background: var(--ground);
-}
-
-.topo-canvas svg {
-  display: block;
-  width: 100%;
-  height: clamp(420px, calc(100vh - 215px), 900px);
-}
-
-.topo-canvas .edge {
-  stroke: var(--line);
-  fill: none;
-}
-
-.topo-canvas .edge[data-verdict="anomalous"] {
-  stroke: var(--warn);
-}
-
-.topo-canvas .edge[data-verdict="blocked"] {
-  stroke: var(--crit-hot);
-  stroke-dasharray: 4 3;
-}
-
-.topo-canvas .edge {
-  cursor: pointer;
-}
-
-.topo-canvas .edge[data-selected="true"] {
-  stroke: var(--brand);
-}
-
-.topo-canvas .node {
-  cursor: pointer;
-  fill: var(--ink-3);
-  stroke: var(--ground);
-  stroke-width: 1.5;
-}
-
-.topo-canvas .node[data-kind="managed"] { fill: var(--ok); }
-.topo-canvas .node[data-kind="unmanaged"] { fill: var(--warn); }
-.topo-canvas .node[data-kind="gateway"] { fill: var(--info); }
-.topo-canvas .node[data-kind="threat"] { fill: var(--crit-hot); }
-.topo-canvas .node[data-kind="isolated"] { fill: var(--crit); }
-
-/* --crit and --crit-hot differ by about five percent, and at r=8px that made
-   the graph's two most consequential kinds - a threat and a host you have cut
-   off - the two hardest to tell apart. Shape carries the difference now: a
-   threat gets a hard ring, an isolated host a broken one. */
-.topo-canvas .node[data-kind="threat"] {
-  stroke: var(--ink);
-  stroke-width: 2;
-}
-
-.topo-canvas .node[data-kind="isolated"] {
-  stroke: var(--ink);
-  stroke-width: 2;
-  stroke-dasharray: 3 2;
-}
-
-/* Tab lands on a node; it has to be visible when it does. */
-.topo-canvas .node-item:focus {
-  outline: none;
-}
-
-.topo-canvas .node-item:focus-visible .node {
-  stroke: var(--brand);
-  stroke-width: 3;
-  stroke-dasharray: none;
-}
-
-/* A known asset that said nothing inside the window is drawn hollow rather
-   than dropped. Absence is information on a security graph: a workstation
-   that has gone silent is exactly what an operator wants to notice. */
-.topo-canvas .node[data-quiet="true"] {
-  fill: var(--ground);
-  stroke: currentColor;
-  stroke-width: 1.5;
-}
-
-.topo-canvas .node[data-quiet="true"][data-kind="managed"] { color: var(--ok); }
-.topo-canvas .node[data-quiet="true"][data-kind="unmanaged"] { color: var(--warn); }
-.topo-canvas .node[data-quiet="true"][data-kind="gateway"] { color: var(--info); }
-.topo-canvas .node[data-quiet="true"][data-kind="threat"] { color: var(--crit-hot); }
-.topo-canvas .node[data-quiet="true"][data-kind="isolated"] { color: var(--crit); }
-
-.topo-canvas .node[data-selected="true"] {
-  stroke: var(--brand);
-  stroke-width: 2;
-}
-
-.topo-canvas .nlabel {
-  font-family: var(--f-mono);
-  font-size: 9.5px;
-  fill: var(--ink-3);
-  pointer-events: none;
-}
-
-.topo-canvas .elabel {
-  font-family: var(--f-mono);
-  font-size: 9px;
-  fill: var(--ink-3);
-  pointer-events: none;
-}
-
-.topo-side {
-  border-left: 1px solid var(--line);
-  background: var(--panel);
-  padding: 11px var(--s-3);
-  min-width: 0;
-  overflow-y: auto;
-}
-
-.topo-side h4 {
-  font-family: var(--f-cond);
-  font-size: var(--t-1);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--ink-3);
-  margin-bottom: var(--s-2);
-}
-
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -2094,162 +1727,6 @@ p.pending {
 .legend i[data-kind="gateway"] { background: var(--info); }
 .legend i[data-kind="isolated"] { background: var(--crit); }
 .legend i[data-kind="threat"] { background: var(--crit-hot); }
-
-/* --------------------------------------------------------------- charts */
-
-.chart {
-  display: block;
-  width: 100%;
-  height: 132px;
-}
-
-.chart .axis {
-  stroke: var(--line);
-}
-
-.chart .series-in {
-  fill: var(--info);
-}
-
-.chart .series-out {
-  fill: var(--brand);
-}
-
-.chart .series-block {
-  fill: var(--crit);
-}
-
-.chart .label {
-  font-family: var(--f-mono);
-  font-size: 9px;
-  fill: var(--ink-3);
-}
-
-.barlist {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.barrow {
-  display: grid;
-  /* label · bar · optional sparkline · value. The sparkline column collapses
-     to nothing when the ranking carries no history, so rows without one line
-     up with rows that have one. */
-  grid-template-columns: minmax(0, 1fr) 118px auto 72px;
-  gap: var(--s-2);
-  align-items: center;
-  font-size: var(--t-2);
-}
-
-.barrow .n {
-  font-family: var(--f-mono);
-  color: var(--ink-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.barrow .v {
-  font-family: var(--f-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--ink-3);
-  text-align: right;
-}
-
-.barrow svg {
-  display: block;
-  width: 118px;
-  height: 8px;
-}
-
-.barrow .track {
-  fill: var(--line);
-}
-
-.barrow .fill {
-  fill: var(--brand);
-}
-
-/* A ranking row that filters the flow table is a control, so it looks and
-   behaves like one rather than like text that happens to react to a click. */
-.barrow .n-pick {
-  appearance: none;
-  background: none;
-  border: 0;
-  padding: 0;
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-}
-
-.barrow .n-pick:hover {
-  color: var(--ink);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.barrow .n-pick:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 2px;
-  border-radius: var(--r-c);
-}
-
-.barrow .spark {
-  width: 48px;
-  height: 12px;
-}
-
-/* ------------------------------------------------------- traffic heatmap */
-
-.heatgrid {
-  display: grid;
-  grid-template-columns: auto repeat(24, 1fr);
-  gap: 2px;
-  align-items: center;
-  font-size: var(--t-1);
-}
-
-.heat-day,
-.heat-hour {
-  color: var(--ink-3);
-  font-family: var(--f-mono);
-  font-size: var(--t-1);
-  line-height: 1;
-}
-
-.heat-day {
-  padding-right: var(--s-2);
-  text-align: right;
-}
-
-.heat-hour {
-  text-align: center;
-}
-
-.heat-corner {
-  display: block;
-}
-
-.heat-cell {
-  display: block;
-  aspect-ratio: 1;
-  min-height: 10px;
-  border-radius: 2px;
-  background: var(--raised);
-}
-
-/* Four steps, not a continuous ramp: a reader can name the level they are
-   looking at, and each step clears the one below it by more than a hair. */
-.heat-cell[data-level="1"] { background: color-mix(in srgb, var(--brand) 22%, var(--raised)); }
-.heat-cell[data-level="2"] { background: color-mix(in srgb, var(--brand) 45%, var(--raised)); }
-.heat-cell[data-level="3"] { background: color-mix(in srgb, var(--brand) 70%, var(--raised)); }
-.heat-cell[data-level="4"] { background: var(--brand); }
-
-.legend .heat-cell {
-  width: 10px;
-  min-height: 10px;
-}
 
 /* --------------------------------------------------------------- toasts */
 
@@ -2559,31 +2036,6 @@ input[type="url"] {
   margin-top: var(--s-1);
 }
 
-.setup-install {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--s-3);
-  margin-top: var(--s-4);
-}
-
-.setup-install > div {
-  padding: var(--s-4);
-  border: 1px solid var(--line);
-  border-radius: var(--r-b);
-  background: var(--ground);
-}
-
-.setup-install h3 {
-  font-family: var(--f-cond);
-  font-size: var(--t-4);
-  margin-bottom: var(--s-2);
-}
-
-.setup-install p {
-  color: var(--ink-2);
-  margin-bottom: var(--s-3);
-}
-
 @media (max-width: 700px) {
   .setup-shell {
     width: calc(100vw - 2 * var(--s-3));
@@ -2604,8 +2056,7 @@ input[type="url"] {
   }
 
   .setup-fields,
-  .diag-grid,
-  .setup-install {
+  .diag-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2627,13 +2078,6 @@ input[type="url"] {
   }
   .detail > div:nth-child(3) {
     grid-column: 1 / -1;
-    border-top: 1px solid var(--line);
-  }
-  .topo {
-    grid-template-columns: 1fr;
-  }
-  .topo-side {
-    border-left: 0;
     border-top: 1px solid var(--line);
   }
 }
@@ -2670,19 +2114,6 @@ input[type="url"] {
     transition: none !important;
     animation: none !important;
   }
-}
-
-/* How an agented endpoint proved who it is. Muted when it holds a certificate
-   - that is the expected state and should not compete with the row - and
-   warning-coloured when it is reporting under the tenant key alone, because
-   that is the row an operator has to act on before requiring certificates. */
-.auth {
-  font-size: var(--t-1);
-  color: var(--ink-3);
-}
-
-.auth[data-bound="false"] {
-  color: var(--warn);
 }
 
 /* ----------------------------------------------------------------- sheet */
@@ -3108,84 +2539,6 @@ input[type="url"] {
   margin-top: 2px;
 }
 
-/* Topology controls. The reduction the graph applies is never implicit: the
-   scope, the grouping and the focus are all buttons on the page, and the line
-   under them says what was collapsed and what was left out. */
-.topo-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-1);
-  margin-bottom: var(--s-1);
-}
-
-.topo-bar .bar-label {
-  font-family: var(--f-cond);
-  font-size: var(--t-1);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-.topo-bar .sep {
-  width: 1px;
-  align-self: stretch;
-  background: var(--line);
-  margin: 0 var(--s-1);
-}
-
-.mini-on {
-  color: var(--ink);
-  border-color: var(--brand);
-  background: var(--raised);
-}
-
-.topo-note {
-  font-size: var(--t-2);
-  color: var(--ink-3);
-  margin: 0 0 var(--s-2);
-  max-width: 80ch;
-}
-
-/* Cluster boundaries & hulls */
-.topo-canvas .cluster-hull {
-  fill: var(--raised);
-  fill-opacity: 0.15;
-  stroke: var(--line);
-  stroke-dasharray: 4 4;
-  stroke-width: 1.2;
-  transition: fill-opacity 0.2s ease, stroke 0.2s ease;
-}
-
-.topo-canvas .cluster-hull:hover {
-  fill-opacity: 0.28;
-  stroke: var(--brand);
-}
-
-.topo-canvas .cluster-label {
-  font-family: var(--f-cond);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  fill: var(--ink-2);
-  pointer-events: none;
-}
-
-.topo-canvas .node-item {
-  cursor: grab;
-  touch-action: none;
-}
-
-.topo-canvas .node-item:active {
-  cursor: grabbing;
-}
-
-.topo-canvas .edge:hover {
-  stroke: var(--brand);
-  stroke-width: 2.5px;
-}
-
 /* Asset and traffic summaries */
 .summary-grid {
   display: grid;
@@ -3218,25 +2571,6 @@ input[type="url"] {
   letter-spacing: 0.05em;
 }
 
-/* Fleet Currency Bar */
-.fleet-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  padding: var(--s-2) var(--s-3);
-  margin-bottom: var(--s-2);
-}
-
-/* Traffic Investigation Workspace */
-.traffic-workspace {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-3);
-}
-
 .traffic-filter-bar {
   display: flex;
   flex-wrap: wrap;
@@ -3255,117 +2589,9 @@ input[type="url"] {
   gap: var(--s-1);
 }
 
-.traffic-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.traffic-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: var(--raised);
-  border: 1px solid var(--line);
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-size: var(--t-1);
-  color: var(--ink-1);
-}
-
-/* It is a <button> now, so it needs the button chrome taken back off. */
-.traffic-chip .chip-del {
-  cursor: pointer;
-  color: var(--ink-3);
-  font-weight: 700;
-  margin-left: 2px;
-  padding: 0 2px;
-  border: 0;
-  background: none;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: 1;
-}
-
-.traffic-chip .chip-del:hover,
-.traffic-chip .chip-del:focus-visible {
-  color: var(--crit);
-}
-
-.dual-timeline-container {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-
-.dual-lane-label {
-  font-size: var(--t-0);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-3);
-}
-
-.distrib-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--s-2);
-}
-
-.distrib-card {
-  background: var(--raised);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  padding: var(--s-2);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-
-.flow-table-row {
-  cursor: pointer;
-  transition: background 0.1s ease;
-}
-
-.flow-table-row:hover {
-  background: var(--raised);
-}
-
-.flow-table-row.selected {
-  background: var(--brand-alpha, rgba(143, 169, 232, 0.15));
-  border-left: 3px solid var(--brand);
-}
-
-/* Flow Inspector Drawer */
-.flow-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  width: 480px;
-  max-width: 90vw;
-  height: 100vh;
-  background: var(--ground);
-  border-left: 1px solid var(--line);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
-  z-index: var(--z-drawer-panel);
-  display: flex;
-  flex-direction: column;
-  animation: drawerSlide 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
 @keyframes drawerSlide {
   from { transform: translateX(100%); }
   to { transform: translateX(0); }
-}
-
-.drawer-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--s-3);
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
 }
 
 .drawer-body {
@@ -3409,12 +2635,6 @@ input[type="url"] {
   word-break: break-all;
 }
 
-.drawer-actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-
 /* ------------------------------------------------------------- Rail Alert Badge */
 .rail-btn-alerts {
   position: relative;
@@ -3440,61 +2660,6 @@ input[type="url"] {
 
 .rail-alert-badge[data-n]:not([data-n="0"]) {
   display: inline-block;
-}
-
-/* ------------------------------------------------------------- Topbar Universal Items */
-.btn-response {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--t-2);
-  padding: 4px 10px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  color: var(--ink-2);
-  cursor: pointer;
-  transition: border-color var(--dur), background var(--dur), color var(--dur);
-}
-
-.btn-response:hover {
-  background: var(--raised);
-  border-color: var(--brand);
-}
-
-.btn-response[data-status="unlocked"] {
-  border-color: var(--ok);
-  color: var(--ok);
-  background: rgba(46, 204, 113, 0.08);
-}
-
-.btn-response-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ink-3);
-  display: inline-block;
-}
-
-.btn-response[data-status="unlocked"] .btn-response-dot {
-  background: var(--ok);
-  box-shadow: 0 0 6px var(--ok);
-}
-
-.input-code {
-  font-family: var(--f-mono);
-  font-size: var(--t-5, 1.25rem);
-  letter-spacing: 0.25em;
-  text-align: center;
-  padding: 8px 12px;
-  border-radius: var(--r);
-  border: 1px solid var(--line);
-  background: var(--ground);
-  color: var(--ink-1);
-  width: 100%;
-  max-width: 240px;
-  margin: 4px auto;
-  display: block;
 }
 
 .terminal-meta-bar {
@@ -3595,25 +2760,6 @@ input[type="url"] {
   gap: 6px;
 }
 
-.btn-sweep {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--t-2);
-  padding: 4px 10px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  color: var(--ink-1);
-  cursor: pointer;
-  transition: border-color var(--dur), background var(--dur);
-}
-
-.btn-sweep:hover {
-  background: var(--raised);
-  border-color: var(--brand);
-}
-
 .sweep-dot {
   width: 7px;
   height: 7px;
@@ -3631,16 +2777,6 @@ input[type="url"] {
   0% { transform: scale(0.9); opacity: 0.7; box-shadow: 0 0 0 0 rgba(227, 179, 65, 0.7); }
   70% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 6px rgba(227, 179, 65, 0); }
   100% { transform: scale(0.9); opacity: 0.7; box-shadow: 0 0 0 0 rgba(227, 179, 65, 0); }
-}
-
-.btn-install {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--t-2);
-  font-weight: 600;
-  padding: 4px 12px;
-  border-radius: var(--r);
 }
 
 .btn-avatar {
@@ -3776,6 +2912,17 @@ input[type="url"] {
   border-color: var(--brand);
   color: var(--ink-1);
 }
+.account-theme-opt .chips {
+  display: flex;
+  gap: 2px;
+}
+
+.account-theme-opt .chips i {
+  width: 12px;
+  height: 8px;
+  border-radius: 1px;
+  display: block;
+}
 
 .account-theme-opt[aria-checked="true"] {
   background: var(--surface-hover);
@@ -3856,16 +3003,6 @@ input[type="url"] {
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
-}
-
-.alerts-chart-card {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  padding: var(--s-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
 }
 
 .alerts-sys-grid {
@@ -4464,23 +3601,6 @@ input[type="url"] {
   }
 }
 
-/* TOTP enrolment: the QR, the secret and the confirm field, boxed away from
-   the rest of the unlock form. Named tokens here were `--bg-surface-2` and
-   `--border-dim`, neither of which exists, so it had no border at all. */
-.totp-enroll-box {
-  padding: var(--s-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-b);
-  background: var(--raised);
-}
-
-.totp-key-row {
-  padding: var(--s-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-c);
-  background: var(--panel);
-}
-
 /* --------------------------------------------------------------- utilities
  *
  * `app.js` opens by asserting it writes no inline style attributes, and until
@@ -4514,7 +3634,6 @@ input[type="url"] {
 
 .u-mt1 { margin-top: var(--s-1); }
 .u-mt2 { margin-top: var(--s-2); }
-.u-mb1 { margin-bottom: var(--s-1); }
 .u-mb2 { margin-bottom: var(--s-2); }
 .u-ml2 { margin-left: 6px; }
 .u-ml3 { margin-left: var(--s-2); }
@@ -4523,17 +3642,6 @@ input[type="url"] {
 /* The evidence-item note in the vuln sheet: a bounded, readable column rather
    than a paragraph that runs the width of the sheet. */
 .u-narrow { max-width: 260px; padding: var(--s-1) var(--s-2); }
-
-/* Chart tick rail under the dual-lane bandwidth chart. */
-.chart-ticks {
-  display: flex;
-  justify-content: space-between;
-  width: 100%;
-  padding: var(--s-1) 2px var(--s-2) 2px;
-  font-family: var(--f-mono);
-  font-size: var(--t-1);
-  color: var(--ink-3);
-}
 
 /* A DNS counter that is not zero says so in its hue as well as its number. */
 
@@ -4708,16 +3816,6 @@ input[type="url"] {
   padding-bottom: var(--s-2);
 }
 
-.section-head {
-  font-family: var(--f-cond);
-  font-size: var(--t-3);
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--ink-2);
-  margin: var(--s-4) 0 var(--s-2);
-}
-
 .account-section {
   display: flex;
   flex-direction: column;
@@ -4771,12 +3869,10 @@ hr.line {
 button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 @media (max-width: 1024px) {
   .strip { flex-wrap: wrap; overflow: visible; }
-  .strip .metric { min-width: 0; }
 }
 @media (max-width: 600px) {
   .nav-expanded { --rail-w: 130px; }
   .topbar { flex-wrap: wrap; height: auto; gap: 6px; padding: 8px; }
-  .btn-install span, .btn-sweep span { display: none; }
   .connection-status { font-size: 12px; padding: 6px 8px; }
   .asset-pages { font-size: 12px; gap: 6px; }
 }
@@ -4786,7 +3882,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-vis
   .tile { min-width: 0; padding: 5px 8px; }
   .tile .v { font-size: 16px; }
   .tile .l { font-size: 11px; }
-  .tile .spark { display: none; }
 }
 .alert-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .alert-detail { min-width: 0; overflow-wrap: anywhere; }
@@ -4981,7 +4076,6 @@ tfoot {
 @media (max-width: 600px) {
   /* The lock state stays readable as its icon and dot; the word is kept for
      screen readers so the top bar fits one row on a phone. */
-  #response-status-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .topbar { flex-wrap: nowrap; }
   .topbar .omni { min-width: 0; margin-left: auto; }
   .topbar .omni kbd { display: none; }

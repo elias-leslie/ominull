@@ -260,21 +260,6 @@ func TestServer_ConsoleTLSSources_HubCA_GuidedRootTrust(t *testing.T) {
 		t.Fatalf("expected PEM certificate from /api/v1/pki/ca.crt, got: %s", wCA.Body.String())
 	}
 
-	// 5. Test trust instructions route /api/v1/console/trust-instructions
-	wTrust := httptest.NewRecorder()
-	rTrust := httptest.NewRequest(http.MethodGet, "/api/v1/console/trust-instructions", nil)
-	srv.handleConsoleTrustInstructions(wTrust, rTrust)
-	if wTrust.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /api/v1/console/trust-instructions, got %d", wTrust.Code)
-	}
-	var trustRes map[string]interface{}
-	if err := json.Unmarshal(wTrust.Body.Bytes(), &trustRes); err != nil {
-		t.Fatalf("unmarshal trust instructions: %v", err)
-	}
-	instructions, ok := trustRes["instructions"].(map[string]interface{})
-	if !ok || instructions["linux_debian"] == "" || instructions["macos"] == "" || instructions["windows"] == "" {
-		t.Fatalf("missing per-platform trust instructions in response: %v", trustRes)
-	}
 }
 
 func TestServer_SetupApply_PersistsConsoleHostname(t *testing.T) {

@@ -84,23 +84,6 @@ func TestTrafficAPIEndpoints(t *testing.T) {
 		t.Fatalf("expected 1 flow, got %d", len(flowsRes.Flows))
 	}
 
-	// 3. GET /api/v1/traffic/flows/{id}
-	flowID := flowsRes.Flows[0].ID
-	reqSingle := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/flows/"+flowID, nil)
-	reqSingle.Header.Set("X-API-Key", "mock_admin_token")
-	wSingle := httptest.NewRecorder()
-	srv.authMiddleware(srv.handleTrafficFlows).ServeHTTP(wSingle, reqSingle)
-
-	if wSingle.Code != http.StatusOK {
-		t.Fatalf("handleTrafficFlowDetail returned code %d, want 200", wSingle.Code)
-	}
-	var singleFlow storage.TrafficFlowItem
-	if err := json.Unmarshal(wSingle.Body.Bytes(), &singleFlow); err != nil {
-		t.Fatalf("unmarshal single flow failed: %v", err)
-	}
-	if singleFlow.ID != flowID || singleFlow.EndpointID != "ep-api-01" {
-		t.Errorf("unexpected single flow: %+v", singleFlow)
-	}
 }
 
 // The conversations route answers in the storage shape and refuses an unknown

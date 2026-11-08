@@ -69,26 +69,6 @@ func enrolmentPlatform_(key string) (enrolmentPlatform, bool) {
 	return enrolmentPlatform{}, false
 }
 
-// handleEnrolmentPlatforms lists what can be installed and where the scripts
-// live, so the console does not hard-code three route names.
-func (s *Server) handleEnrolmentPlatforms(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	out := []map[string]string{}
-	for _, p := range enrolmentPlatforms() {
-		out = append(out, map[string]string{
-			"platform": p.key, "label": p.label, "route": p.route, "filename": p.filename,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"platforms":      out,
-		"enrollment_ttl": humanDuration(storage.EnrollmentProfileTTL),
-		"download_base":  s.downloadBase(r),
-	})
-}
-
 // handleEnrolmentScript creates a short-lived profile and renders a script that
 // redeems it through a request body. The returned code is never put in the
 // one-line command or a URL.

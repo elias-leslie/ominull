@@ -197,28 +197,7 @@ func TestServer_LineageAndHashing_IngestionAndAPI(t *testing.T) {
 		t.Errorf("flowItem.AttributionStatus mismatch: %q", flowItem.AttributionStatus)
 	}
 
-	// 4. Query /api/v1/traffic/flows/<flow_id>
-	reqDetail := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/flows/"+flowItem.ID, nil)
-	reqDetail.Header.Set("X-API-Key", adminKey)
-	wDetail := httptest.NewRecorder()
-	srv.authMiddleware(srv.handleTrafficFlows).ServeHTTP(wDetail, reqDetail)
-
-	if wDetail.Code != http.StatusOK {
-		t.Fatalf("GET /api/v1/traffic/flows/<id> returned code %d, want 200: %s", wDetail.Code, wDetail.Body.String())
-	}
-
-	var singleDetail storage.TrafficFlowItem
-	if err := json.Unmarshal(wDetail.Body.Bytes(), &singleDetail); err != nil {
-		t.Fatalf("unmarshal single flow detail failed: %v", err)
-	}
-	if singleDetail.CommandLine != flowItem.CommandLine {
-		t.Errorf("singleDetail.CommandLine mismatch: %q", singleDetail.CommandLine)
-	}
-	if singleDetail.ProcessInstanceID != flowItem.ProcessInstanceID {
-		t.Errorf("singleDetail.ProcessInstanceID mismatch: %q", singleDetail.ProcessInstanceID)
-	}
-
-	// 5. Query /api/v1/traffic/flows with hash filter
+	// 4. Query /api/v1/traffic/flows with hash filter
 	reqHash := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/flows?hash=ea8f5a11c080b0800b46296766d0c242013f9ae05b1de1efc6fc525ad21c0836", nil)
 	reqHash.Header.Set("X-API-Key", adminKey)
 	wHash := httptest.NewRecorder()

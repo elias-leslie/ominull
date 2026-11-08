@@ -38,6 +38,8 @@
   };
   var DEFAULT_THEME = "ash";
 
+  /* The rail's icon for a section whose id is not its symbol's name. */
+  var PALETTE_ICONS = { alerts: "i-alert", response: "i-unlock", forensics: "i-download" };
   var SECTIONS = [
     { id: "assets", label: "Assets" },
     { id: "topology", label: "Topology" },
@@ -335,18 +337,6 @@
     return isNaN(d.getTime()) ? null : d;
   }
 
-  /* A span of time in the largest unit that keeps it readable. "24 of 60
-     minutes" and "6 of 7 days" both have to come out of the same call, so the
-     chart's coverage line reads correctly on a 15m window and a 30d one. */
-  function spanText(ms) {
-    var mins = Math.max(0, Math.round(ms / 60000));
-    if (mins < 180) return mins + (mins === 1 ? " minute" : " minutes");
-    var hrs = Math.round(mins / 60);
-    if (hrs < 72) return hrs + (hrs === 1 ? " hour" : " hours");
-    var days = Math.round(hrs / 24);
-    return days + (days === 1 ? " day" : " days");
-  }
-
   function ago(date) {
     if (!date) return "\u2014";
     var secs = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
@@ -452,9 +442,6 @@
     locations: [],
     coverage: null,
     anomalies: [],
-    // True when the last fetch came back a full page, so the count on the
-    // badge is a floor rather than a total.
-    anomaliesCapped: false,
     updateStatus: null,
     meshPeers: [],
     expected: [],
@@ -513,7 +500,6 @@
     assetSort: null,
 
     topoSelected: "",
-    scanJob: null,
     // The running scan's own answer about itself. Polled while it runs; the
     // console used to hold the id and never ask the hub what became of it.
     scanStatus: null,
@@ -766,24 +752,6 @@
       { id: "alert-bandwidth-04", tenant_id: "corp-default", location_id: "loc-cloud", endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", anomaly_type: "BANDWIDTH_SPIKE", severity: "MEDIUM", title: "Egress volume 14x baseline", description: "Sustained outbound transfer well above the learned diurnal baseline.", details: "4.2 GB out in 20m vs 300 MB baseline", process_path: "/usr/lib/postgresql/16/bin/postgres", dst_ip: "203.0.113.51", dst_port: 5432, timestamp: mins(96), acknowledged: false }
     ];
 
-    var talkers = [
-      { process: "C:\\Windows\\System32\\svchost.exe", flow_count: 18422, bytes_in: 920000000, bytes_out: 210000000, total_bytes: 1130000000 },
-      { process: "/usr/sbin/nginx", flow_count: 12408, bytes_in: 180000000, bytes_out: 1420000000, total_bytes: 1600000000 },
-      { process: "/usr/lib/postgresql/16/bin/postgres", flow_count: 6120, bytes_in: 88000000, bytes_out: 4200000000, total_bytes: 4288000000 },
-      { process: "powershell.exe", flow_count: 942, bytes_in: 4100000, bytes_out: 19400000, total_bytes: 23500000 },
-      { process: "/usr/bin/nmap", flow_count: 618, bytes_in: 210000, bytes_out: 480000, total_bytes: 690000 }
-    ];
-
-    var timeline = [];
-    for (var i = 23; i >= 0; i--) {
-      var base = 40 + Math.round(38 * Math.sin((23 - i) / 3.4));
-      timeline.push({
-        timestamp: new Date(Date.now() - i * 3600000).toISOString(),
-        bytes_in: (base + 22) * 4200000,
-        bytes_out: (base + 9) * 3100000,
-        blocks: Math.max(0, 12 - Math.abs(12 - (23 - i)))
-      });
-    }
 
     /* Nodes come from the asset graph, so every one carries its evidence and
        its role. Two of them are quiet: known assets that said nothing inside
@@ -975,27 +943,10 @@
         { id: 9011, tenant_id: "corp-default", endpoint_id: "win11-fin-11", timestamp: mins(2.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.31", dst_ip: "10.0.4.12", src_port: 50120, dst_port: 389, bytes_in: 6200, bytes_out: 2400, country: "", process_path: "C:\\Windows\\System32\\lsass.exe", process_id: 704 },
         { id: 9012, tenant_id: "corp-default", endpoint_id: "win11-branch-kiosk", timestamp: mins(4.5), layer: "ALE_AUTH_CONNECT", action: "PERMIT", direction: "OUTBOUND", protocol: 6, src_ip: "10.0.4.44", dst_ip: "10.0.4.12", src_port: 51002, dst_port: 135, bytes_in: 3100, bytes_out: 1400, country: "", process_path: "C:\\Windows\\System32\\svchost.exe", process_id: 988 }
       ],
-      "/api/v1/analytics/summary": {
-        total_bytes_in: 3120000000, total_bytes_out: 7480000000, total_events: 48210,
-        /* The demo stands for a fleet whose collectors can read a byte
-           counter, so every flow in it is a measured one. */
-        measured_flow_count: 48210,
-        total_blocks: 318, total_permits: 47892,
-        countries: { US: 31200, DE: 4210, NL: 980, SG: 640, GB: 410 },
-        top_processes: {},
-        severity_counts: { CRITICAL: 1, HIGH: 2, MEDIUM: 1, LOW: 0 },
-        enforcement_counts: { "Windows user-mode WFP": 3, "Linux socket collector": 4 },
-        bandwidth_timeline: timeline,
-        diurnal_baseline: {}, diurnal_live: {},
-        top_talkers: talkers,
-        geo_stats: [
-          { country: "US", country_name: "United States", flow_count: 31200, total_bytes: 6100000000, threat_count: 2 },
-          { country: "DE", country_name: "Germany", flow_count: 4210, total_bytes: 820000000, threat_count: 0 },
-          { country: "NL", country_name: "Netherlands", flow_count: 980, total_bytes: 41000000, threat_count: 1 },
-          { country: "SG", country_name: "Singapore", flow_count: 640, total_bytes: 22000000, threat_count: 0 },
-          { country: "GB", country_name: "United Kingdom", flow_count: 410, total_bytes: 18000000, threat_count: 0 }
-        ]
-      },
+      "/api/v1/analytics/summary": { total_blocks: 318 },
+      "/api/v1/enrollment/profiles": { profiles: [
+        { id: "enr-demo-gpo-01", kind: "deployment", platform: "windows", tenant_id: "corp-default", role: "workstation", used: 12, max_uses: 0 }
+      ] },
       "/api/v1/topology/graph": {
         nodes: topoNodes, edges: topoEdges,
         metrics: {
@@ -1162,7 +1113,6 @@
   }
 
   function demoTrafficFlows(q) {
-    var w = demoTrafficWindow(q);
     var conv = demoTrafficConversations(new URLSearchParams("range=" + (q.get("range") || "1h") + "&limit=1000")).conversations;
     var flows = [];
     conv.forEach(function (c, ci) {
@@ -1444,10 +1394,6 @@
     Object.keys(st.endpoints).sort().forEach(function (id) { eps[id] = demoWindowView(st.endpoints[id], "endpoint", id); });
     return { default: demoWindowView(demoFleetWindow(), src, ""), endpoints: eps };
   }
-  function demoWindowParam() {
-    var w = demoFleetWindow();
-    return w.ranges.join(",") + (w.clock === "utc" ? "Z" : "");
-  }
   var DEMO_PKG_NOTES = {
     "windows-audit": "Checks BitLocker, Defender, firewall, update age, free disk space, TPM and Secure Boot without changing anything.",
     "windows-cleanup": "Deletes old temp files, crash dumps, error reports and update caches, then compacts the component store.",
@@ -1491,7 +1437,6 @@
       return { enabled: on, package_enabled: on, category_enabled: true, mode: e.mode || f.mode || "audit", interval: e.interval || f.interval || defaults.__interval, params: params };
     }
     return {
-      window: demoWindowParam(),
       categories: [{ name: "maintenance", fleet_enabled: true, enabled: ep ? true : undefined }, { name: "security", fleet_enabled: true, enabled: ep ? true : undefined }],
       packages: defs.map(function (d) {
         var defaults = { __interval: d[4] };
@@ -1788,10 +1733,6 @@
     }
     if (base === "/api/v1/maintenance/settings") {
       demoMaintSettings("");
-      if (body.window !== undefined) {
-        demoWindowState().fleet = body.window ? { ranges: body.window.replace(/Z$/, "").split(","), clock: /Z$/.test(body.window) ? "utc" : "machine" } : null;
-        return demoMaintSettings("");
-      }
       var key = (body.package || "@" + body.category) + "|" + (body.endpoint_id || "");
       var row = body.reset ? {} : (DEMO_MAINT_ROWS[key] || {});
       ["enabled", "mode", "interval", "reason", "expires_at"].forEach(function (k) { if (body[k] !== undefined) { if (body[k] === null) delete row[k]; else row[k] = body[k]; } });
@@ -1851,25 +1792,6 @@
       DEMO_CACHE["/api/v1/mesh/quarantined"] = DEMO_CACHE["/api/v1/mesh/quarantined"].filter(function (p) { return p.target_ip !== (body && body.target_ip); });
       return { status: "unquarantined" };
     }
-    if (base === "/api/v1/assets/correct") {
-      var target = DEMO_CACHE["/api/v1/assets"].filter(function (a) {
-        return a.id === (body && body.asset_id) || (body && body.ip && a.ip === body.ip);
-      })[0];
-      if (target) {
-        target.claims = target.claims.filter(function (c) {
-          return !(c.source === "operator" && c.field === body.field);
-        });
-        if (!body.withdraw) {
-          target.claims.push({
-            field: body.field, source: "operator", value: body.value, confidence: 1.0,
-            rationale: body.reason || "operator correction",
-            observed_at: new Date().toISOString(), winner: false
-          });
-        }
-        DEMO_REMERGE(target);
-      }
-      return target || { status: "ok" };
-    }
     if (base === "/api/v1/baseline/policies") {
       var saved = DEMO_CACHE["/api/v1/baseline/policies"];
       var incoming = body || {};
@@ -1891,7 +1813,6 @@
         suggested_name: "Baseline for " + (body && body.endpoint_id)
       };
     }
-    if (base === "/api/v1/scanner/scan") return { scan_id: "scan-demo", status: "running" };
     if (base === "/api/v1/agents/update") {
       return { desired_version: "1.1.0", scheduled: [
         { endpoint_id: "linux-prod-db-01", hostname: "prod-db-01", from: "1.0.0", to: "1.1.0" },
@@ -2233,24 +2154,19 @@
     var strip = $("strip");
     clear(strip);
 
-    if (state.section !== "assets") {
-      sectionSummary().forEach(function (t) {
-        /* Tiles were built for counts. An email address in one ran past its own
-           box and into the tile beside it, clipped mid-character. The length
-           goes on the element and the stylesheet decides what to do with it -
-           a style attribute here would be a size the theme cannot reach. */
-        var text = String(t.value);
-        strip.appendChild(h("div", {
-          cls: "tile", "data-static": "true", "data-tone": t.tone || "",
-          "data-len": text.length > 12 ? "long" : "", title: text
-        },
-          h("div", { cls: "v", text: text }),
-          h("div", { cls: "l", text: t.label })));
-      });
-      return;
-    }
-
-    /* Assets keeps its filters in the page (assetFilterBar), not in the strip. */
+    sectionSummary().forEach(function (t) {
+      /* Tiles were built for counts. An email address in one ran past its own
+         box and into the tile beside it, clipped mid-character. The length
+         goes on the element and the stylesheet decides what to do with it -
+         a style attribute here would be a size the theme cannot reach. */
+      var text = String(t.value);
+      strip.appendChild(h("div", {
+        cls: "tile", "data-static": "true", "data-tone": t.tone || "",
+        "data-len": text.length > 12 ? "long" : "", title: text
+      },
+        h("div", { cls: "v", text: text }),
+        h("div", { cls: "l", text: t.label })));
+    });
   }
 
   /* Prefers a location's declared CIDR, falls back to a /24 around a managed
@@ -2270,20 +2186,6 @@
 
   function sectionSummary() {
     var stats = assetStats();
-    if (state.section === "discovery") {
-      var cov = state.coverage || {};
-      var covered = (cov.total_discovered !== undefined ? cov.total_discovered : state.scanAssets.length) > 0;
-      return [
-        /* Every figure here is scoped to the sweep. Before one has run they are
-           undefined rather than zero, and an em dash says so - "0 managed"
-           beside an Assets view reporting four is just wrong. */
-        { label: "Discovered", value: String(covered ? cov.total_discovered : 0) },
-        { label: "Managed", value: covered ? String(cov.total_managed || 0) : "\u2014" },
-        { label: "Unmanaged", value: covered ? String(cov.total_unmanaged || 0) : "\u2014", tone: "warn" },
-        { label: "Coverage", value: covered ? pct(cov.coverage_percent) : "\u2014" },
-        { label: "Critical risks", value: String(cov.critical_risks || 0), tone: cov.critical_risks ? "crit" : "" }
-      ];
-    }
     if (state.section === "topology") {
       var m = (state.topology && state.topology.metrics) || {};
       return [
@@ -2893,26 +2795,10 @@
      chip in Response, Terminal, Scripts and Forensics rendered as unstyled grey
      body text - "collected" and "permission_denied" evidence looked identical.
      `.st[data-state]` is the console's one state chip: a 3px stripe plus a word,
-     never colour alone. chip() builds one; setChip() is for the few places that
-     reassign className on a node they already hold. Tones map straight across
+     never colour alone. chip() builds one. Tones map straight across
      (ok/warn/crit) and the old `badge-neutral`/bare `badge` become `idle`. */
   function chip(tone, text) {
     return h("span", { cls: "st", "data-state": tone || "idle" }, h("span", { text: String(text == null ? "" : text) }));
-  }
-
-  function setChip(el, tone, text) {
-    if (!el) return el;
-    el.className = "st";
-    el.setAttribute("data-state", tone || "idle");
-    if (text != null) el.textContent = String(text);
-    return el;
-  }
-
-  function meter(fraction) {
-    var svg = s("svg", { "class": "meter", viewBox: "0 0 110 3", preserveAspectRatio: "none", "aria-hidden": "true" });
-    svg.appendChild(s("rect", { "class": "track", x: 0, y: 0, width: 110, height: 3, rx: 1.5 }));
-    svg.appendChild(s("rect", { "class": "fill", x: 0, y: 0, width: Math.max(0, Math.min(1, fraction)) * 110, height: 3, rx: 1.5 }));
-    return svg;
   }
 
   function claimRow(source, value, confidence, win) {
@@ -2957,19 +2843,6 @@
       });
     });
     return wrap;
-  }
-
-  /* Corrections outrank every other source permanently, so they are an
-     explicit act with a visible result, not a silent edit. */
-  function correctAsset(asset, field, value, reason, withdraw) {
-    return request("/api/v1/assets/correct", "POST", {
-      asset_id: asset.assetId, ip: asset.ip, field: field,
-      value: value, reason: reason, withdraw: !!withdraw
-    }).then(function () {
-      toast(withdraw ? "Correction withdrawn on " + asset.name
-        : "Recorded: " + (FIELD_LABEL[field] || field) + " is " + value, "ok");
-      refresh();
-    }).catch(function (e) { toast("Correction failed: " + e.message, "crit"); });
   }
 
   function roleLabel(role) {
@@ -3461,7 +3334,7 @@
     assetRowCache = retained;
     var wrap = h("div", { cls: "tblwrap assets-table", tabindex: "0", "aria-label": "Assets table; scroll for additional columns" }, h("table", {}, h("thead", {}, head), tbody));
 
-    var scanning = !!(state.scanStatus && state.scanStatus.active);
+    var scanning = !!(state.scanStatus && state.scanStatus.status === "running");
     var tools = pageTools(needsYouBar(), h("div", { cls: "row-acts" },
       h("button", { cls: "btn", type: "button", disabled: READ_ONLY, title: READ_ONLY ? "Read-only access" : "Find devices on a subnet",
         on: { click: openSweepModal } },
@@ -3524,9 +3397,8 @@
             click: function () {
               var oses = {};
               unmanagedSelected.forEach(function (a) {
-                var os = String((a.os || "")).toLowerCase();
-                if (os.indexOf("windows") !== -1) oses.windows = true;
-                else if (os) oses.linux = true;
+                var os = osFamily(a.scan ? a.scan.os_guess : "");
+                if (os === "windows" || os === "linux") oses[os] = true;
               });
               var kinds = Object.keys(oses);
               openInstallerSheet({
@@ -3708,21 +3580,6 @@
     return h("label", { "for": control.id, text: text });
   }
 
-  /* A removable filter chip. The delete affordance was a bare span with a
-     click handler: not focusable, not announced, and unreachable without a
-     mouse, so a keyboard operator could add a traffic filter and then had no
-     way to take it off again. */
-  function filterChip(label, onRemove) {
-    return h("span", { cls: "traffic-chip" },
-      h("span", { text: label }),
-      h("button", {
-        cls: "chip-del", type: "button", text: "\u00d7",
-        "aria-label": "Remove filter " + label,
-        title: "Remove filter",
-        on: { click: onRemove }
-      }));
-  }
-
   function emptyBox(text, loadingText) {
     if (state.loading) {
       return h("div", { cls: "empty" },
@@ -3813,7 +3670,6 @@
 
   function watchScan(scanID) {
     stopScanPoll();
-    state.scanJob = scanID;
     var check = function () {
       request("/api/v1/scanner/status?id=" + encodeURIComponent(scanID)).then(function (st) {
         state.scanStatus = st || null;
@@ -3825,11 +3681,11 @@
           refresh();
           return;
         }
-        if (state.section === "discovery") renderBody();
       }).catch(function () {
         /* A status the hub cannot answer for is a finished scan it has
-           forgotten, not a reason to keep asking. */
+           forgotten, not a reason to keep asking, and not a sweep still running. */
         stopScanPoll();
+        state.scanStatus = null;
       });
     };
     check();
@@ -3875,29 +3731,6 @@
         h("dt", { text: "Elapsed" }), h("dd", { text: elapsed + "s" }),
         h("dt", { text: "Started" }), h("dd", {}, stamp(started)),
         h("dt", { text: "Job" }), h("dd", { cls: "ip", text: st.id || "" }))));
-  }
-
-  /* The bootstrap routes never went away; the button that reached them did.
-     Discovery is where an operator is already looking at a host with no agent
-     on it, so the door belongs on this page as well as in the topbar. */
-  function addEndpointCard() {
-    return card("Install an agent",
-      h("div", { cls: "card-body stack" },
-        h("p", { cls: "pending", text: "Generate a Windows or Linux install script for one host, an expiring rollout, or a protected GPO/MDM deployment. For workstations on the same LAN, temporarily allow that network and let each workstation download its own installer from /install." }),
-        h("div", { cls: "row-acts" },
-          h("button", {
-            cls: "btn btn-primary", type: "button", text: "Create an installer",
-            on: { click: function () { openInstallerSheet(); } }
-          }),
-          h("button", {
-            cls: "btn", type: "button", text: "Set up LAN installs",
-            on: { click: function () { openSelfServiceSheet(); } }
-          }),
-          h("button", {
-            cls: "btn", type: "button", text: "Manage enrollment keys",
-            on: { click: function () { openEnrollmentProfilesSheet(); } }
-          })
-        )));
   }
 
   var accountPop = null;
@@ -4124,7 +3957,7 @@
                 toast("Sweeping subnet " + subnetInput.value, "ok");
                 closeSheet();
                 if (res && res.scan_id) watchScan(res.scan_id);
-                else { state.scanJob = "running"; setTimeout(refresh, 2500); }
+                else setTimeout(refresh, 2500);
               })
               .catch(function (e) { toast("Sweep failed: " + e.message, "crit"); });
           }
@@ -4689,7 +4522,7 @@
       return;
     }
     if (!topologyUI) topologyUI = window.OminullTopology.mount($("view"), {
-      request: request, role: ROLE, version: CFG.version, window: state.topoWindow, draft: topologyDraft,
+      version: CFG.version, window: state.topoWindow, draft: topologyDraft,
       onWindow: function (w) { state.topoWindow = w; loadTopology().then(function () { if (topologyUI) topologyUI.update(state.topology, state.topologyError); }); },
       onAsset: function (n) { var a = state.assets.find(function (a) { return a.key === n.asset_id || a.ip === n.ip; }); if (a) openRoute(a.key); else toast("No asset record for this address."); },
       onTraffic: function (f) { state.trafficFilter = { range: state.topoWindow, src_ip: f.src_ip || "", dst_ip: f.dst_ip || "", process: f.process || "", endpoint_id: f.endpoint_id || "" }; go("traffic"); }
@@ -5265,7 +5098,7 @@
       h("option", { value: "kiosk", text: "Kiosk" }),
       h("option", { value: "appliance", text: "Appliance" }));
 
-    var endpointID = h("input", { type: "text", value: pre.endpoint_id || "", placeholder: "Use target hostname" });
+    var endpointID = h("input", { type: "text", placeholder: "Use target hostname" });
     var profileKind = h("select", { "aria-label": "Enrollment profile" },
       h("option", { value: "invitation", text: "One computer (30-minute invitation)" }),
       h("option", { value: "campaign", text: "Multiple computers (expiring campaign)" }),
@@ -5287,8 +5120,6 @@
     if (preHosts.length > 1) {
       profileKind.value = "campaign";
       profileMaxUses.value = String(preHosts.length);
-    } else if (pre.kind) {
-      profileKind.value = pre.kind;
     }
 
     var platformField = h("label", { cls: "field" }, h("span", { text: "Operating system" }), platform);
@@ -5473,6 +5304,7 @@
     renderButton = h("button", { cls: "btn btn-primary", type: "button", text: "Generate install options", on: { click: render } });
 
     openSheet("Install an agent", body, [
+      h("button", { cls: "btn", type: "button", text: "Enrollment keys", on: { click: function () { closeSheet(); openEnrollmentProfilesSheet(); } } }),
       h("button", { cls: "btn", type: "button", text: "Close", on: { click: closeSheet } }),
       renderButton
     ]);
@@ -7144,7 +6976,6 @@
     modeRunNow.addEventListener("change", updateMode);
     modeSchedule.addEventListener("change", updateMode);
 
-    var currentVersionData = null;
     var paramInputMap = {};
 
     function loadVersionSchema(vNum) {
@@ -7154,7 +6985,6 @@
 
       request("/api/v1/scripts?id=" + encodeURIComponent(script.id) + "&version=" + vNum)
         .then(function (sv) {
-          currentVersionData = sv;
           digestBadge.textContent = sv.digest_sha256 || "—";
 
           if (sv.parameter_schema_json && sv.parameter_schema_json.trim()) {
@@ -8651,7 +8481,6 @@
 
   function maintModeRun(mode, asset, how) {
     var on = how === "enforce";
-    var label = (on ? "Turn on maintenance mode for " + spanWords((mode.hours || 6) * 3600) : "Turn off maintenance mode") + " on " + asset.name;
     request("/api/v1/maintenance/run", "POST", { endpoint_ids: [asset.endpoint.id], packages: [mode.package], mode: how })
       .then(function () { toast((on ? "Turning on" : "Turning off") + " maintenance mode on " + asset.name, "ok"); loadMaintenance(asset.endpoint.id); })
       .catch(function (e) { toast("Maintenance mode not changed: " + e.message, "crit"); });
@@ -10277,7 +10106,7 @@
 
     SECTIONS.forEach(function (sec) {
       items.push({
-        group: "Go", label: "Go to " + sec.label, iconId: "i-" + sec.id,
+        group: "Go", label: "Go to " + sec.label, iconId: PALETTE_ICONS[sec.id] || "i-" + sec.id,
         hint: "section", run: function () { go(sec.id); }
       });
     });
@@ -10697,17 +10526,6 @@
   function renderTopbar() {
     updateCrumb();
 
-    var sweepDot = $("sweep-pulse-dot");
-    var sweepLabel = $("sweep-label-text");
-    var isScanning = !!(state.scanStatus && state.scanStatus.active);
-    if (sweepDot) {
-      if (isScanning) sweepDot.classList.add("scanning");
-      else sweepDot.classList.remove("scanning");
-    }
-    if (sweepLabel) {
-      sweepLabel.textContent = isScanning ? "Scanning LAN (" + (state.scanStatus.progress || 0) + "%)" : "Subnet Sweep";
-    }
-
     var actions = $("topbar-actions");
 
     if (state.section === "assets") {
@@ -10882,7 +10700,6 @@
   }
 
   function navigateSection(section) {
-    if (section === "discovery") section = "assets";
     cancelScopeReads();
     state.section = section;
     closeAllSheets();
@@ -11194,12 +11011,6 @@
     $("omni-kbd").textContent = MOD_LABEL;
     $("omni").addEventListener("click", openPalette);
 
-    var sweepBtn = $("topbar-sweep-btn");
-    if (sweepBtn) sweepBtn.addEventListener("click", openSweepModal);
-
-    var installBtn = $("topbar-install-btn");
-    if (installBtn) installBtn.addEventListener("click", function () { openInstallerSheet({ platform: "linux" }); });
-
     var avatarBtn = $("user-avatar-btn");
     if (avatarBtn) {
       var opName = state.you || OPERATOR || "admin";
@@ -11302,7 +11113,6 @@
     }
     if (READ_ONLY) {
       document.body.classList.add("read-only");
-      ["topbar-install-btn", "topbar-sweep-btn"].forEach(function (id) { var el = $(id); if (el) { el.disabled = true; el.title = "Read-only access"; } });
     }
     render();
     refresh();

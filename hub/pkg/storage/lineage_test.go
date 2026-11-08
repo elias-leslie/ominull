@@ -218,20 +218,6 @@ func TestLineageAndHashing_InsertAndQueryLifecycle(t *testing.T) {
 		t.Errorf("flow.AttributionStatus mismatch: expected %q, got %q", enrichedEvent.AttributionStatus, flow.AttributionStatus)
 	}
 
-	// 4. Query via GetTrafficFlowByID
-	singleFlow, err := store.GetTrafficFlowByID(flow.ID, tenant.ID)
-	if err != nil {
-		t.Fatalf("GetTrafficFlowByID failed: %v", err)
-	}
-	if singleFlow == nil {
-		t.Fatalf("expected single flow, got nil")
-	}
-	if singleFlow.CommandLine != enrichedEvent.CommandLine {
-		t.Errorf("singleFlow.CommandLine mismatch: expected %q, got %q", enrichedEvent.CommandLine, singleFlow.CommandLine)
-	}
-	if singleFlow.ExecutableSHA256 != enrichedEvent.ExecutableSHA256 {
-		t.Errorf("singleFlow.ExecutableSHA256 mismatch: expected %q, got %q", enrichedEvent.ExecutableSHA256, singleFlow.ExecutableSHA256)
-	}
 }
 
 func TestLineageAndHashing_IngestTelemetryBatchCompatibility(t *testing.T) {

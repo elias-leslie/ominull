@@ -55,7 +55,6 @@ func TestTenantKeyCannotReachOperatorRoutes(t *testing.T) {
 		{"release a quarantined peer", "POST", "/api/v1/mesh/unquarantine", `{"target_ip":"10.0.0.9"}`, srv.handleMeshUnquarantine},
 		{"sweep an arbitrary subnet", "POST", "/api/v1/scanner/scan", `{"subnet":"10.0.0.0/24"}`, srv.handleScannerScan},
 		{"read the discovered inventory", "GET", "/api/v1/scanner/results", "", srv.handleScannerResults},
-		{"read the whole topology", "GET", "/api/v1/topology/graph", "", srv.handleTopologyGraph},
 		{"correct an asset claim", "POST", "/api/v1/assets/correct", `{"ip":"10.0.0.9","field":"device","value":"x"}`, srv.handleAssetCorrect},
 		{"read fleet update currency", "GET", "/api/v1/agents/update-status", "", srv.handleAgentsUpdateStatus},
 	} {
@@ -511,9 +510,8 @@ func TestFailedAuthTrackingIsBounded(t *testing.T) {
 }
 
 // Nothing bounded a request body. ReadTimeout caps how long a request may take,
-// not how much it may carry, and /api/v1/auth/login reads one before any
-// credential is checked - so a single unauthenticated request could make the
-// hub buffer until it died, taking every endpoint's command channel with it.
+// not how much it may carry, so a single request could make the hub buffer until
+// it died, taking every endpoint's command channel with it.
 func TestRequestBodiesAreBounded(t *testing.T) {
 	t.Parallel()
 	var read int64
@@ -533,8 +531,8 @@ func TestRequestBodiesAreBounded(t *testing.T) {
 		size  int64
 		allow bool
 	}{
-		{"login accepts a real credential", "/api/v1/auth/login", 512, true},
-		{"login refuses a flood", "/api/v1/auth/login", maxRequestBody + 1, false},
+		{"an ordinary route accepts a real body", "/api/v1/mesh/quarantine", 512, true},
+		{"an ordinary route refuses a flood", "/api/v1/mesh/quarantine", maxRequestBody + 1, false},
 		{"telemetry accepts a large batch", "/api/v1/events", maxRequestBody + 1, true},
 		{"telemetry refuses a flood", "/api/v1/events", maxTelemetryBody + 1, false},
 	} {
@@ -576,14 +574,14 @@ func TestTopologyGraphIsCachedPerWindow(t *testing.T) {
 
 	call := func(window string) (*httptest.ResponseRecorder, string) {
 		t.Helper()
-		url := "/api/v1/topology/graph"
+		url := "/api/v1/topology/workspace"
 		if window != "" {
 			url += "?window=" + window
 		}
 		req := httptest.NewRequest("GET", url, nil)
 		req.Header.Set("X-Role", "admin")
 		w := httptest.NewRecorder()
-		srv.handleTopologyGraph(w, req)
+		srv.handleTopologyWorkspace(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("window %q: expected 200, got %d", window, w.Code)
 		}
@@ -615,10 +613,11 @@ func TestTopologyGraphIsCachedPerWindow(t *testing.T) {
 
 	// And it expires rather than pinning the first answer forever.
 	srv.topology.mu.Lock()
-	entry := srv.topology.entries["24h"]
+	key := "workspace:" + (24 * time.Hour).String()
+	entry := srv.topology.entries[key]
 	entry.computed = entry.computed.Add(-responseCacheTTL - time.Second)
 	entry.body = []byte(`{"stale":true}`)
-	srv.topology.entries["24h"] = entry
+	srv.topology.entries[key] = entry
 	srv.topology.mu.Unlock()
 
 	if _, body := call("24h"); strings.Contains(body, `"stale"`) {
