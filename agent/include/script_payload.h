@@ -22,6 +22,7 @@
 #endif
 
 #include "terminal_frame.h"
+#include "hub_input.h"
 
 #define SCRIPT_PARAM_NAME_MAX 65   /* the hub allows 64 characters */
 #define SCRIPT_PARAM_VALUE_MAX 2048
@@ -31,6 +32,7 @@ typedef struct {
     char value[SCRIPT_PARAM_VALUE_MAX];
     bool env_skip;   /* too long for an environment variable: the script reads it from the params file */
 } ScriptParam;
+_Static_assert(sizeof(ScriptParam) == 2114, "ScriptParam differs from agent/hubinput/src/abi.rs");
 
 /* Where ScriptPayload_Parse writes; the platform structs own the storage. */
 typedef struct {
@@ -44,6 +46,7 @@ typedef struct {
     int* timeout_seconds;   int timeout_max;          /* out of range keeps the default */
     size_t* max_output_bytes; size_t max_output_min; size_t max_output_max;   /* min exclusive */
 } ScriptPayloadFields;
+_Static_assert(sizeof(ScriptPayloadFields) == 168, "ScriptPayloadFields differs from agent/hubinput/src/abi.rs");
 
 /* ScriptParam_NameOK: 1-64 of [A-Za-z0-9_-] (hub scripts.paramNameRe). The name
  * becomes part of an environment variable name. */
@@ -154,6 +157,9 @@ static inline bool ScriptPayload_Params(const char* v, size_t vl, ScriptParam* p
  * (interpreter, timeout, output cap). False on any malformed, repeated or
  * oversized member, or when there is no source. */
 static inline bool ScriptPayload_Parse(const char* json, const ScriptPayloadFields* f) {
+#ifdef HI_SCRIPT
+    return hi_script_payload_parse(json, f);
+#else
     if (!json || !f) return false;
     f->script_id[0] = f->script_digest[0] = f->source[0] = f->parameters_json[0] = '\0';
     *f->script_version = 0;
@@ -216,6 +222,7 @@ static inline bool ScriptPayload_Parse(const char* json, const ScriptPayloadFiel
     }
     if (!seen[S_VER] && seen[S_LEGACY_VER]) *f->script_version = (int)legacy_version;
     return *f->source_len > 0;
+#endif
 }
 
 #endif

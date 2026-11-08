@@ -22,6 +22,7 @@
 #define HI_BASE64_CERT
 #define HI_OFFERS
 #define HI_PAYLOADS
+#define HI_SCRIPT
 #endif
 
 enum {
