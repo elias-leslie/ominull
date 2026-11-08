@@ -24,6 +24,7 @@
 #define HI_PAYLOADS
 #define HI_SCRIPT
 #define HI_TRUST
+#define HI_SCRAPE
 #endif
 
 enum {

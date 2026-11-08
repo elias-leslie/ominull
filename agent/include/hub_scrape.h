@@ -14,9 +14,13 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include "hub_input.h"
 
 /* "key":"value" with nothing between. */
 static inline bool Scrape_StringFlat(const char* json, const char* key, char* out, size_t outLen) {
+#ifdef HI_SCRAPE
+    return hi_scrape_string_flat(json, key, out, outLen);
+#else
     char needle[64];
     snprintf(needle, sizeof(needle), "\"%s\":\"", key);
     const char* p = strstr(json, needle);
@@ -28,10 +32,14 @@ static inline bool Scrape_StringFlat(const char* json, const char* key, char* ou
     }
     out[idx] = '\0';
     return idx > 0;
+#endif
 }
 
 /* "key": then spaces or tabs, then a string. */
 static inline bool Scrape_StringSpaced(const char* json, const char* key, char* out, size_t outLen) {
+#ifdef HI_SCRAPE
+    return hi_scrape_string_spaced(json, key, out, outLen);
+#else
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\":", key);
     const char* p = strstr(json, pattern);
@@ -46,10 +54,14 @@ static inline bool Scrape_StringSpaced(const char* json, const char* key, char* 
     }
     out[i] = '\0';
     return i > 0;
+#endif
 }
 
 /* The omd_ credential an enrolled endpoint receives: whole, and the right shape. */
 static inline bool Scrape_DeviceCredential(const char* json, char* out, size_t outLen) {
+#ifdef HI_SCRAPE
+    return hi_scrape_device_credential(json, out, outLen);
+#else
     const char* marker = strstr(json, "\"device_credential\":\"");
     if (!marker || outLen == 0) return false;
     marker += strlen("\"device_credential\":\"");
@@ -59,10 +71,14 @@ static inline bool Scrape_DeviceCredential(const char* json, char* out, size_t o
     memcpy(out, marker, n);
     out[n] = '\0';
     return n == 68 && strncmp(out, "omd_", 4) == 0;
+#endif
 }
 
 /* Hands each token of the flat array "key":[...] to take. */
 static inline void Scrape_AddressList(const char* json, const char* key, void (*take)(const char* ip, void* ctx), void* ctx) {
+#ifdef HI_SCRAPE
+    hi_scrape_address_list(json, key, take, ctx);
+#else
     char needle[64];
     snprintf(needle, sizeof(needle), "\"%s\":[", key);
     const char* p = strstr(json, needle);
@@ -79,6 +95,7 @@ static inline void Scrape_AddressList(const char* json, const char* key, void (*
         if (!ip[0]) continue;
         take(ip, ctx);
     }
+#endif
 }
 
 #endif
