@@ -11,8 +11,8 @@ import (
 // decoy hits, silence and return against expected presence, sweeps, threat
 // intelligence, beaconing, volume and the agent egress rules.
 //
-// Those detectors no longer write findings; this keeps the tier of the rows they
-// wrote until retention removes them.
+// The novelty detectors that fed this no longer write findings, so nothing is
+// sorted here today; the rows they wrote hold their tier in held_reason.
 var huntTypes = map[string]bool{
 	"NOVEL_DESTINATION": true,
 }

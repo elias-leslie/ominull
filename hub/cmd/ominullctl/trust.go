@@ -22,15 +22,19 @@ import (
 )
 
 const trustUsage = `usage: ominullctl trust rules
-       ominullctl trust add allow|deny VALUE --scope SCOPE [--port P] [--proto tcp|udp]
+       ominullctl trust add allow|deny VALUE --scope SCOPE [--port P --proto tcp|udp]
                  [--direction in|out] [--locked] [--expires 24h|RFC3339] [--reason TEXT]
        ominullctl trust remove RULE_ID
-       ominullctl trust show ENDPOINT [--addr A [--port P] [--proto tcp|udp] [--direction in|out]]
+       ominullctl trust show ENDPOINT [--addr A [--port P --proto tcp|udp] [--direction in|out]]
 
 VALUE is an address, a range or a name. SCOPE is provider (the whole fleet), client:ID,
 site:ID, group:ROLE_TAG or endpoint:ID; there is no default, so a rule can't reach the
-whole fleet by accident. show prints what the hub would give that machine if isolated;
-with --addr it also answers whether that one destination is trusted.
+whole fleet by accident. show prints what the hub would give that machine if isolated.
+With --addr it adds what the rules say about that destination and whether it is on that
+list: an isolated machine goes by the list, and rules naming a port, protocol or direction
+never open anything there. With --port or --proto the question is about going out unless
+--direction says otherwise; with neither, it is about the address as a whole. The hub,
+loopback and the signed baseline stay reachable whatever the rules say.
 `
 
 func (c *APIClient) cmdTrust(args []string) error {
@@ -128,6 +132,10 @@ func trustRuleFromArgs(args []string, now time.Time) (trustfabric.Rule, error) {
 		return trustfabric.Rule{}, fmt.Errorf("--scope is required\n%s", trustUsage)
 	}
 	scopeType, scopeID, _ := strings.Cut(*scope, ":")
+	// The hub would drop the id and apply the rule to the whole fleet.
+	if scopeType == trustfabric.ScopeProvider && scopeID != "" {
+		return trustfabric.Rule{}, fmt.Errorf("provider means the whole fleet and takes no id; did you mean client:%s?", scopeID)
+	}
 	rule := trustfabric.Rule{
 		ScopeType: scopeType, ScopeID: scopeID, Action: args[0], Value: args[1], Kind: trustValueKind(args[1]),
 		Port: *port, Proto: *proto, Direction: *direction, Locked: *locked, Justification: *reason,
@@ -210,6 +218,23 @@ func trustRuleFlags(r trustfabric.Rule) string {
 	return strings.Join(parts, ", ")
 }
 
+// trustListHolds says whether an address is on the list, as itself or inside a range.
+func trustListHolds(list []string, addr string) bool {
+	target, err := netip.ParseAddr(addr)
+	if err != nil {
+		return false
+	}
+	for _, item := range list {
+		if a, err := netip.ParseAddr(item); err == nil && a == target {
+			return true
+		}
+		if p, err := netip.ParsePrefix(item); err == nil && p.Contains(target) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *APIClient) trustShow(args []string) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return errors.New(trustUsage)
@@ -229,8 +254,16 @@ func (c *APIClient) trustShow(args []string) error {
 	if *addr == "" && (*port != "" || *proto != "" || *direction != "") {
 		return fmt.Errorf("--port, --proto and --direction need --addr\n%s", trustUsage)
 	}
+	// The hub only matches a rule naming a port, protocol or direction when the question
+	// names them too, so a half-asked question would read as a deny.
+	if *port != "" && *proto == "" {
+		return fmt.Errorf("--port needs --proto\n%s", trustUsage)
+	}
+	if (*port != "" || *proto != "") && *direction == "" {
+		*direction = trustfabric.DirOut
+	}
 	query := url.Values{"endpoint_id": {args[0]}}
-	for key, value := range map[string]string{"addr": *addr, "port": *port, "proto": *proto, "direction": *direction} {
+	for key, value := range map[string]string{"addr": *addr, "port": *port, "proto": strings.ToLower(*proto), "direction": strings.ToLower(*direction)} {
 		if value != "" {
 			query.Set(key, value)
 		}
@@ -257,7 +290,15 @@ func (c *APIClient) trustShow(args []string) error {
 		return fmt.Errorf("the hub's answer could not be read: %w", err)
 	}
 	if out.Decision != nil {
-		fmt.Printf("%s: %s (%s)\n", *addr, out.Decision.Action, out.Decision.Basis)
+		because := out.Decision.Basis
+		if out.Decision.RuleID != "" {
+			because += ", rule " + out.Decision.RuleID + " at " + out.Decision.Scope
+		}
+		onList := "no"
+		if trustListHolds(out.Policy.Enforced, *addr) {
+			onList = "yes"
+		}
+		fmt.Printf("%s: the rules say %s (%s); on the isolated allow list: %s\n", *addr, out.Decision.Action, because, onList)
 	}
 	printTrustList := func(label string, items []string) {
 		if len(items) == 0 {
@@ -267,8 +308,19 @@ func (c *APIClient) trustShow(args []string) error {
 	}
 	printTrustList("Rules allow", out.Policy.Allow)
 	printTrustList("Agent would enforce", out.Policy.Enforced)
-	if len(out.Policy.NotEnforced) > 0 {
-		printTrustList("Doesn't fit, stays closed", out.Policy.NotEnforced)
+	// The hub also lists each withheld rule's reason here; those print below.
+	var unfit []string
+	for _, item := range out.Policy.NotEnforced {
+		withheld := false
+		for _, w := range out.Policy.Withheld {
+			withheld = withheld || w.Reason == item
+		}
+		if !withheld {
+			unfit = append(unfit, item)
+		}
+	}
+	if len(unfit) > 0 {
+		printTrustList("Doesn't fit, stays closed", unfit)
 	}
 	for _, w := range out.Policy.Withheld {
 		fmt.Printf("Opened nothing: rule %s: %s\n", w.RuleID, w.Reason)

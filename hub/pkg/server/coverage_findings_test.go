@@ -37,7 +37,7 @@ func TestJudgeDomainFeeds(t *testing.T) {
 		{"a first failure after a long good run is weather", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", &old, &recent, "HTTP 503", false)},
 			ocsfSevInformational, "using its last good copy: b"},
 		{"a first fetch failing right after a restart is weather", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", nil, &recent, "HTTP 503", false)},
-			ocsfSevInformational, "failed its first fetch and will retry: b"},
+			ocsfSevInformational, "aren't checked; retrying: b"},
 		{"no key", feeds, []threatintel.DomainFeedStatus{failing("a", nil, &old, "no key", true), failing("b", nil, &old, "no key", true)},
 			ocsfSevLow, "abuse.ch key"},
 		{"a key lost after a good fetch still has its copy", feeds, []threatintel.DomainFeedStatus{good("a"), failing("b", &recent, &recent, "no key", true)},
@@ -62,6 +62,37 @@ func TestJudgeDomainFeeds(t *testing.T) {
 		if raised := severity > ocsfSevInformational; raised != (status == ocsfStatusNew) {
 			t.Errorf("%s: severity %d with status %d", c.name, severity, status)
 		}
+	}
+}
+
+// A restart forgets a list's failures in memory; the count of how long it has failed
+// carries on, so a hub restarted daily still says when a list stays down.
+func TestDomainFeedFailureCountSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	srv, store := setupTestServer(t)
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	first, restarted := now.Add(-30*time.Hour), now.Add(-time.Hour)
+	failing := func(since time.Time) []threatintel.DomainFeedStatus {
+		return []threatintel.DomainFeedStatus{{Name: "b", Error: "HTTP 503", FailingSince: &since}}
+	}
+	if got := srv.domainFeedFailures(failing(first), first); !got[0].FailingSince.Equal(first) {
+		t.Fatalf("first failure: %v", got[0].FailingSince)
+	}
+	got := srv.domainFeedFailures(failing(restarted), now)
+	if !got[0].FailingSince.Equal(first) {
+		t.Fatalf("a restart restarted the count: %v", got[0].FailingSince)
+	}
+	feeds := []storage.DomainIntelFeed{{Name: "b"}}
+	if severity, _, _ := judgeDomainFeeds(feeds, got, now, 24*time.Hour); severity != ocsfSevMedium {
+		t.Fatalf("a list down for 30 h across a restart graded %d", severity)
+	}
+	fetched := now
+	if good := srv.domainFeedFailures([]threatintel.DomainFeedStatus{{Name: "b", FetchedAt: &fetched}}, now); good[0].FailingSince != nil {
+		t.Fatalf("a good fetch kept a failure time: %+v", good[0])
+	}
+	if got := srv.domainFeedFailures(failing(now), now); !got[0].FailingSince.Equal(now) {
+		t.Fatalf("a good fetch didn't end the count: %v", got[0].FailingSince)
 	}
 }
 

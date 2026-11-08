@@ -2,7 +2,7 @@
 
 Some machines must not take orders from the hub alone: the workstation and the Proxmox host. On them an
 administrator sets a lock level (capability ceiling) at the host, and may pin a **host authority**: Ed25519 keys
-held outside OmniNull (Nightshift's). Where a host authority is pinned, scripts run only on grants it signed (under any level); the
+held outside OmniNull. Where a host authority is pinned, scripts run only on grants it signed (under any level); the
 hub carries those grants and never signs them.
 
 Since 2026-10-24 the hub signs ordinary hub actions on the first request, with no owner approval
@@ -12,8 +12,8 @@ what they forbid even when the response key signed it.
 
 Current state (2026-11-08): the workstation and the Proxmox host pin keys, but the signer retired with Nightshift, so no
 script grant can reach them. Each pin now works as a lock on script jobs only: the hub can't run those there, and they run
-by hand as root (`scripts/posture-collect.sh` does for the baseline). Everything else still verifies against the response
-key, so only the lock level limits it: at `engagement` the workstation still takes hub-signed terminal sessions and
+as root outside it (the daily `scripts/posture-collect.sh` does for the baseline). Other hub-signed actions still verify
+against the response key, so only the lock level limits them: at `engagement` the workstation still takes terminal sessions and
 `ominullctl exec`. The pins stay on purpose. Removing one on the workstation would hand the hub script rights on it too.
 
 Agents from 1.8.81 implement everything here. Code: `agent/include/agent_trust.h` (ceilings, host files, offer
@@ -30,11 +30,11 @@ the ceiling. An unknown level is refused (exit 1) and nothing is written; an unr
 | Level | Allows | Use |
 |---|---|---|
 | `monitor` | agent updates | hosts that must never be cut off |
-| `isolate` | isolation, mesh quarantine, evidence collection, updates | the workstation |
-| `signed-scripts` | `isolate` plus scripts, and scripts only while a host-authority key is pinned | the workstation with Nightshift-signed upkeep |
-| `monitor-signed-scripts` | evidence collection, updates, and scripts only while a host-authority key is pinned; no isolation | a hypervisor with Nightshift-signed upkeep (isolating it would cut its management and leave its guests running) |
+| `isolate` | isolation, mesh quarantine, evidence collection, updates | |
+| `signed-scripts` | `isolate` plus scripts, and scripts only while a host-authority key is pinned | a machine with a signer (none exists now) |
+| `monitor-signed-scripts` | evidence collection, updates, and scripts only while a host-authority key is pinned; no isolation | a hypervisor with a signer (none exists now; isolating it would cut its management and leave its guests running) |
 | `respond` | everything except scripts | |
-| `engagement` | everything | |
+| `engagement` | everything | the workstation |
 
 Terminal and remote screen are refused by the agent under `monitor`, `isolate`, `signed-scripts` and
 `monitor-signed-scripts`. The hub refuses those requests itself, from the machine's latest trust report, before the

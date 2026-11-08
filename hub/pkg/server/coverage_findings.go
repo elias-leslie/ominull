@@ -1,7 +1,9 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +22,9 @@ const (
 	domainFeedStaleHoursSetting = "domain_feed_stale_hours"
 	domainFeedStaleHoursDefault = 24
 	domainFeedStaleHoursMax     = 720
+	// domainFeedFailingSetting holds each failing list's first failure, so a restart
+	// doesn't restart the count. A hub restarted daily would otherwise never say.
+	domainFeedFailingSetting = "domain_feed_failing_since"
 )
 
 func (s *Server) domainFeedStale() time.Duration {
@@ -35,11 +40,46 @@ func (s *Server) domainFeedStale() time.Duration {
 func (s *Server) domainFeedFinding(now time.Time) feedFinding {
 	var statuses []threatintel.DomainFeedStatus
 	if s.ti != nil {
-		statuses = s.ti.DomainFeedStatuses()
+		statuses = s.domainFeedFailures(s.ti.DomainFeedStatuses(), now)
 	}
 	severity, status, message := judgeDomainFeeds(s.domainIntelFeeds(), statuses, now, s.domainFeedStale())
 	return s.feedFinding(now, "ominull.threatintel.domain_feeds", "Bad-domain lists", severity, status, message,
 		nil, map[string]any{"feeds": statuses})
+}
+
+// domainFeedFailures gives each failing list its earliest known first failure and
+// keeps that record for the next hub run.
+func (s *Server) domainFeedFailures(statuses []threatintel.DomainFeedStatus, now time.Time) []threatintel.DomainFeedStatus {
+	raw, _ := s.store.GetSetting(domainFeedFailingSetting)
+	saved := map[string]time.Time{}
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+			log.Printf("[-] %s: %v", domainFeedFailingSetting, err)
+		}
+	}
+	next := make(map[string]time.Time, len(saved))
+	out := make([]threatintel.DomainFeedStatus, len(statuses))
+	for i, st := range statuses {
+		out[i] = st
+		if st.Error == "" {
+			continue
+		}
+		since := now
+		if st.FailingSince != nil {
+			since = *st.FailingSince
+		}
+		if first, ok := saved[st.Name]; ok && first.Before(since) {
+			since = first
+		}
+		next[st.Name] = since
+		out[i].FailingSince = &since
+	}
+	if encoded, err := json.Marshal(next); err == nil && string(encoded) != raw && !(raw == "" && len(next) == 0) {
+		if err := s.store.SetSetting(domainFeedFailingSetting, string(encoded)); err != nil {
+			log.Printf("[-] %s: %v", domainFeedFailingSetting, err)
+		}
+	}
+	return out
 }
 
 // judgeDomainFeeds grades the listed feeds. A list that never loaded for want of a key
@@ -86,7 +126,7 @@ func judgeDomainFeeds(feeds []storage.DomainIntelFeed, statuses []threatintel.Do
 		return ocsfSevInformational, ocsfStatusResolved, fmt.Sprintf("%s failed its last fetch and is using its last good copy: %s",
 			plural(len(wobbling), "bad-domain list", "bad-domain lists"), strings.Join(wobbling, ", "))
 	case len(retrying) > 0:
-		return ocsfSevInformational, ocsfStatusResolved, fmt.Sprintf("%s failed its first fetch and will retry: %s",
+		return ocsfSevInformational, ocsfStatusResolved, fmt.Sprintf("%s not loaded yet, so those names aren't checked; retrying: %s",
 			plural(len(retrying), "bad-domain list", "bad-domain lists"), strings.Join(retrying, ", "))
 	case pending > 0:
 		return ocsfSevInformational, ocsfStatusResolved, fmt.Sprintf("%s still loading", plural(pending, "bad-domain list", "bad-domain lists"))

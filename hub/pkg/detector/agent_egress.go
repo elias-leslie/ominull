@@ -29,7 +29,8 @@ import (
 // number under ~/.local/share/claude/versions/). For agent_baseline_days a runtime's
 // destinations are learned. After that a destination it never reached is
 // remembered and writes nothing on its own, whoever hosts it, because agents read the
-// web for a living. It is written, as AGENT_NEW_DESTINATION (HIGH), only when the runtime sends 1 MB or more there within an hour of first reaching it, once,
+// web for a living. It is written, as AGENT_NEW_DESTINATION (HIGH), only when the runtime sends past the new-place line there (by default 1 MB within
+// an hour of first reaching it), once,
 // when the total crosses the line (a connection's first report carries no bytes on
 // Linux). An hour above max(agent_upload_floor_mb, agent_upload_factor x its 14-day
 // 95th-percentile hour) is AGENT_UPLOAD_VOLUME; a runtime or interpreter resolving

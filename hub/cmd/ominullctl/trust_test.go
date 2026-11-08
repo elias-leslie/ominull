@@ -49,6 +49,7 @@ func TestTrustRuleFromArgs(t *testing.T) {
 		"allow 10.0.0.5 --scope provider --expires 2x": "--expires takes",
 		"allow 10.0.0.5 --scope provider --port x":     "--port",
 		"allow 10.0.0.5 --scope provider --nope":       "nope",
+		"allow 10.0.0.5 --scope provider:t-01":         "did you mean client:t-01",
 	} {
 		if _, err := trustRuleFromArgs(strings.Fields(args), now); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: want error with %q, got %v", args, want, err)
@@ -94,6 +95,10 @@ func TestTrustCommandsTalkToTheHub(t *testing.T) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			if _, err := trustfabric.Normalize(posted); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(posted)
 		case r.URL.Path == "/api/v1/trust/rules" && r.Method == http.MethodDelete:
@@ -101,7 +106,7 @@ func TestTrustCommandsTalkToTheHub(t *testing.T) {
 			_, _ = w.Write([]byte(`{"status":"deleted","rule":{"id":"r-1","scope_type":"provider","value":"10.0.0.5","action":"allow"}}`))
 		case r.URL.Path == "/api/v1/trust/effective":
 			effective = r.URL.RawQuery
-			_, _ = w.Write([]byte(`{"endpoint_id":"ep-1","agent_report":"dropped 1 range","decision":{"action":"allow","basis":"rule"},"policy":{"allow":["10.0.0.5/32"],"enforced":["10.0.0.5"],"not_enforced":["10.0.1.0/24"],"withheld":[{"rule_id":"r-2","reason":"names a port"}]}}`))
+			_, _ = w.Write([]byte(`{"endpoint_id":"ep-1","agent_report":"dropped 1 range","decision":{"action":"allow","basis":"most_specific","rule_id":"r-1","scope":"client"},"policy":{"allow":["10.0.0.0/30"],"enforced":["10.0.0.0/30"],"not_enforced":["10.0.1.0/24","names a port"],"withheld":[{"rule_id":"r-2","reason":"names a port"}]}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -116,7 +121,7 @@ func TestTrustCommandsTalkToTheHub(t *testing.T) {
 		}
 	}
 	out = captureStdout(t, func() error {
-		return c.cmdTrust(strings.Fields("add allow updates.example.com --scope group:pos --port 443"))
+		return c.cmdTrust(strings.Fields("add allow updates.example.com --scope group:pos --port 443 --proto tcp"))
 	})
 	if posted.Kind != trustfabric.KindFQDN || posted.ScopeID != "pos" || posted.Port != 443 || !strings.Contains(out, "updates.example.com") {
 		t.Errorf("add sent %+v, printed %s", posted, out)
@@ -126,17 +131,25 @@ func TestTrustCommandsTalkToTheHub(t *testing.T) {
 		t.Errorf("remove sent %q, printed %s", deleted, out)
 	}
 	out = captureStdout(t, func() error {
-		return c.cmdTrust(strings.Fields("show ep-1 --addr 10.0.0.5 --port 443"))
+		return c.cmdTrust(strings.Fields("show ep-1 --addr 10.0.0.2 --port 443 --proto TCP"))
 	})
-	if effective != "addr=10.0.0.5&endpoint_id=ep-1&port=443" {
+	if effective != "addr=10.0.0.2&direction=out&endpoint_id=ep-1&port=443&proto=tcp" {
 		t.Errorf("show asked %q", effective)
 	}
-	for _, want := range []string{"10.0.0.5: allow (rule)", "Agent would enforce: 10.0.0.5", "Doesn't fit, stays closed: 10.0.1.0/24", "rule r-2: names a port", "Agent's last report: dropped 1 range"} {
+	for _, want := range []string{"10.0.0.2: the rules say allow (most_specific, rule r-1 at client); on the isolated allow list: yes", "Agent would enforce: 10.0.0.0/30", "Doesn't fit, stays closed: 10.0.1.0/24\n", "rule r-2: names a port", "Agent's last report: dropped 1 range"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show output lacks %q: %s", want, out)
 		}
 	}
-	if err := c.cmdTrust(strings.Fields("show ep-1 --port 443")); err == nil {
-		t.Error("show --port without --addr was accepted")
+	if out = captureStdout(t, func() error { return c.cmdTrust(strings.Fields("show ep-1 --addr 192.0.2.1")) }); !strings.Contains(out, "allow list: no") {
+		t.Errorf("an address off the list: %s", out)
+	}
+	if effective != "addr=192.0.2.1&endpoint_id=ep-1" {
+		t.Errorf("a question about the whole address asked %q", effective)
+	}
+	for _, args := range []string{"show ep-1 --port 443 --proto tcp", "show ep-1 --addr 10.0.0.5 --port 443"} {
+		if err := c.cmdTrust(strings.Fields(args)); err == nil {
+			t.Errorf("%s was accepted", args)
+		}
 	}
 }
