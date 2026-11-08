@@ -45,6 +45,68 @@ static ULONG FixtureAdapters(ULONG family, ULONG flags, PVOID reserved,
     return NO_ERROR;
 }
 #define GetAdaptersAddresses FixtureAdapters
+#include <winhttp.h>
+/* The WinHTTP session remembers what a name resolved to, so a failed request has to
+ * cost it the session or a hub that moved stays lost until that memory runs out.
+ * Stand-ins just count that. */
+static int sessionsOpened, sessionsClosed;
+static BOOL sendWorks, requestOpens = TRUE;
+#define FIXTURE_SESSION ((HINTERNET)(uintptr_t)1)
+#define FIXTURE_OTHER ((HINTERNET)(uintptr_t)2)
+static HINTERNET FixtureOpen(LPCWSTR a, DWORD b, LPCWSTR c, LPCWSTR d, DWORD e) {
+    (void)a; (void)b; (void)c; (void)d; (void)e;
+    sessionsOpened++;
+    return FIXTURE_SESSION;
+}
+static BOOL FixtureSetTimeouts(HINTERNET h, int a, int b, int c, int d) {
+    (void)h; (void)a; (void)b; (void)c; (void)d;
+    return TRUE;
+}
+static HINTERNET FixtureConnect(HINTERNET h, LPCWSTR a, INTERNET_PORT b, DWORD c) {
+    (void)h; (void)a; (void)b; (void)c;
+    return FIXTURE_OTHER;
+}
+static HINTERNET FixtureOpenRequest(HINTERNET h, LPCWSTR a, LPCWSTR b, LPCWSTR c, LPCWSTR d, LPCWSTR *e, DWORD f) {
+    (void)h; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+    return requestOpens ? FIXTURE_OTHER : NULL;
+}
+static BOOL FixtureAddHeaders(HINTERNET h, LPCWSTR a, DWORD b, DWORD c) {
+    (void)h; (void)a; (void)b; (void)c;
+    return TRUE;
+}
+static BOOL FixtureSend(HINTERNET h, LPCWSTR a, DWORD b, LPVOID c, DWORD d, DWORD e, DWORD_PTR f) {
+    (void)h; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+    SetLastError(ERROR_WINHTTP_CANNOT_CONNECT);
+    return sendWorks;
+}
+static BOOL FixtureReceive(HINTERNET h, LPVOID a) {
+    (void)h; (void)a;
+    return TRUE;
+}
+static BOOL FixtureHeaders(HINTERNET h, DWORD a, LPCWSTR b, LPVOID out, LPDWORD c, LPDWORD d) {
+    (void)h; (void)a; (void)b; (void)c; (void)d;
+    *(DWORD *)out = 200;
+    return TRUE;
+}
+static BOOL FixtureAvailable(HINTERNET h, LPDWORD out) {
+    (void)h;
+    *out = 0;
+    return TRUE;
+}
+static BOOL FixtureClose(HINTERNET h) {
+    if (h == FIXTURE_SESSION) sessionsClosed++;
+    return TRUE;
+}
+#define WinHttpOpen FixtureOpen
+#define WinHttpSetTimeouts FixtureSetTimeouts
+#define WinHttpConnect FixtureConnect
+#define WinHttpOpenRequest FixtureOpenRequest
+#define WinHttpAddRequestHeaders FixtureAddHeaders
+#define WinHttpSendRequest FixtureSend
+#define WinHttpReceiveResponse FixtureReceive
+#define WinHttpQueryHeaders FixtureHeaders
+#define WinHttpQueryDataAvailable FixtureAvailable
+#define WinHttpCloseHandle FixtureClose
 #include "../src/hub_client.c"
 int main(void) {
     WSADATA data;
@@ -61,6 +123,37 @@ int main(void) {
     if (strcmp(ip, "2001:db8::abcd") || strcmp(mac, "02:00:00:00:00:01")) {
         puts("IPv6-only adapter identity missing");
         failures++;
+    }
+    static AGENT_CONFIG config;
+    snprintf(config.hub_url, sizeof(config.hub_url), "http://hub.example:9443");
+    config.allow_plaintext = true;
+    for (int path = 0; path < 2; path++) {
+        for (int failure = 0; failure < 2; failure++) {
+            HubHTTPEnter();
+            HubHTTPDropSession();
+            LeaveCriticalSection(&g_http.lock);
+            int opened = sessionsOpened = 0, closed = sessionsClosed = 0;
+            sendWorks = requestOpens = TRUE;
+            DWORD status;
+            #define FIXTURE_REQUEST() (path ? (void)Hub_PostPathData(&config, "/x", "text/plain", "{}", 2, NULL, 0) \
+                                            : (void)HubPostTelemetryBody(&config, "{}", 2, false, false, NULL, 0, &status))
+            FIXTURE_REQUEST();
+            FIXTURE_REQUEST();
+            if (sessionsOpened != opened + 1) {
+                printf("Path %d: requests that work should share a session; opened %d\n", path, sessionsOpened);
+                failures++;
+            }
+            if (failure) requestOpens = FALSE;
+            else sendWorks = FALSE;
+            FIXTURE_REQUEST();
+            FIXTURE_REQUEST();
+            /* One close for each session the failures opened and dropped. */
+            if (sessionsOpened != opened + 2 || sessionsClosed != closed + 2) {
+                printf("Path %d, failure %d: a failed request should close its session, or finding a moved "
+                       "hub waits; opened %d, closed %d\n", path, failure, sessionsOpened, sessionsClosed);
+                failures++;
+            }
+        }
     }
     printf("Primary adapter failures: %d\n", failures);
     return failures ? 1 : 0;

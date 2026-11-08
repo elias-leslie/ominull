@@ -62,6 +62,18 @@ static void HubHTTPDropConnection(void) {
     g_http.isHttps = FALSE;
 }
 
+/* WinHTTP keeps sockets and the address a name resolved to per session, not per
+ * connection handle, so a failed request drops the session too: the next one looks the
+ * hub up again. Left in place, a hub that moved stayed lost for several minutes on real
+ * Windows, with the right address already in DNS and in an isolated machine's filters. */
+static void HubHTTPDropSession(void) {
+    HubHTTPDropConnection();
+    if (g_http.session) {
+        WinHttpCloseHandle(g_http.session);
+        g_http.session = NULL;
+    }
+}
+
 static bool HubHTTPPrepare(const WCHAR* host, WORD port, BOOL isHttps) {
     if (!g_http.session) {
         g_http.session = WinHttpOpen(L"OminullAgent/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -596,7 +608,7 @@ static bool HubPostTelemetryBody(const AGENT_CONFIG* config, const void* body, s
     );
 
     if (!hRequest) {
-        HubHTTPDropConnection();
+        HubHTTPDropSession();
         LeaveCriticalSection(&g_http.lock);
         return false;
     }
@@ -716,7 +728,7 @@ static bool HubPostTelemetryBody(const AGENT_CONFIG* config, const void* body, s
 
     WinHttpCloseHandle(hRequest);
     if (!bResults) {
-        HubHTTPDropConnection();
+        HubHTTPDropSession();
     }
     LeaveCriticalSection(&g_http.lock);
 
@@ -850,7 +862,7 @@ bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const cha
     );
 
     if (!hRequest) {
-        HubHTTPDropConnection();
+        HubHTTPDropSession();
         LeaveCriticalSection(&g_http.lock);
         return false;
     }
@@ -917,7 +929,7 @@ bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const cha
 
     WinHttpCloseHandle(hRequest);
     if (!bResults) {
-        HubHTTPDropConnection();
+        HubHTTPDropSession();
     }
     LeaveCriticalSection(&g_http.lock);
 
@@ -926,13 +938,7 @@ bool Hub_PostPathData(const AGENT_CONFIG* config, const char* apiPath, const cha
 
 void Hub_ResetConnections(void) {
     if (!HubHTTPEnter()) return;
-    HubHTTPDropConnection();
-    /* WinHTTP pools sockets per session, so the session goes too; the next
-     * request opens a new one and handshakes again. */
-    if (g_http.session) {
-        WinHttpCloseHandle(g_http.session);
-        g_http.session = NULL;
-    }
+    HubHTTPDropSession();
     LeaveCriticalSection(&g_http.lock);
 }
 

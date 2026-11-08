@@ -28,4 +28,11 @@ x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Iagent/include \
     agent/tests/test_windows_adapter.c agent/src/hub_tls.c agent/src/trust_windows.c -o build/test_windows_adapter.exe \
     -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Iagent/include \
+    agent/tests/test_windows_cert_fallback.c agent/src/trust_windows.c -o build/test_windows_cert_fallback.exe \
+    -lws2_32 -lwinhttp -liphlpapi -ladvapi32 -lbcrypt -lcrypt32 -lncrypt
+if command -v wine >/dev/null 2>&1; then
+    WINEDEBUG=-all wine build/test_windows_adapter.exe
+    WINEDEBUG=-all wine build/test_windows_cert_fallback.exe
+fi
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Iagent/include \
     agent/tests/test_wfp_ipv6_live.c -o build/test_wfp_ipv6_live.exe -lws2_32 -lfwpuclnt -liphlpapi

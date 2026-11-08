@@ -107,6 +107,18 @@ The rules outlive the agent. After a restart it recognises the isolation from it
 own rules and keeps it. When the dead-man timer lifts an isolation it removes only
 the default deny, so a block on a peer stays where it was.
 
+A hub that changes address while a machine is isolated is followed. While the hub
+isn't answering, the agent looks its name up again and adds any new address beside
+the old, on the hub's TCP port only, below the blocks, and closed to other programs
+(on Linux, programs not running as the agent's user, root; on Windows, any other
+program). It stays that way through this isolation, since a lookup alone could come
+from whoever is keeping the hub quiet; the next policy change rebuilds from a fresh
+lookup, as any apply does. This needs rules this run of the agent built and a name it
+can look up, which under isolation means a resolver in the baseline; after a restart,
+or with no resolver, the dead-man timer still decides. With no resolver, an agent
+enrolled by name also can't reconnect after a hub restart once its DNS cache runs out.
+An agent enrolled against an IP has no name to look up, so it has nothing to follow.
+
 ### Names
 
 An `fqdn` rule names one host exactly, with no wildcards, and can only allow: a

@@ -5,7 +5,7 @@ Ominull is an endpoint telemetry, detection and containment hub for operators ma
 ## Next
 - M8 rest: confirm the abuse.ch ThreatFox and URLhaus feeds load once the owner puts an abuse.ch Auth-Key in /etc/ominull/abusech.key on the hub (asked in Aico); decoys, decoy names and planted credentials are live (plan: docs/audit-2026-11-06.md)
 - M12: Go Linux agent only with remote-admin parity, if the owner still wants the rewrite (asked in Aico) (plan: docs/audit-2026-11-06.md)
-- Trust fabric leftovers: never run yet: the live IPv6 rig `test_wfp_ipv6_live.exe` on real Windows, and waiting out a real dead-man timer on either platform (plan: docs/TRUST_FABRIC.md)
+- Trust fabric leftovers: never run yet: the live IPv6 rig `test_wfp_ipv6_live.exe` on real Windows, and waiting out a real dead-man timer on either platform. The dead-man counts beats, not time, so a slow beat or a silent resolver stretches it. Moved-hub following on real Windows was proven with a hosts-file answer, not through a resolver in the baseline (plan: docs/TRUST_FABRIC.md)
 ## Later
 - Evaluate BloodHound CE and OpenGraph, then build the AI weak-point finder
 - Household: back up the router and repair the approved parental, DNS and Ominull config; then IoT segmentation and DNS filtering (vault proposal direction-2026-10)

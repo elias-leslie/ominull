@@ -31,7 +31,7 @@ foreach ($Event in $Batch.events) {
     }
 }
 Write-Output 'Windows serializer: 64 records with preserved long fields and controls.'
-foreach ($Fixture in @('test_agent_trust', 'test_windows_ipv6_json', 'test_windows_adapter', 'test_wfp_transaction')) {
+foreach ($Fixture in @('test_agent_trust', 'test_windows_ipv6_json', 'test_windows_adapter', 'test_windows_cert_fallback', 'test_wfp_transaction')) {
     & (Join-Path $Build "$Fixture.exe")
     if ($LASTEXITCODE -ne 0) {
         throw "$Fixture failed: $LASTEXITCODE"

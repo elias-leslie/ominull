@@ -416,6 +416,21 @@ static PCCERT_CONTEXT LoadClientCertFromPFX(const char* pfxPath) {
     return out;
 }
 
+/* What WinHTTP says about the handshake that just failed, read by
+ * Hub_RetryWithoutClientCert. Every failure overwrites it, so a stale answer can't
+ * outlive the next handshake. */
+static volatile LONG g_serverCertFailed;
+
+static VOID CALLBACK NoteSecureFailure(HINTERNET handle, DWORD_PTR context, DWORD status, LPVOID info, DWORD infoLen) {
+    (void)handle;
+    (void)context;
+    if (status != WINHTTP_CALLBACK_STATUS_SECURE_FAILURE || !info || infoLen < sizeof(DWORD)) return;
+    const DWORD server = WINHTTP_CALLBACK_STATUS_FLAG_CERT_REV_FAILED | WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CERT |
+                         WINHTTP_CALLBACK_STATUS_FLAG_CERT_REVOKED | WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CA |
+                         WINHTTP_CALLBACK_STATUS_FLAG_CERT_CN_INVALID | WINHTTP_CALLBACK_STATUS_FLAG_CERT_DATE_INVALID;
+    InterlockedExchange(&g_serverCertFailed, (*(DWORD*)info & server) ? 1 : 0);
+}
+
 /* Hub_AttachClientCert gives the request this endpoint's certificate when one
  * has been issued. It is deliberately not fatal when there is none: an endpoint
  * enrolled before certificates existed, or one whose enrolment was interrupted,
@@ -462,6 +477,8 @@ static bool g_certUnusable = false;
 bool Hub_AttachClientCert(void* hRequest, const AGENT_CONFIG* config) {
     static DWORD lastAttempt = 0;
     static bool complained = false;
+
+    WinHttpSetStatusCallback((HINTERNET)hRequest, NoteSecureFailure, WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, 0);
 
     if (!Hub_UsesTLS(config) || !config->client_pfx_path[0] || g_certUnusable) {
         DeclareNoClientCert((HINTERNET)hRequest);
@@ -532,6 +549,10 @@ bool Hub_RetryWithoutClientCert(void* hRequest, unsigned long err) {
     }
 
     if (err == ERROR_WINHTTP_SECURE_FAILURE && g_cached) {
+        /* The server's certificate failed, so this one is not at fault: whoever answered
+         * isn't the hub. A lying name server would otherwise cost the endpoint its
+         * identity for the rest of this run. */
+        if (InterlockedExchange(&g_serverCertFailed, 0)) return false;
         fprintf(stderr, "[!] The client certificate this endpoint holds cannot complete a TLS "
                         "handshake (WinHTTP error %lu); dropping it and reporting under the API "
                         "key alone. Re-run enrolment to replace it.\n", err);
